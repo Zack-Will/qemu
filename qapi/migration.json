@@ -201,6 +201,134 @@
   'data': {'transferred': 'int' } }
 
 ##
+# @CXLMigrationStats:
+#
+# Experimental statistics for CXL mapped-ram backing and
+# write-redirect.
+#
+# @active: whether write-redirect is currently active on the source
+#
+# @align: backing device alignment in bytes
+#
+# @remap-granule: logical remap granule in bytes; it is always a
+#     multiple of @align
+#
+# @total-regions: number of logical remap regions covering guest RAM
+#
+# @remapped-regions: number of regions currently remapped to CXL
+#
+# @remap-attempts: number of region remap attempts
+#
+# @remap-successes: number of successful region remaps
+#
+# @remap-failures: number of failed region remaps
+#
+# @skip-out-of-range: number of remap skips because the region
+#     index falls outside tracked guest RAM
+#
+# @skip-already-remapped: number of remap skips because the region
+#     had already been remapped to CXL
+#
+# @skip-misaligned: number of remap skips because the write offset
+#     was not aligned to a whole DAX remap region
+#
+# @skip-partial-region: number of remap skips because the write
+#     covered only part of a DAX remap region in the RAMBlock
+#
+# @skip-not-fully-migrated: number of remap skips because not all
+#     pages in the region had reached CXL yet
+#
+# @dirty-clear-calls: number of dirty-bitmap cleanup passes
+#     over remapped regions
+#
+# @dirty-cleared-pages: number of guest pages whose dirty bits
+#     were cleared because the source region had already been
+#     remapped to CXL
+#
+# @backing-write-calls: number of page-copy write calls issued to
+#     the CXL backing channel
+#
+# @backing-write-bytes: number of bytes written to the CXL backing
+#     channel by the migration thread
+#
+# @backing-write-time-ns: cumulative nanoseconds spent in backing
+#     channel writes
+#
+# @migrated-bitmap-time-ns: cumulative nanoseconds spent marking
+#     pages as already copied to CXL
+#
+# @remap-scan-calls: number of remap-range scans triggered after
+#     backing writes
+#
+# @remap-scan-time-ns: cumulative nanoseconds spent scanning covered
+#     ranges for remap candidates
+#
+# @remap-page-check-calls: number of "all pages migrated?" region
+#     checks executed before attempting remap
+#
+# @remap-page-check-time-ns: cumulative nanoseconds spent checking
+#     whether all pages in a region had already reached CXL
+#
+# @remap-syscall-time-ns: cumulative nanoseconds spent inside the
+#     `mmap(MAP_FIXED)` remap syscall
+#
+# @remap-copy-bytes: total bytes copied back into the shared backing
+#     while the source guest was paused immediately before remap
+#
+# @remap-copy-time-ns: cumulative nanoseconds spent refreshing backing
+#     contents immediately before remap
+#
+# @remap-pause-calls: number of short source-guest pauses taken to
+#     refresh backing contents and install remaps safely
+#
+# @remap-pause-time-ns: cumulative nanoseconds spent with the source
+#     guest paused for safe remap installation
+#
+# @dirty-sync-calls: number of dirty-log sync passes timed while CXL
+#     mapped-ram backing was enabled
+#
+# @dirty-sync-time-ns: cumulative nanoseconds spent in
+#     `memory_global_dirty_log_sync()`
+#
+# @dirty-clear-time-ns: cumulative nanoseconds spent clearing dirty
+#     bits for already-remapped pages
+#
+# Since: 11.0
+##
+{ 'struct': 'CXLMigrationStats',
+  'data': { 'active': 'bool',
+            'align': 'uint64',
+            'remap-granule': 'uint64',
+            'total-regions': 'uint64',
+            'remapped-regions': 'uint64',
+            'remap-attempts': 'uint64',
+            'remap-successes': 'uint64',
+            'remap-failures': 'uint64',
+            'skip-out-of-range': 'uint64',
+            'skip-already-remapped': 'uint64',
+            'skip-misaligned': 'uint64',
+            'skip-partial-region': 'uint64',
+            'skip-not-fully-migrated': 'uint64',
+            'dirty-clear-calls': 'uint64',
+            'dirty-cleared-pages': 'uint64',
+            'backing-write-calls': 'uint64',
+            'backing-write-bytes': 'uint64',
+            'backing-write-time-ns': 'uint64',
+            'migrated-bitmap-time-ns': 'uint64',
+            'remap-scan-calls': 'uint64',
+            'remap-scan-time-ns': 'uint64',
+            'remap-page-check-calls': 'uint64',
+            'remap-page-check-time-ns': 'uint64',
+            'remap-syscall-time-ns': 'uint64',
+            'remap-copy-bytes': 'uint64',
+            'remap-copy-time-ns': 'uint64',
+            'remap-pause-calls': 'uint64',
+            'remap-pause-time-ns': 'uint64',
+            'dirty-sync-calls': 'uint64',
+            'dirty-sync-time-ns': 'uint64',
+            'dirty-clear-time-ns': 'uint64' } }
+
+##
 # @MigrationInfo:
 #
 # Information about current migration process.
@@ -284,6 +412,10 @@
 #     is supported by all VFIO devices and status is 'active' or
 #     'completed' (since 5.2)
 #
+# @x-cxl: `CXLMigrationStats` containing experimental CXL backing and
+#     write-redirect statistics, only returned if `cxl-path` backed
+#     mapped-ram migration is enabled on the source.  (Since 11.0)
+#
 # @blocked-reasons: A list of reasons an outgoing migration is
 #     blocked.  Present and non-empty when migration is blocked.
 #     (since 6.0)
@@ -311,6 +443,7 @@
 { 'struct': 'MigrationInfo',
   'data': {'*status': 'MigrationStatus', '*ram': 'MigrationStats',
            '*vfio': 'VfioStats',
+           '*x-cxl': 'CXLMigrationStats',
            '*xbzrle-cache': 'XBZRLECacheStats',
            '*total-time': 'int',
            '*expected-downtime': 'int',
@@ -831,6 +964,7 @@
            'mode',
            'zero-page-detection',
            'direct-io',
+           'cxl-path',
            'cpr-exec-command'] }
 
 ##
@@ -999,9 +1133,13 @@
 #     description in `ZeroPageDetection`.  Default is 'multifd'.
 #     (since 9.0)
 #
-# @direct-io: Open migration files with O_DIRECT when possible.  This
-#     only has effect if the @mapped-ram capability is enabled.
-#     (Since 9.1)
+# @direct-io: Use direct I/O for mapped-ram multifd channels when the
+#     backing store supports it.  Default is false.  (Since 11.0)
+#
+# @cxl-path: Path to a CXL DAX device used as mapped-ram backing
+#     storage.
+#     Empty string disables CXL backing.  This only has effect if the
+#     @mapped-ram capability is enabled.  (Since 11.0)
 #
 # @cpr-exec-command: Command to start the new QEMU process when @mode
 #     is @cpr-exec.  The first list element is the program's filename,
@@ -1046,6 +1184,7 @@
             '*mode': 'MigMode',
             '*zero-page-detection': 'ZeroPageDetection',
             '*direct-io': 'bool',
+            '*cxl-path': 'StrOrNull',
             '*cpr-exec-command': [ 'str' ]} }
 
 ##

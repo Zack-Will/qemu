@@ -441,6 +441,13 @@ bool migrate_zero_copy_send(void)
     return s->capabilities[MIGRATION_CAPABILITY_ZERO_COPY_SEND];
 }
 
+bool migrate_cxl_path_enabled(void)
+{
+    const char *path = migrate_cxl_path();
+
+    return path && *path;
+}
+
 /* pseudo capabilities */
 
 bool migrate_multifd_flush_after_each_section(void)
@@ -958,6 +965,17 @@ const char *migrate_tls_creds(void)
     return NULL;
 }
 
+const char *migrate_cxl_path(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    if (*s->parameters.cxl_path->u.s) {
+        return s->parameters.cxl_path->u.s;
+    }
+
+    return NULL;
+}
+
 const char *migrate_tls_hostname(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1048,7 +1066,7 @@ static void tls_opt_to_str(StrOrNull *opt)
  */
 static void migrate_mark_all_params_present(MigrationParameters *p)
 {
-    int len, n_str_args = 3; /* tls-creds, tls-hostname, tls-authz */
+    int len, n_str_args = 4; /* tls-*, cxl-path */
     bool *has_fields[] = {
         &p->has_throttle_trigger_threshold, &p->has_cpu_throttle_initial,
         &p->has_cpu_throttle_increment, &p->has_cpu_throttle_tailslow,
@@ -1398,6 +1416,12 @@ static void migrate_params_test_apply(MigrationParameters *params,
         dest->direct_io = params->direct_io;
     }
 
+    if (params->cxl_path) {
+        dest->cxl_path = QAPI_CLONE(StrOrNull, params->cxl_path);
+    } else {
+        dest->cxl_path = NULL;
+    }
+
     if (params->has_cpr_exec_command) {
         dest->cpr_exec_command = params->cpr_exec_command;
     }
@@ -1522,6 +1546,11 @@ static void migrate_params_apply(MigrationParameters *params)
 
     if (params->has_direct_io) {
         s->parameters.direct_io = params->direct_io;
+    }
+
+    if (params->cxl_path) {
+        qapi_free_StrOrNull(s->parameters.cxl_path);
+        s->parameters.cxl_path = QAPI_CLONE(StrOrNull, params->cxl_path);
     }
 
     if (params->has_cpr_exec_command) {

@@ -92,6 +92,11 @@ typedef enum {
 /* State for the incoming migration */
 struct MigrationIncomingState {
     QEMUFile *from_src_file;
+    /*
+     * Optional mapped-ram backing file. When NULL, mapped-ram uses the
+     * main migration stream directly.
+     */
+    QEMUFile *mapped_ram_file;
     /* Previously received RAM's RAMBlock pointer */
     RAMBlock *last_recv_block[RAM_CHANNEL_MAX];
     /* A hook to allow cleanup at the end of incoming migration */
@@ -280,6 +285,11 @@ struct MigrationState {
     QemuThread thread;
     /* Protected by qemu_file_lock */
     QEMUFile *to_dst_file;
+    /*
+     * Optional mapped-ram backing file. When NULL, mapped-ram uses the
+     * main migration stream directly.
+     */
+    QEMUFile *mapped_ram_file;
     /* Postcopy specific transfer channel */
     QEMUFile *postcopy_qemufile_src;
     /*

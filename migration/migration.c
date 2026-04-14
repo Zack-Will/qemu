@@ -18,6 +18,7 @@
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "migration/blocker.h"
+#include "cxl.h"
 #include "exec.h"
 #include "file.h"
 #include "system/runstate.h"
@@ -155,7 +156,8 @@ static void precopy_notify_complete(void)
 
 static bool migration_needs_multiple_sockets(void)
 {
-    return migrate_multifd() || migrate_postcopy_preempt();
+    return (migrate_multifd() && !cxl_use_mapped_ram_backing()) ||
+           migrate_postcopy_preempt();
 }
 
 static RunState migration_get_target_runstate(void)
@@ -190,7 +192,7 @@ static bool transport_supports_multi_channels(MigrationAddress *addr)
 
 static bool migration_needs_seekable_channel(void)
 {
-    return migrate_mapped_ram();
+    return migrate_mapped_ram() && !cxl_use_mapped_ram_backing();
 }
 
 static bool migration_needs_extra_fds(void)
@@ -200,21 +202,60 @@ static bool migration_needs_extra_fds(void)
      * non-duplicated file descriptors so we can use one of them for
      * unaligned IO.
      */
-    return migrate_multifd() && migrate_direct_io();
+    return migrate_multifd() && migrate_direct_io() &&
+           !cxl_use_mapped_ram_backing();
+}
+
+static int migration_setup_outgoing_ram_backing(MigrationState *s,
+                                                Error **errp)
+{
+    g_autoptr(QIOChannel) ioc = NULL;
+
+    if (!cxl_use_mapped_ram_backing() || s->mapped_ram_file) {
+        return 0;
+    }
+
+    ioc = cxl_open_mapped_ram_outgoing(errp);
+    if (!ioc) {
+        return -1;
+    }
+
+    s->mapped_ram_file = qemu_file_new_output(ioc);
+    return 0;
+}
+
+static int migration_setup_incoming_ram_backing(MigrationIncomingState *mis,
+                                                Error **errp)
+{
+    g_autoptr(QIOChannel) ioc = NULL;
+
+    if (!cxl_use_mapped_ram_backing() || mis->mapped_ram_file) {
+        return 0;
+    }
+
+    ioc = cxl_open_mapped_ram_incoming(errp);
+    if (!ioc) {
+        return -1;
+    }
+
+    mis->mapped_ram_file = qemu_file_new_input(ioc);
+
+    if (migrate_multifd() && !cxl_create_incoming_mapped_ram_channels(errp)) {
+        qemu_fclose(mis->mapped_ram_file);
+        mis->mapped_ram_file = NULL;
+        return -1;
+    }
+
+    return 0;
 }
 
 static bool transport_supports_seeking(MigrationAddress *addr)
 {
-    if (addr->transport == MIGRATION_ADDRESS_TYPE_FILE) {
-        return true;
-    }
-
-    return false;
+    return addr->transport == MIGRATION_ADDRESS_TYPE_FILE;
 }
 
 static bool transport_supports_extra_fds(MigrationAddress *addr)
 {
-    /* file: works because QEMU can open it multiple times */
     return addr->transport == MIGRATION_ADDRESS_TYPE_FILE;
 }
 
@@ -471,6 +512,10 @@ void migration_incoming_state_destroy(void)
         migration_ioc_unregister_yank_from_file(mis->from_src_file);
         qemu_fclose(mis->from_src_file);
         mis->from_src_file = NULL;
+    }
+    if (mis->mapped_ram_file) {
+        qemu_fclose(mis->mapped_ram_file);
+        mis->mapped_ram_file = NULL;
     }
     if (mis->postcopy_remote_fds) {
         g_array_free(mis->postcopy_remote_fds, TRUE);
@@ -825,6 +870,9 @@ bool migration_incoming_setup(QIOChannel *ioc, uint8_t channel, Error **errp)
         f = qemu_file_new_input(ioc);
         assert(!mis->from_src_file);
         mis->from_src_file = f;
+        if (migration_setup_incoming_ram_backing(mis, errp) != 0) {
+            return false;
+        }
         qemu_file_set_blocking(f, false, &error_abort);
         break;
 
@@ -1173,6 +1221,7 @@ static void fill_source_migration_info(MigrationInfo *info)
         break;
     }
     info->status = state;
+    cxl_populate_migration_info(info);
 
     QEMU_LOCK_GUARD(&s->error_mutex);
     if (s->error) {
@@ -1315,6 +1364,15 @@ static void migration_cleanup(MigrationState *s)
         multifd_send_shutdown();
         migration_ioc_unregister_yank_from_file(tmp);
         qemu_fclose(tmp);
+    }
+
+    if (s->mapped_ram_file) {
+        qemu_fclose(s->mapped_ram_file);
+        s->mapped_ram_file = NULL;
+    }
+
+    if (cxl_use_mapped_ram_backing()) {
+        cxl_cleanup_outgoing_migration();
     }
 
     assert(!migration_is_active());
@@ -3049,8 +3107,12 @@ static MigThrError migration_detect_error(MigrationState *s)
      * be NULL when postcopy preempt is not enabled.
      */
     ret = qemu_file_get_error_obj_any(s->to_dst_file,
-                                      s->postcopy_qemufile_src,
+                                      s->mapped_ram_file,
                                       &local_error);
+    if (!ret && s->postcopy_qemufile_src) {
+        ret = qemu_file_get_error_obj(s->postcopy_qemufile_src,
+                                      &local_error);
+    }
     if (!ret) {
         /* Everything is fine */
         assert(!local_error);
@@ -3502,6 +3564,11 @@ static void *migration_thread(void *opaque)
 
     update_iteration_initial_status(s);
 
+    if (migration_setup_outgoing_ram_backing(s, &local_err) != 0) {
+        migrate_error_propagate(s, local_err);
+        goto out;
+    }
+
     if (!multifd_send_setup()) {
         goto out;
     }
@@ -3648,6 +3715,10 @@ static void *bg_migration_thread(void *opaque)
     object_unref(OBJECT(s->bioc));
 
     update_iteration_initial_status(s);
+
+    if (migration_setup_outgoing_ram_backing(s, &local_err) != 0) {
+        goto fail;
+    }
 
     /*
      * Prepare for tracking memory writes with UFFD-WP - populate

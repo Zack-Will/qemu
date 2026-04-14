@@ -15,6 +15,7 @@ system_ss.add(files(
   'channel.c',
   'channel-block.c',
   'cpr.c',
+  'cxl.c',
   'cpr-transfer.c',
   'cpr-exec.c',
   'cpu-throttle.c',

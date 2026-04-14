@@ -177,10 +177,10 @@ static MigChannelType migration_channel_identify(MigrationIncomingState *mis,
             } else {
                 error_setg(errp, "unknown channel magic: %u", channel_magic);
             }
-        } else if (mis->from_src_file && migrate_multifd()) {
+        } else if (migrate_multifd() && mis->from_src_file) {
             /*
-             * Non-peekable channels like tls/file are processed as
-             * multifd channels when multifd is enabled.
+             * Non-peekable transports use arrival order after the main
+             * channel has been established.
              */
             channel = CH_MULTIFD;
         } else if (!mis->from_src_file) {
