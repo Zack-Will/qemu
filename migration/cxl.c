@@ -12,6 +12,7 @@
 #include "qemu/error-report.h"
 #include "qemu/atomic.h"
 #include "qemu/main-loop.h"
+#include "qemu/rcu.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
 #include "channel.h"
@@ -95,6 +96,12 @@ static void cxl_process_pending_remaps_bh(void *opaque);
 #define CXL_ROLLBACK_COPY_CHUNK (2 * 1024 * 1024)
 #define CXL_WRITE_REDIRECT_ENV "QEMU_CXL_WRITE_REDIRECT"
 #define CXL_REMAP_GRANULE_ENV "QEMU_CXL_REMAP_GRANULE"
+/*
+ * migration/ram.c currently aligns mapped-ram page offsets to 1MiB (or higher)
+ * and places a per-RAMBlock bitmap ahead of the page data. If we mmap the CXL
+ * backing for write-redirect, we must cover those bitmap+alignment gaps too.
+ */
+#define CXL_MAPPED_RAM_FILE_OFFSET_ALIGNMENT (0x100000ULL)
 
 static inline uint64_t cxl_now_ns(void)
 {
@@ -142,6 +149,42 @@ static uint64_t cxl_choose_remap_granule(uint64_t align, uint64_t total_ram)
 bool cxl_use_mapped_ram_backing(void)
 {
     return migrate_mapped_ram() && migrate_cxl_path_enabled();
+}
+
+static uint64_t cxl_mapped_ram_pages_offset_alignment(uint64_t align)
+{
+    return MAX((uint64_t)CXL_MAPPED_RAM_FILE_OFFSET_ALIGNMENT, align);
+}
+
+static uint64_t cxl_mapped_ram_required_bytes(uint64_t align)
+{
+    RAMBlock *block;
+    uint64_t offset = 0;
+    uint64_t pages_align = cxl_mapped_ram_pages_offset_alignment(align);
+
+    /*
+     * Mirror mapped_ram_setup_ramblock()'s layout for the mapped-ram backing
+     * file: [bitmap][padding to pages_align][page data] for each migratable
+     * RAMBlock that isn't ignored.
+     */
+    RCU_READ_LOCK_GUARD();
+    RAMBLOCK_FOREACH_MIGRATABLE(block) {
+        long num_pages;
+        uint64_t bitmap_size;
+
+        if (migrate_ram_is_ignored(block)) {
+            continue;
+        }
+
+        num_pages = block->used_length >> TARGET_PAGE_BITS;
+        bitmap_size = (uint64_t)BITS_TO_LONGS(num_pages) * sizeof(unsigned long);
+
+        offset = ROUND_UP(offset + bitmap_size, pages_align);
+        offset += block->used_length;
+    }
+
+    /* Always map whole host pages. */
+    return ROUND_UP(offset, (uint64_t)qemu_real_host_page_size());
 }
 
 uint64_t cxl_mapped_ram_alignment(void)
@@ -225,12 +268,12 @@ static bool cxl_check_dev_size(QIOChannelCXL *cioc, const char *path,
                                Error **errp)
 {
     if (cioc->dev_size > 0) {
-        uint64_t total_ram = ram_bytes_total();
+        uint64_t required = cxl_mapped_ram_required_bytes(cioc->align);
 
-        if ((uint64_t)cioc->dev_size < total_ram) {
+        if ((uint64_t)cioc->dev_size < required) {
             error_setg(errp, "CXL device %s too small: %" PRId64
-                       " bytes, need at least %" PRIu64 " bytes for VM RAM",
-                       path, cioc->dev_size, total_ram);
+                       " bytes, need at least %" PRIu64 " bytes for mapped-ram",
+                       path, cioc->dev_size, required);
             return false;
         }
     }
@@ -491,9 +534,11 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
         warn_report("CXL write-redirect: failed to dup fd, disabled");
         return;
     }
-    cxl_state.mmap_size = ROUND_UP(total_ram, align);
-    if (dev_size > 0 && (uint64_t)dev_size < total_ram) {
-        warn_report("CXL write-redirect: device too small for mmap state");
+    cxl_state.mmap_size = cxl_mapped_ram_required_bytes(align);
+    if (dev_size > 0 && (uint64_t)dev_size < cxl_state.mmap_size) {
+        warn_report("CXL write-redirect: device too small for mmap state (%"
+                    PRIu64 " < %" PRIu64 ")",
+                    (uint64_t)dev_size, (uint64_t)cxl_state.mmap_size);
         close(cxl_state.fd);
         cxl_state.fd = -1;
         return;
