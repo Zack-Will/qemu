@@ -698,6 +698,10 @@ static int save_xbzrle_page(RAMState *rs, PageSearchStatus *pss,
     }
 
     /* Send XBZRLE based compressed page */
+    if (migration_in_postcopy()) {
+        cxl_hybrid_account_dst_page_sent(block->idstr, offset,
+                                         TARGET_PAGE_SIZE);
+    }
     bytes_xbzrle = save_page_header(pss, pss->pss_channel, block,
                                     offset | RAM_SAVE_FLAG_XBZRLE);
     qemu_put_byte(file, ENCODING_FLAG_XBZRLE);
@@ -1227,6 +1231,51 @@ void ram_release_page(const char *rbname, uint64_t offset)
     ram_discard_range(rbname, offset, TARGET_PAGE_SIZE);
 }
 
+int ram_cxl_hybrid_walk_unsent(MigrationState *s,
+                               int (*cb)(MigrationState *s,
+                                         RAMBlock *block,
+                                         ram_addr_t offset,
+                                         void *opaque,
+                                         Error **errp),
+                               void *opaque,
+                               Error **errp)
+{
+    RAMBlock *block;
+    int walked = 0;
+
+    if (!ram_state || !s || !cb) {
+        return 0;
+    }
+
+    WITH_RCU_READ_LOCK_GUARD() {
+        RAMBLOCK_FOREACH_NOT_IGNORED(block) {
+            unsigned long pages;
+            unsigned long page;
+
+            if (!block->used_length) {
+                continue;
+            }
+
+            pages = DIV_ROUND_UP(block->used_length, TARGET_PAGE_SIZE);
+            for (page = 0; page < pages; page++) {
+                ram_addr_t offset = (ram_addr_t)page << TARGET_PAGE_BITS;
+                int ret;
+
+                if (ramblock_page_is_discarded(block, offset)) {
+                    continue;
+                }
+                ret = cb(s, block, offset, opaque, errp);
+                if (ret < 0) {
+                    return ret;
+                }
+                walked += ret > 0;
+            }
+        }
+    }
+
+    return walked;
+}
+
 /**
  * save_zero_page: send the zero page to the stream
  *
@@ -1249,6 +1298,11 @@ static int save_zero_page(RAMState *rs, PageSearchStatus *pss,
 
     if (!buffer_is_zero(p, TARGET_PAGE_SIZE)) {
         return 0;
+    }
+
+    if (migration_in_postcopy()) {
+        cxl_hybrid_account_dst_page_sent(pss->block->idstr, offset,
+                                         TARGET_PAGE_SIZE);
     }
 
     qatomic_add(&mig_stats.zero_pages, 1);
@@ -1293,6 +1347,11 @@ static int save_normal_page(PageSearchStatus *pss, RAMBlock *block,
                             ram_addr_t offset, uint8_t *buf, bool async)
 {
     QEMUFile *file = pss->pss_channel;
+
+    if (migration_in_postcopy()) {
+        cxl_hybrid_account_dst_page_sent(block->idstr, offset,
+                                         TARGET_PAGE_SIZE);
+    }
 
     if (migrate_mapped_ram()) {
         qemu_put_buffer_at(mapped_ram_save_file(file), buf, TARGET_PAGE_SIZE,
@@ -3337,6 +3396,9 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
                 int pages;
 
                 if (qemu_file_get_error(f)) {
+                    break;
+                }
+                if (migration_cxl_hybrid_ready_urgent()) {
                     break;
                 }
 

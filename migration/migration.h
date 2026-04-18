@@ -133,6 +133,8 @@ struct MigrationIncomingState {
     QemuMutex rp_mutex;    /* We send replies from multiple threads */
     /* RAMBlock of last request sent to source */
     RAMBlock *last_rb;
+    /* Block new CXL publish requests once completion quiesce starts. */
+    bool cxl_publish_request_quiesce;
     /*
      * Number of postcopy channels including the default precopy channel, so
      * vanilla postcopy will only contain one channel which contain both
@@ -346,6 +348,8 @@ struct MigrationState {
          * be cleared in the rp_thread!
          */
         bool          rp_thread_created;
+        /* Set by the return-path thread immediately before it exits. */
+        bool          rp_thread_exited;
         /*
          * Used to synchronize between migration main thread and return
          * path thread.  The migration thread can wait() on this sem, while
@@ -383,6 +387,10 @@ struct MigrationState {
 
     /* Flag set once the migration has been asked to enter postcopy */
     bool start_postcopy;
+    /* Flag set when start_postcopy was requested by hybrid policy */
+    bool start_postcopy_auto;
+    uint64_t cxl_hybrid_iteration;
+    uint64_t cxl_hybrid_prev_remaining;
 
     /* Flag set once the migration thread is running (and needs joining) */
     bool migration_thread_running;
@@ -518,6 +526,8 @@ struct MigrationState {
      * switchover has been received.
      */
     bool switchover_acked;
+    bool cxl_publish_quiesce_acked;
+    bool cxl_hybrid_ready_urgent;
     /* Is this a rdma migration */
     bool rdma_migration;
 
@@ -568,6 +578,11 @@ void migrate_send_rp_pong(MigrationIncomingState *mis,
                           uint32_t value);
 int migrate_send_rp_req_pages(MigrationIncomingState *mis, RAMBlock *rb,
                               ram_addr_t start, uint64_t haddr, uint32_t tid);
+int migrate_send_rp_cxl_publish_req(MigrationIncomingState *mis, RAMBlock *rb,
+                                    ram_addr_t start, uint32_t page_len,
+                                    uint32_t generation,
+                                    bool *sentp);
+int migrate_send_rp_cxl_publish_quiesce_ack(MigrationIncomingState *mis);
 int migrate_send_rp_message_req_pages(MigrationIncomingState *mis,
                                       RAMBlock *rb, ram_addr_t start);
 void migrate_send_rp_recv_bitmap(MigrationIncomingState *mis,
@@ -589,6 +604,9 @@ int foreach_not_ignored_block(RAMBlockIterFunc func, void *opaque);
 
 void migration_make_urgent_request(void);
 void migration_consume_urgent_request(void);
+void migration_mark_cxl_hybrid_ready_urgent(void);
+bool migration_cxl_hybrid_ready_urgent(void);
+void migration_clear_cxl_hybrid_ready_urgent(void);
 bool migration_rate_limit(void);
 void migration_bh_schedule(QEMUBHFunc *cb, void *opaque);
 void migration_cancel(void);

@@ -188,6 +188,115 @@
             'colo', 'pre-switchover', 'device', 'wait-unplug' ] }
 
 ##
+# @CXLMigrationPhase:
+#
+# Experimental phase tracking for CXL-assisted hybrid migration.
+#
+# @disabled: CXL hybrid logic is disabled
+#
+# @precopy-bulk: bulk precopy is active
+#
+# @precopy-brake: source-side brake/remap phase is active
+#
+# @switching: switchover into postcopy is in progress
+#
+# @postcopy-warm: postcopy is active with hybrid warm mode enabled
+#
+# @cleanup: CXL hybrid state is cleaning up
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLMigrationPhase',
+  'data': [ { 'name': 'disabled', 'features': [ 'unstable' ] },
+            { 'name': 'precopy-bulk', 'features': [ 'unstable' ] },
+            { 'name': 'precopy-brake', 'features': [ 'unstable' ] },
+            { 'name': 'switching', 'features': [ 'unstable' ] },
+            { 'name': 'postcopy-warm', 'features': [ 'unstable' ] },
+            { 'name': 'cleanup', 'features': [ 'unstable' ] } ] }
+
+##
+# @CXLMigrationSwitchReason:
+#
+# Experimental reason tracking for CXL-assisted hybrid migration
+# switchover decisions.
+#
+# @none: no hybrid switchover reason recorded yet
+#
+# @dirty-rate-high: dirty-rate threshold triggered
+#
+# @max-iters: maximum bulk precopy iterations reached
+#
+# @remaining-small: remaining dirty bytes dropped below threshold
+#
+# @gain-collapsed: recent iteration gain fell below threshold
+#
+# @manual: manual postcopy request was used
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLMigrationSwitchReason',
+  'data': [ { 'name': 'none', 'features': [ 'unstable' ] },
+            { 'name': 'dirty-rate-high', 'features': [ 'unstable' ] },
+            { 'name': 'max-iters', 'features': [ 'unstable' ] },
+            { 'name': 'remaining-small', 'features': [ 'unstable' ] },
+            { 'name': 'gain-collapsed', 'features': [ 'unstable' ] },
+            { 'name': 'manual', 'features': [ 'unstable' ] } ] }
+
+##
+# @CXLHybridWarmTransport:
+#
+# Experimental transport policy for CXL hybrid warm pages.
+#
+# @payload: always carry warm page data in the migration stream
+#
+# @cxl-offset: only publish CXL-backed descriptors; fail if a page is
+#     not source-authoritative in CXL.  Requires
+#     @x-cxl-shared-backing to confirm that both endpoints can resolve
+#     the same CXL backing offsets.
+#
+# @auto: publish descriptors for source-remapped CXL pages and fall
+#     back to payload pages otherwise
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLHybridWarmTransport',
+  'data': [ { 'name': 'payload', 'features': [ 'unstable' ] },
+            { 'name': 'cxl-offset', 'features': [ 'unstable' ] },
+            { 'name': 'auto', 'features': [ 'unstable' ] } ] }
+
+##
+# @CXLHybridDstInstallPolicy:
+#
+# Experimental destination-side install policy for
+# CXL hybrid postcopy.
+#
+# @on-demand: install warm-published data only when faults request it
+#
+# @eager: install warm-published data eagerly on arrival
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLHybridDstInstallPolicy',
+  'data': [ { 'name': 'on-demand', 'features': [ 'unstable' ] },
+            { 'name': 'eager', 'features': [ 'unstable' ] } ] }
+
+##
 # @VfioStats:
 #
 # Detailed VFIO devices migration statistics
@@ -199,6 +308,85 @@
 ##
 { 'struct': 'VfioStats',
   'data': {'transferred': 'int' } }
+
+##
+# @CXLMigrationPublishRequestInfo:
+#
+# Most recent source-side publish-request observed for diagnostics.
+#
+# @count: running count of source-side publish-request messages
+#     received when this event was recorded
+#
+# @ramblock: guest RAMBlock name for the requested page
+#
+# @guest-offset: guest page offset within @ramblock
+#
+# @generation: publish generation associated with the page
+#
+# Since: 11.0
+##
+{ 'struct': 'CXLMigrationPublishRequestInfo',
+  'data': { 'count': 'uint64',
+            'ramblock': 'str',
+            'guest-offset': 'uint64',
+            'generation': 'uint32' } }
+
+##
+# @CXLMigrationPublishReadyInfo:
+#
+# Most recent source-side publish-ready notification observed for
+# diagnostics.
+#
+# @count: running count of source-side publish-ready notifications
+#     sent on the migration stream when this event was recorded
+#
+# @ramblock: guest RAMBlock name for the published page
+#
+# @guest-offset: guest page offset within @ramblock
+#
+# @cxl-offset: stable CXL offset advertised to destination
+#
+# @generation: publish generation associated with the page
+#
+# Since: 11.0
+##
+{ 'struct': 'CXLMigrationPublishReadyInfo',
+  'data': { 'count': 'uint64',
+            'ramblock': 'str',
+            'guest-offset': 'uint64',
+            'cxl-offset': 'uint64',
+            'generation': 'uint32' } }
+
+##
+# @CXLMigrationPublishWaitInfo:
+#
+# Most recent destination-side publish wait event observed for
+# diagnostics.
+#
+# @count: running count of destination-side publish wait events of the
+#     corresponding kind when this event was recorded
+#
+# @ramblock: guest RAMBlock name for the waited page
+#
+# @guest-offset: guest page offset within @ramblock
+#
+# @generation: publish generation associated with the page
+#
+# @wait-time-ns: wait duration in nanoseconds, when this records a
+#     completed wait
+#
+# @ret: completion status returned by the wait path, when this records
+#     a completed wait
+#
+# Since: 11.0
+##
+{ 'struct': 'CXLMigrationPublishWaitInfo',
+  'data': { 'count': 'uint64',
+            'ramblock': 'str',
+            'guest-offset': 'uint64',
+            'generation': 'uint32',
+            '*wait-time-ns': 'uint64',
+            '*ret': 'int' } }
 
 ##
 # @CXLMigrationStats:
@@ -293,6 +481,270 @@
 # @dirty-clear-time-ns: cumulative nanoseconds spent clearing dirty
 #     bits for already-remapped pages
 #
+# @phase: current experimental CXL hybrid phase
+#
+# @phase-transitions: number of recorded CXL hybrid phase transitions
+#
+# @switch-reason: most recent experimental hybrid switchover reason
+#
+# @switch-iteration: bulk precopy iteration at which hybrid switchover
+#     policy was selected
+#
+# @dst-stage-capacity-bytes: configured destination-local CXL staging
+#     capacity, in bytes
+#
+# @dst-stage-slots: number of destination staging slots
+#     described by the latest hybrid metadata snapshot
+#
+# @dst-stage-present-slots: number of destination staging slots
+#     already populated with staged page data
+#
+# @dst-fault-hits: number of postcopy faults resolved from destination
+#     local CXL staging
+#
+# @dst-fault-misses: number of postcopy faults that missed in
+#     destination local CXL staging and fell back to remote fetch
+#
+# @dst-fault-read-bytes: total bytes read from destination local CXL
+#     staging while resolving postcopy faults
+#
+# @dst-fault-read-time-ns: cumulative nanoseconds spent reading staged
+#     pages from destination local CXL storage
+#
+# @dst-fault-place-successes: number of successful guest RAM
+#     placements after reading a page from destination local CXL
+#     staging
+#
+# @dst-fault-place-failures: number of failed guest RAM placements
+#     after reading a page from destination local CXL staging
+#
+# @staged-pages: number of guest pages known to be staged in the
+#     source-side CXL backing
+#
+# @warm-desc-sent-pages: number of warm pages published as CXL offset
+#     descriptors instead of page payloads
+#
+# @warm-desc-sent-bytes: guest page bytes represented by warm
+#     descriptors
+#
+# @warm-payload-fallback-pages: number of warm pages sent through the
+#     legacy payload command because descriptor mode was unavailable
+#
+# @warm-desc-skip-unremapped: number of descriptor candidates skipped
+#     because the source page was not remapped and therefore not
+#     authoritative in CXL
+#
+# @warm-publish-pages: number of warm-publish operations issued to the
+#     destination-side install pipeline
+#
+# @fault-publish-requests: number of destination fault handlers that
+#     requested warm-publish processing
+#
+# @fault-publish-waits: number of destination fault handlers that had
+#     to wait for warm-publish completion
+#
+# @fault-publish-wait-time-ns: cumulative nanoseconds spent
+#     waiting for warm-publish completion in destination
+#     fault handling
+#
+# @fault-publish-primary-samples: number of source-side primary fault
+#     publish measurements recorded before any burst work
+#
+# @fault-publish-primary-time-ns: cumulative nanoseconds spent
+#     publishing the primary fault page and queueing its ready
+#     notification
+#
+# @max-fault-publish-primary-time-ns: maximum nanoseconds observed in
+#     a single source-side primary fault publish measurement
+#
+# @fault-publish-burst-samples: number of source-side fault-burst
+#     publish measurements recorded after the primary page was queued
+#
+# @fault-publish-burst-time-ns: cumulative nanoseconds spent in
+#     source-side neighbor-page burst publish work
+#
+# @max-fault-publish-burst-time-ns: maximum nanoseconds observed in a
+#     single source-side fault-burst publish measurement
+#
+# @fault-primary-ready-send-samples: number of source-side primary
+#     publish-ready queue-to-send measurements recorded
+#
+# @fault-primary-ready-send-time-ns: cumulative nanoseconds from
+#     queueing a primary fault publish-ready notification until it was
+#     emitted on the migration stream
+#
+# @max-fault-primary-ready-send-time-ns: maximum nanoseconds observed
+#     in a single source-side primary publish-ready queue-to-send
+#     measurement
+#
+# @fault-publish-req-recv-samples: number of source-side publish
+#     request receive-latency measurements recorded
+#
+# @fault-publish-req-recv-time-ns: cumulative nanoseconds from
+#     destination publish-request send until source return-path
+#     receive/decode
+#
+# @max-fault-publish-req-recv-time-ns: maximum nanoseconds observed in
+#     a single publish-request send-to-source-receive measurement
+#
+# @fault-publish-req-handle-samples: number of source-side publish
+#     request receive-to-primary-enqueue measurements recorded
+#
+# @fault-publish-req-handle-time-ns: cumulative nanoseconds from
+#     source return-path receive of a publish request until the
+#     primary publish-ready notification was queued
+#
+# @max-fault-publish-req-handle-time-ns: maximum nanoseconds observed
+#     in a single source-side publish request receive-to-primary-
+#     enqueue measurement
+#
+# @fault-primary-ready-drain-samples: number of source-side primary
+#     publish-ready enqueue-to-drain measurements recorded
+#
+# @fault-primary-ready-drain-time-ns: cumulative nanoseconds from
+#     queueing a primary publish-ready notification until migration
+#     thread drain began handling it
+#
+# @max-fault-primary-ready-drain-time-ns: maximum nanoseconds observed
+#     in a single source-side primary publish-ready enqueue-to-drain
+#     measurement
+#
+# @fault-primary-ready-write-samples: number of source-side primary
+#     publish-ready drain-to-write measurements recorded
+#
+# @fault-primary-ready-write-time-ns: cumulative nanoseconds from
+#     beginning primary publish-ready drain handling until the
+#     notification write completed on the migration stream
+#
+# @max-fault-primary-ready-write-time-ns: maximum nanoseconds observed
+#     in a single source-side primary publish-ready drain-to-write
+#     measurement
+#
+# @fault-primary-ready-recv-samples: number of destination-side
+#     primary publish-ready send-to-decode measurements recorded
+#
+# @fault-primary-ready-recv-time-ns: cumulative nanoseconds from
+#     source publish-ready send timestamp until destination decode of
+#     the publish-ready command completed
+#
+# @max-fault-primary-ready-recv-time-ns: maximum nanoseconds observed
+#     in a single destination-side primary publish-ready
+#     send-to-decode measurement
+#
+# @fault-primary-ready-handle-samples: number of destination-side
+#     primary publish-ready decode-to-register measurements recorded
+#
+# @fault-primary-ready-handle-time-ns: cumulative nanoseconds from
+#     destination publish-ready decode completion until staging
+#     registration and bookkeeping completed
+#
+# @max-fault-primary-ready-handle-time-ns: maximum nanoseconds
+#     observed in a single destination-side primary publish-ready
+#     decode-to-register measurement
+#
+# @fault-wait-ready-recv-samples: number of destination-side fault
+#     waits for which a matching publish-ready receive timestamp was
+#     recorded
+#
+# @fault-wait-ready-recv-time-ns: cumulative nanoseconds from
+#     destination fault-wait begin until the matching publish-ready
+#     was received and registered
+#
+# @max-fault-wait-ready-recv-time-ns: maximum nanoseconds observed in
+#     a single destination fault-wait begin-to-ready-recv measurement
+#
+# @fault-wait-after-ready-recv-samples: number of destination-side
+#     fault waits for which a matching ready-recv to wait-complete
+#     segment was recorded
+#
+# @fault-wait-after-ready-recv-time-ns: cumulative nanoseconds from
+#     matching publish-ready receive until destination fault wait
+#     completion
+#
+# @max-fault-wait-after-ready-recv-time-ns: maximum nanoseconds
+#     observed in a single destination ready-recv to wait-complete
+#     measurement
+#
+# @pending-publish-ready: number of source-side publish-ready
+#     notifications queued but not yet emitted onto the migration
+#     stream
+#
+# @completion-pending-publish-ready: source-side pending
+#     publish-ready queue depth last observed immediately before
+#     migration completion teardown
+#
+# @last-publish-request: most recent source-side publish-request
+#     received from destination fault handling
+#
+# @last-publish-ready: most recent source-side publish-ready
+#     notification emitted to the migration stream
+#
+# @last-completion-publish-ready: most recent source-side
+#     publish-ready notification known to have been flushed during
+#     migration completion teardown
+#
+# @last-publish-ready-recv: most recent destination-side
+#     publish-ready notification successfully received and registered
+#
+# @last-publish-wait-begin: most recent destination-side fault wait
+#     that began waiting for publish-ready completion
+#
+# @last-publish-wait-complete: most recent destination-side fault wait
+#     that completed waiting for publish-ready completion
+#
+# Features:
+#
+# @unstable: Members @phase, @phase-transitions, @switch-reason,
+#     @switch-iteration, @dst-stage-capacity-bytes,
+#     @dst-stage-slots, @dst-stage-present-slots,
+#     @dst-fault-hits, @dst-fault-misses,
+#     @dst-fault-read-bytes, @dst-fault-read-time-ns,
+#     @dst-fault-place-successes,
+#     @dst-fault-place-failures, @staged-pages,
+#     @warm-desc-sent-pages, @warm-desc-sent-bytes,
+#     @warm-payload-fallback-pages,
+#     @warm-desc-skip-unremapped, @warm-publish-pages,
+#     @fault-publish-requests, @fault-publish-waits,
+#     @fault-publish-wait-time-ns,
+#     @fault-publish-primary-samples,
+#     @fault-publish-primary-time-ns,
+#     @max-fault-publish-primary-time-ns,
+#     @fault-publish-burst-samples,
+#     @fault-publish-burst-time-ns,
+#     @max-fault-publish-burst-time-ns,
+#     @fault-primary-ready-send-samples,
+#     @fault-primary-ready-send-time-ns,
+#     @max-fault-primary-ready-send-time-ns,
+#     @fault-publish-req-recv-samples,
+#     @fault-publish-req-recv-time-ns,
+#     @max-fault-publish-req-recv-time-ns,
+#     @fault-publish-req-handle-samples,
+#     @fault-publish-req-handle-time-ns,
+#     @max-fault-publish-req-handle-time-ns,
+#     @fault-primary-ready-drain-samples,
+#     @fault-primary-ready-drain-time-ns,
+#     @max-fault-primary-ready-drain-time-ns,
+#     @fault-primary-ready-write-samples,
+#     @fault-primary-ready-write-time-ns,
+#     @max-fault-primary-ready-write-time-ns,
+#     @fault-primary-ready-recv-samples,
+#     @fault-primary-ready-recv-time-ns,
+#     @max-fault-primary-ready-recv-time-ns,
+#     @fault-primary-ready-handle-samples,
+#     @fault-primary-ready-handle-time-ns,
+#     @max-fault-primary-ready-handle-time-ns,
+#     @fault-wait-ready-recv-samples,
+#     @fault-wait-ready-recv-time-ns,
+#     @max-fault-wait-ready-recv-time-ns,
+#     @fault-wait-after-ready-recv-samples,
+#     @fault-wait-after-ready-recv-time-ns,
+#     @max-fault-wait-after-ready-recv-time-ns,
+#     @pending-publish-ready, @completion-pending-publish-ready,
+#     @last-publish-request, @last-publish-ready,
+#     @last-completion-publish-ready, @last-publish-ready-recv,
+#     @last-publish-wait-begin, and @last-publish-wait-complete are
+#     experimental.
+#
 # Since: 11.0
 ##
 { 'struct': 'CXLMigrationStats',
@@ -326,7 +778,140 @@
             'remap-pause-time-ns': 'uint64',
             'dirty-sync-calls': 'uint64',
             'dirty-sync-time-ns': 'uint64',
-            'dirty-clear-time-ns': 'uint64' } }
+            'dirty-clear-time-ns': 'uint64',
+            'phase': { 'type': 'CXLMigrationPhase',
+                       'features': [ 'unstable' ] },
+            'phase-transitions': { 'type': 'uint64',
+                                   'features': [ 'unstable' ] },
+            'switch-reason': { 'type': 'CXLMigrationSwitchReason',
+                               'features': [ 'unstable' ] },
+            'switch-iteration': { 'type': 'uint64',
+                                  'features': [ 'unstable' ] },
+            'dst-stage-capacity-bytes': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'dst-stage-slots': { 'type': 'uint64',
+                                 'features': [ 'unstable' ] },
+            'dst-stage-present-slots': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'dst-fault-hits': { 'type': 'uint64',
+                                'features': [ 'unstable' ] },
+            'dst-fault-misses': { 'type': 'uint64',
+                                  'features': [ 'unstable' ] },
+            'dst-fault-read-bytes': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'dst-fault-read-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'dst-fault-place-successes': { 'type': 'uint64',
+                                           'features': [ 'unstable' ] },
+            'dst-fault-place-failures': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'staged-pages': { 'type': 'uint64',
+                              'features': [ 'unstable' ] },
+            'warm-desc-sent-pages': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'warm-desc-sent-bytes': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'warm-payload-fallback-pages': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'warm-desc-skip-unremapped': { 'type': 'uint64',
+                                           'features': [ 'unstable' ] },
+            'warm-publish-pages': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'fault-publish-requests': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'fault-publish-waits': { 'type': 'uint64',
+                                     'features': [ 'unstable' ] },
+            'fault-publish-wait-time-ns': { 'type': 'uint64',
+                                            'features': [ 'unstable' ] },
+            'fault-publish-primary-samples': { 'type': 'uint64',
+                                               'features': [ 'unstable' ] },
+            'fault-publish-primary-time-ns': { 'type': 'uint64',
+                                               'features': [ 'unstable' ] },
+            'max-fault-publish-primary-time-ns': { 'type': 'uint64',
+                                                   'features': [ 'unstable' ] },
+            'fault-publish-burst-samples': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'fault-publish-burst-time-ns': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'max-fault-publish-burst-time-ns': { 'type': 'uint64',
+                                                 'features': [ 'unstable' ] },
+            'fault-primary-ready-send-samples': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'fault-primary-ready-send-time-ns': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'max-fault-primary-ready-send-time-ns': { 'type': 'uint64',
+                                                      'features': [ 'unstable' ] },
+            'fault-publish-req-recv-samples': { 'type': 'uint64',
+                                                'features': [ 'unstable' ] },
+            'fault-publish-req-recv-time-ns': { 'type': 'uint64',
+                                                'features': [ 'unstable' ] },
+            'max-fault-publish-req-recv-time-ns': { 'type': 'uint64',
+                                                    'features': [ 'unstable' ] },
+            'fault-publish-req-handle-samples': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'fault-publish-req-handle-time-ns': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'max-fault-publish-req-handle-time-ns': { 'type': 'uint64',
+                                                      'features': [ 'unstable' ] },
+            'fault-primary-ready-drain-samples': { 'type': 'uint64',
+                                                   'features': [ 'unstable' ] },
+            'fault-primary-ready-drain-time-ns': { 'type': 'uint64',
+                                                   'features': [ 'unstable' ] },
+            'max-fault-primary-ready-drain-time-ns': { 'type': 'uint64',
+                                                       'features': [ 'unstable' ] },
+            'fault-primary-ready-write-samples': { 'type': 'uint64',
+                                                   'features': [ 'unstable' ] },
+            'fault-primary-ready-write-time-ns': { 'type': 'uint64',
+                                                   'features': [ 'unstable' ] },
+            'max-fault-primary-ready-write-time-ns': { 'type': 'uint64',
+                                                       'features': [ 'unstable' ] },
+            'fault-primary-ready-recv-samples': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'fault-primary-ready-recv-time-ns': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'max-fault-primary-ready-recv-time-ns': { 'type': 'uint64',
+                                                      'features': [ 'unstable' ] },
+            'fault-primary-ready-handle-samples': { 'type': 'uint64',
+                                                    'features': [ 'unstable' ] },
+            'fault-primary-ready-handle-time-ns': { 'type': 'uint64',
+                                                    'features': [ 'unstable' ] },
+            'max-fault-primary-ready-handle-time-ns': { 'type': 'uint64',
+                                                        'features': [ 'unstable' ] },
+            'fault-wait-ready-recv-samples': { 'type': 'uint64',
+                                               'features': [ 'unstable' ] },
+            'fault-wait-ready-recv-time-ns': { 'type': 'uint64',
+                                               'features': [ 'unstable' ] },
+            'max-fault-wait-ready-recv-time-ns': { 'type': 'uint64',
+                                                   'features': [ 'unstable' ] },
+            'fault-wait-after-ready-recv-samples': { 'type': 'uint64',
+                                                     'features': [ 'unstable' ] },
+            'fault-wait-after-ready-recv-time-ns': { 'type': 'uint64',
+                                                     'features': [ 'unstable' ] },
+            'max-fault-wait-after-ready-recv-time-ns': { 'type': 'uint64',
+                                                         'features': [ 'unstable' ] },
+            'pending-publish-ready': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'completion-pending-publish-ready': {
+                'type': 'uint64',
+                'features': [ 'unstable' ] },
+            '*last-publish-request': {
+                'type': 'CXLMigrationPublishRequestInfo',
+                'features': [ 'unstable' ] },
+            '*last-publish-ready': {
+                'type': 'CXLMigrationPublishReadyInfo',
+                'features': [ 'unstable' ] },
+            '*last-completion-publish-ready': {
+                'type': 'CXLMigrationPublishReadyInfo',
+                'features': [ 'unstable' ] },
+            '*last-publish-ready-recv': {
+                'type': 'CXLMigrationPublishReadyInfo',
+                'features': [ 'unstable' ] },
+            '*last-publish-wait-begin': {
+                'type': 'CXLMigrationPublishWaitInfo',
+                'features': [ 'unstable' ] },
+            '*last-publish-wait-complete': {
+                'type': 'CXLMigrationPublishWaitInfo',
+                'features': [ 'unstable' ] } } }
 
 ##
 # @MigrationInfo:
@@ -656,9 +1241,16 @@
 #     each RAM page.  Requires a migration URI that supports seeking,
 #     such as a file.  (since 9.0)
 #
+# @x-cxl-hybrid: Enable experimental CXL-assisted hybrid
+#     precopy/postcopy migration controls.  This feature is only a
+#     policy and control-plane enablement flag; the actual migration
+#     still depends on compatible capabilities and parameters being
+#     set.  (Since 11.0)
+#
 # Features:
 #
-# @unstable: Members @x-colo and @x-ignore-shared are experimental.
+# @unstable: Members @x-colo, @x-ignore-shared, and @x-cxl-hybrid are
+#     experimental.
 #
 # Since: 1.2
 ##
@@ -672,7 +1264,8 @@
            { 'name': 'x-ignore-shared', 'features': [ 'unstable' ] },
            'validate-uuid', 'background-snapshot',
            'zero-copy-send', 'postcopy-preempt', 'switchover-ack',
-           'dirty-limit', 'mapped-ram'] }
+           'dirty-limit', 'mapped-ram',
+           { 'name': 'x-cxl-hybrid', 'features': [ 'unstable' ] }] }
 
 ##
 # @MigrationCapabilityStatus:
@@ -939,8 +1532,15 @@
 #
 # Features:
 #
-# @unstable: Members @x-checkpoint-delay and
-#     @x-vcpu-dirty-limit-period are experimental.
+# @unstable: Members @x-checkpoint-delay,
+#     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
+#     @x-cxl-switch-max-iters, @x-cxl-switch-min-remaining,
+#     @x-cxl-switch-gain-floor, @x-cxl-brake-enable,
+#     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
+#     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
+#     @x-cxl-dst-cache-size, @x-cxl-shared-backing,
+#     @x-cxl-warm-transport, and @x-cxl-dst-install-policy are
+#     experimental.
 #
 # Since: 2.4
 ##
@@ -965,6 +1565,32 @@
            'zero-page-detection',
            'direct-io',
            'cxl-path',
+           { 'name': 'x-cxl-switch-dirty-threshold',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-max-iters',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-min-remaining',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-gain-floor',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-brake-enable',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-brake-remap-granule',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-prefetch-rate',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-prefetch-heat-window-ms',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-prefetch-batch-pages',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-dst-cache-size',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-shared-backing',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-warm-transport',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-dst-install-policy',
+             'features': [ 'unstable' ] },
            'cpr-exec-command'] }
 
 ##
@@ -1141,14 +1767,74 @@
 #     Empty string disables CXL backing.  This only has effect if the
 #     @mapped-ram capability is enabled.  (Since 11.0)
 #
+# @x-cxl-switch-dirty-threshold: Dirty page rate threshold, in pages
+#     per second, above which hybrid migration may stop pursuing
+#     further pure precopy convergence and prepare for brake/switch
+#     logic.  Zero disables this threshold.  (Since 11.0)
+#
+# @x-cxl-switch-max-iters: Maximum number of precopy iterations before
+#     hybrid migration may switch away from bulk precopy.  Zero means
+#     no explicit iteration limit.  (Since 11.0)
+#
+# @x-cxl-switch-min-remaining: Remaining migration payload threshold,
+#     in bytes, below which hybrid migration may switch away from
+#     bulk precopy.  Zero disables this threshold.  (Since 11.0)
+#
+# @x-cxl-switch-gain-floor: Minimum per-iteration progress, in bytes,
+#     required to justify another bulk precopy round.  Zero disables
+#     this threshold.  (Since 11.0)
+#
+# @x-cxl-brake-enable: Enable the hybrid brake phase that keeps
+#     source-side CXL write redirection active before postcopy
+#     switchover.  Default is false.  (Since 11.0)
+#
+# @x-cxl-brake-remap-granule: Override for the hybrid brake remap
+#     granule, in bytes.  Zero means automatic selection.  (Since
+#     11.0)
+#
+# @x-cxl-prefetch-rate: Maximum rate, in bytes per second, for
+#     background hybrid warm push into destination CXL staging.  Zero
+#     means no explicit hybrid-prefetch cap.  (Since 11.0)
+#
+# @x-cxl-prefetch-heat-window-ms: Heat accounting window, in
+#     milliseconds, used by hybrid warm-push policy.  Zero means
+#     implementation default.  (Since 11.0)
+#
+# @x-cxl-prefetch-batch-pages: Maximum number of pages issued per
+#     hybrid warm-push batch.  Zero means implementation default.
+#     (Since 11.0)
+#
+# @x-cxl-dst-cache-size: Destination CXL staging capacity target, in
+#     bytes, used by the hybrid control plane.  Zero means automatic
+#     or device-sized behavior.  (Since 11.0)
+#
+# @x-cxl-shared-backing: Confirm that source and destination
+#     @cxl-path resolve the same interconnect-visible or otherwise
+#     explicitly shared CXL backing, allowing descriptor-only warm
+#     transport to reference stable CXL offsets across endpoints.
+#     Default is false.  (Since 11.0)
+#
+# @x-cxl-warm-transport: Experimental warm-page transport policy for
+#     CXL hybrid postcopy.  (Since 11.0)
+#
+# @x-cxl-dst-install-policy: Experimental destination-side install
+#     policy for CXL hybrid postcopy.  (Since 11.0)
+#
 # @cpr-exec-command: Command to start the new QEMU process when @mode
 #     is @cpr-exec.  The first list element is the program's filename,
 #     the remainder its arguments.  (Since 10.2)
 #
 # Features:
 #
-# @unstable: Members @x-checkpoint-delay and
-#     @x-vcpu-dirty-limit-period are experimental.
+# @unstable: Members @x-checkpoint-delay,
+#     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
+#     @x-cxl-switch-max-iters, @x-cxl-switch-min-remaining,
+#     @x-cxl-switch-gain-floor, @x-cxl-brake-enable,
+#     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
+#     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
+#     @x-cxl-dst-cache-size, @x-cxl-shared-backing,
+#     @x-cxl-warm-transport, and @x-cxl-dst-install-policy are
+#     experimental.
 #
 # Since: 2.4
 ##
@@ -1185,6 +1871,34 @@
             '*zero-page-detection': 'ZeroPageDetection',
             '*direct-io': 'bool',
             '*cxl-path': 'StrOrNull',
+            '*x-cxl-switch-dirty-threshold': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-max-iters': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-min-remaining': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-gain-floor': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-brake-enable': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-brake-remap-granule': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-prefetch-rate': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-prefetch-heat-window-ms': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            '*x-cxl-prefetch-batch-pages': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            '*x-cxl-dst-cache-size': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-shared-backing': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-warm-transport': {
+                'type': 'CXLHybridWarmTransport',
+                'features': [ 'unstable' ] },
+            '*x-cxl-dst-install-policy': {
+                'type': 'CXLHybridDstInstallPolicy',
+                'features': [ 'unstable' ] },
             '*cpr-exec-command': [ 'str' ]} }
 
 ##

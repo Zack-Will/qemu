@@ -60,6 +60,35 @@ void qemu_savevm_send_postcopy_run(QEMUFile *f);
 void qemu_savevm_send_postcopy_resume(QEMUFile *f);
 void qemu_savevm_send_recv_bitmap(QEMUFile *f, char *block_name);
 void qemu_savevm_maybe_send_switchover_start(QEMUFile *f);
+void qemu_savevm_send_cxl_hybrid_metadata(QEMUFile *f,
+                                          uint32_t generation,
+                                          uint32_t entries,
+                                          const uint8_t *buf,
+                                          size_t len);
+void qemu_savevm_send_cxl_hybrid_warm_page(QEMUFile *f,
+                                           const char *ramblock,
+                                           uint64_t offset,
+                                           const uint8_t *buf,
+                                           size_t len);
+void qemu_savevm_send_cxl_hybrid_warm_desc(QEMUFile *f,
+                                           const char *ramblock,
+                                           uint64_t guest_offset,
+                                           uint64_t cxl_offset,
+                                           const uint8_t *buf,
+                                           size_t len);
+void qemu_savevm_send_cxl_hybrid_warm_desc_batch(QEMUFile *f,
+                                                 uint32_t generation,
+                                                 uint32_t entries,
+                                                 const uint8_t *buf,
+                                                 size_t len);
+void qemu_savevm_send_cxl_hybrid_publish_ready(QEMUFile *f,
+                                               const char *ramblock,
+                                               uint64_t guest_offset,
+                                               uint64_t cxl_offset,
+                                               const uint8_t *buf,
+                                               size_t len,
+                                               bool fault_primary);
+void qemu_savevm_send_cxl_hybrid_publish_quiesce(QEMUFile *f);
 
 void qemu_savevm_send_postcopy_ram_discard(QEMUFile *f, const char *name,
                                            uint16_t len,

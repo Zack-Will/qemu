@@ -20,6 +20,7 @@
 #include "qemu/madvise.h"
 #include "exec/target_page.h"
 #include "migration.h"
+#include "cxl.h"
 #include "qemu-file.h"
 #include "savevm.h"
 #include "postcopy-ram.h"
@@ -957,6 +958,8 @@ static int postcopy_request_page(MigrationIncomingState *mis, RAMBlock *rb,
                                  ram_addr_t start, uint64_t haddr, uint32_t tid)
 {
     void *aligned = (void *)(uintptr_t)ROUND_DOWN(haddr, qemu_ram_pagesize(rb));
+    Error *local_err = NULL;
+    int ret;
 
     /*
      * Discarded pages (via RamDiscardManager) are never migrated. On unlikely
@@ -971,6 +974,27 @@ static int postcopy_request_page(MigrationIncomingState *mis, RAMBlock *rb,
         bool received = ramblock_recv_bitmap_test_byte_offset(rb, start);
 
         return received ? 0 : postcopy_place_page_zero(mis, aligned, rb);
+    }
+
+    if (migrate_cxl_hybrid()) {
+        ret = cxl_hybrid_wait_and_resolve_fault(mis, rb, start, haddr, tid,
+                                                postcopy_place_page,
+                                                &local_err);
+        if (ret < 0) {
+            error_report_err(local_err);
+            return ret;
+        }
+        return 0;
+    }
+
+    ret = cxl_hybrid_try_resolve_fault(mis, rb, start, postcopy_place_page,
+                                       &local_err);
+    if (ret < 0) {
+        error_report_err(local_err);
+        return ret;
+    }
+    if (ret > 0) {
+        return 0;
     }
 
     return migrate_send_rp_req_pages(mis, rb, start, haddr, tid);
