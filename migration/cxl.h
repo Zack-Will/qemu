@@ -380,6 +380,8 @@ int cxl_hybrid_handle_publish_request(const char *ramblock,
                                       uint32_t generation,
                                       uint64_t req_recv_ns,
                                       Error **errp);
+int cxl_hybrid_handle_fault_ready_record(
+    const CXLHybridFaultReadyRecord *record, Error **errp);
 int cxl_hybrid_publish_fault_request_core(const char *ramblock,
                                           uint64_t guest_offset,
                                           uint32_t page_len,

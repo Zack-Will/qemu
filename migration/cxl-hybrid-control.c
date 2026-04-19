@@ -299,8 +299,6 @@ static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)
 {
     CXLHybridControlState *state = opaque;
     CXLHybridFaultReadyRecord record;
-    RAMBlock *block;
-    ram_addr_t block_offset;
 
     trace_cxl_hybrid_ctrl_ready_poller_start();
     while (!qatomic_read(&state->shutdown)) {
@@ -310,16 +308,7 @@ static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)
             if (record.generation != cxl_hybrid_fault_publish_generation()) {
                 continue;
             }
-            if (!cxl_hybrid_lookup_global_page(record.page_index, &block,
-                                               &block_offset)) {
-                continue;
-            }
-            cxl_hybrid_dst_staging_register_external_page(
-                qemu_ram_get_idstr(block),
-                block_offset,
-                record.cxl_offset,
-                TARGET_PAGE_SIZE,
-                &local_err);
+            cxl_hybrid_handle_fault_ready_record(&record, &local_err);
             error_free(local_err);
             continue;
         }

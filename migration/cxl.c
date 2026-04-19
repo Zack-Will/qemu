@@ -2817,6 +2817,48 @@ int cxl_hybrid_handle_publish_ready(const CXLHybridPublishNotify *notify,
     return 0;
 }
 
+int cxl_hybrid_handle_fault_ready_record(
+    const CXLHybridFaultReadyRecord *record, Error **errp)
+{
+    RAMBlock *block;
+    ram_addr_t block_offset;
+    bool fault_primary;
+    uint64_t ready_recv_ns;
+    uint64_t ready_recv_elapsed_ns = 0;
+    CXLHybridPublishNotify notify = { 0 };
+
+    if (!record) {
+        error_setg(errp, "CXL hybrid fault ready record missing");
+        return -EINVAL;
+    }
+
+    if (!cxl_hybrid_lookup_global_page(record->page_index, &block,
+                                       &block_offset)) {
+        error_setg(errp,
+                   "CXL hybrid fault ready page %" PRIu64 " no longer resolves",
+                   record->page_index);
+        return -ENOENT;
+    }
+
+    fault_primary = record->flags & CXL_HYBRID_FAULT_READY_F_PRIMARY;
+    ready_recv_ns = cxl_now_ns();
+    notify.ramblock = (char *)qemu_ram_get_idstr(block);
+    notify.guest_offset = block_offset;
+    notify.cxl_offset = record->cxl_offset;
+    notify.page_len = TARGET_PAGE_SIZE;
+    notify.generation = record->generation;
+
+    if (fault_primary) {
+        if (record->ready_ts_ns && ready_recv_ns >= record->ready_ts_ns) {
+            ready_recv_elapsed_ns = ready_recv_ns - record->ready_ts_ns;
+        }
+        cxl_hybrid_record_publish_ready_recv_time(ready_recv_elapsed_ns);
+    }
+
+    return cxl_hybrid_handle_publish_ready(&notify, fault_primary,
+                                           ready_recv_ns, errp);
+}
+
 int cxl_hybrid_send_warm_descriptor(QEMUFile *f, const char *ramblock,
                                     uint64_t guest_offset, Error **errp)
 {
