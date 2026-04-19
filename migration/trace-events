@@ -82,6 +82,10 @@ cxl_hybrid_publish_ready_drain_begin(uint64_t pending) "pending=%" PRIu64
 cxl_hybrid_publish_ready_drain_end(int sent, uint64_t pending) "sent=%d pending=%" PRIu64
 cxl_hybrid_publish_ready_send(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u"
 cxl_hybrid_publish_ready_recv(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u"
+cxl_hybrid_ctrl_request_worker_start(void) ""
+cxl_hybrid_ctrl_request_worker_stop(void) ""
+cxl_hybrid_ctrl_ready_poller_start(void) ""
+cxl_hybrid_ctrl_ready_poller_stop(void) ""
 cxl_hybrid_publish_wait_begin(const char *ramblock, uint64_t guest_offset, uint32_t generation) "%s guest=0x%" PRIx64 " generation=%u"
 cxl_hybrid_publish_wait_complete(const char *ramblock, uint64_t guest_offset, uint32_t generation, uint64_t wait_time_ns, int ret) "%s guest=0x%" PRIx64 " generation=%u wait_time_ns=%" PRIu64 " ret=%d"
 cxl_hybrid_completion_prepare_begin(uint64_t pending) "pending=%" PRIu64

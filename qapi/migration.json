@@ -297,6 +297,27 @@
             { 'name': 'eager', 'features': [ 'unstable' ] } ] }
 
 ##
+# @CXLHybridFaultControlPlane:
+#
+# Experimental fault control-plane transport for CXL hybrid postcopy.
+#
+# @stream: keep fault publish request and ready notifications on the
+#     existing migration return path and main migration stream
+#
+# @cxl: move fault publish request and ready notifications into a
+#     shared CXL-backed control region
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLHybridFaultControlPlane',
+  'data': [ { 'name': 'stream', 'features': [ 'unstable' ] },
+            { 'name': 'cxl', 'features': [ 'unstable' ] } ] }
+
+##
 # @VfioStats:
 #
 # Detailed VFIO devices migration statistics
@@ -1539,8 +1560,8 @@
 #     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
 #     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
 #     @x-cxl-dst-cache-size, @x-cxl-shared-backing,
-#     @x-cxl-warm-transport, and @x-cxl-dst-install-policy are
-#     experimental.
+#     @x-cxl-warm-transport, @x-cxl-dst-install-policy, and
+#     @x-cxl-fault-control-plane are experimental.
 #
 # Since: 2.4
 ##
@@ -1590,6 +1611,8 @@
            { 'name': 'x-cxl-warm-transport',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-dst-install-policy',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-fault-control-plane',
              'features': [ 'unstable' ] },
            'cpr-exec-command'] }
 
@@ -1820,6 +1843,9 @@
 # @x-cxl-dst-install-policy: Experimental destination-side install
 #     policy for CXL hybrid postcopy.  (Since 11.0)
 #
+# @x-cxl-fault-control-plane: Experimental fault control-plane
+#     transport for CXL hybrid postcopy.  (Since 11.0)
+#
 # @cpr-exec-command: Command to start the new QEMU process when @mode
 #     is @cpr-exec.  The first list element is the program's filename,
 #     the remainder its arguments.  (Since 10.2)
@@ -1833,8 +1859,8 @@
 #     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
 #     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
 #     @x-cxl-dst-cache-size, @x-cxl-shared-backing,
-#     @x-cxl-warm-transport, and @x-cxl-dst-install-policy are
-#     experimental.
+#     @x-cxl-warm-transport, @x-cxl-dst-install-policy, and
+#     @x-cxl-fault-control-plane are experimental.
 #
 # Since: 2.4
 ##
@@ -1898,6 +1924,9 @@
                 'features': [ 'unstable' ] },
             '*x-cxl-dst-install-policy': {
                 'type': 'CXLHybridDstInstallPolicy',
+                'features': [ 'unstable' ] },
+            '*x-cxl-fault-control-plane': {
+                'type': 'CXLHybridFaultControlPlane',
                 'features': [ 'unstable' ] },
             '*cpr-exec-command': [ 'str' ]} }
 

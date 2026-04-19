@@ -100,13 +100,18 @@ static size_t cxl_global_page_index(RAMBlock *block, ram_addr_t block_offset);
 static size_t cxl_global_region_index(ram_addr_t global_offset);
 static int cxl_destination_staging_init(Error **errp);
 static void cxl_destination_staging_cleanup(void);
-static bool cxl_hybrid_lookup_page(size_t page_idx, RAMBlock **blockp,
-                                   ram_addr_t *block_offsetp);
 static bool cxl_hybrid_page_eligible(size_t page_idx);
 static uint64_t cxl_hybrid_prefetch_rate_limit(void);
 static void cxl_hybrid_warm_sleep(uint32_t pages_sent);
 static bool cxl_hybrid_warm_disabled(void);
-static uint64_t cxl_mapped_ram_required_bytes(uint64_t align);
+static int cxl_hybrid_stream_ready_consumer(
+    const CXLHybridFaultReadyRecord *record, Error **errp);
+static void cxl_hybrid_queue_publish_ready(const char *ramblock,
+                                           uint64_t guest_offset,
+                                           uint64_t cxl_offset,
+                                           uint32_t page_len,
+                                           uint32_t generation,
+                                           bool fault_primary);
 static char *cxl_hybrid_publish_key(const char *ramblock, uint64_t guest_offset);
 static char *cxl_hybrid_publish_wait_key(const char *ramblock,
                                          uint64_t guest_offset,
@@ -765,6 +770,7 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
     const char *ramblock;
     void *aligned;
     bool publish_req_sent = false;
+    size_t page_index;
     uint32_t generation;
     uint64_t wait_start_ns;
     uint64_t wait_time_ns;
@@ -819,9 +825,17 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
         }
         qemu_mutex_unlock(&cxl_state.publish_mutex);
     }
-    ret = migrate_send_rp_cxl_publish_req(mis, rb, offset,
-                                          qemu_ram_pagesize(rb), generation,
-                                          &publish_req_sent);
+    if (migrate_cxl_fault_control_plane_cxl()) {
+        page_index = cxl_global_page_index(rb, offset);
+        ret = cxl_hybrid_ctrl_enqueue_fault_request(page_index, generation,
+                                                    wait_start_ns, errp);
+        publish_req_sent = (ret == 0);
+    } else {
+        ret = migrate_send_rp_cxl_publish_req(mis, rb, offset,
+                                              qemu_ram_pagesize(rb),
+                                              generation,
+                                              &publish_req_sent);
+    }
     if (ret) {
         if (cxl_state.publish_mutex_ready) {
             qemu_mutex_lock(&cxl_state.publish_mutex);
@@ -937,7 +951,10 @@ static int cxl_destination_staging_init(Error **errp)
     }
 
     total_capacity = cioc->map_size;
-    base_offset = cxl_mapped_ram_required_bytes(cioc->align);
+    base_offset = cxl_hybrid_mapped_ram_required_bytes(cioc->align);
+    if (migrate_cxl_fault_control_plane_cxl()) {
+        base_offset += cxl_hybrid_fault_control_region_bytes();
+    }
     if (base_offset >= total_capacity) {
         error_setg(errp,
                    "CXL hybrid destination staging has no free space after mapped-ram backing: "
@@ -968,11 +985,14 @@ static int cxl_destination_staging_init(Error **errp)
 
 static void cxl_destination_staging_cleanup(void)
 {
+    cxl_hybrid_control_cleanup_destination();
     cxl_hybrid_dst_staging_cleanup();
 }
 
 bool cxl_hybrid_init_destination(Error **errp)
 {
+    int ret;
+
     cxl_hybrid_ensure_publish_mutex();
     cxl_hybrid_ensure_fault_wait_records();
     cxl_state.hybrid_enabled = migrate_cxl_hybrid();
@@ -981,7 +1001,18 @@ bool cxl_hybrid_init_destination(Error **errp)
         cxl_state.phase = CXL_HYBRID_PHASE_PRECOPY_BULK;
         cxl_state.phase_transitions = MAX(cxl_state.phase_transitions, 1);
     }
-    return cxl_destination_staging_init(errp) == 0;
+    ret = cxl_destination_staging_init(errp);
+    if (ret) {
+        return false;
+    }
+    if (migrate_cxl_fault_control_plane_cxl()) {
+        ret = cxl_hybrid_control_init_destination(errp);
+        if (ret) {
+            cxl_destination_staging_cleanup();
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool cxl_write_redirect_enabled(void)
@@ -1052,7 +1083,7 @@ static uint64_t cxl_mapped_ram_pages_offset_alignment(uint64_t align)
     return MAX((uint64_t)CXL_MAPPED_RAM_FILE_OFFSET_ALIGNMENT, align);
 }
 
-static uint64_t cxl_mapped_ram_required_bytes(uint64_t align)
+uint64_t cxl_hybrid_mapped_ram_required_bytes(uint64_t align)
 {
     RAMBlock *block;
     uint64_t offset = 0;
@@ -1284,7 +1315,7 @@ void cxl_populate_migration_info(MigrationInfo *info)
     }
 }
 
-static bool cxl_hybrid_lookup_page(size_t page_idx, RAMBlock **blockp,
+bool cxl_hybrid_lookup_global_page(size_t page_idx, RAMBlock **blockp,
                                    ram_addr_t *block_offsetp)
 {
     RAMBlock *block;
@@ -1351,7 +1382,7 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
     uint64_t offset;
     int ret;
 
-    if (!cxl_hybrid_lookup_page(page_idx, &block, &block_offset)) {
+    if (!cxl_hybrid_lookup_global_page(page_idx, &block, &block_offset)) {
         error_setg(errp, "CXL hybrid warm push page %zu no longer resolves",
                    page_idx);
         return -ENOENT;
@@ -2138,6 +2169,57 @@ void cxl_hybrid_record_publish_ready_recv_time(uint64_t elapsed_ns)
                              elapsed_ns);
 }
 
+void cxl_hybrid_note_publish_request_received(const char *ramblock,
+                                              uint64_t guest_offset,
+                                              uint32_t generation,
+                                              uint64_t req_recv_ns)
+{
+    trace_cxl_hybrid_publish_request_recv(ramblock, guest_offset, generation);
+    if (cxl_state.publish_mutex_ready) {
+        qemu_mutex_lock(&cxl_state.publish_mutex);
+        cxl_hybrid_set_last_publish_request(
+            &cxl_state.last_publish_request,
+            ramblock,
+            guest_offset,
+            generation,
+            cxl_state.last_publish_request.count + 1);
+        qemu_mutex_unlock(&cxl_state.publish_mutex);
+    }
+    if (req_recv_ns) {
+        cxl_hybrid_record_timing(&cxl_state.fault_publish_req_recv_samples,
+                                 &cxl_state.fault_publish_req_recv_time_ns,
+                                 &cxl_state.max_fault_publish_req_recv_time_ns,
+                                 cxl_now_ns() - req_recv_ns);
+    }
+}
+
+static int cxl_hybrid_stream_ready_consumer(
+    const CXLHybridFaultReadyRecord *record, Error **errp)
+{
+    RAMBlock *block;
+    ram_addr_t block_offset;
+    bool fault_primary;
+
+    if (!record) {
+        error_setg(errp, "CXL hybrid stream ready consumer missing record");
+        return -EINVAL;
+    }
+
+    if (!cxl_hybrid_lookup_global_page(record->page_index, &block,
+                                       &block_offset)) {
+        error_setg(errp,
+                   "CXL hybrid stream ready page %" PRIu64 " no longer resolves",
+                   record->page_index);
+        return -ENOENT;
+    }
+
+    fault_primary = record->flags & CXL_HYBRID_FAULT_READY_F_PRIMARY;
+    cxl_hybrid_queue_publish_ready(qemu_ram_get_idstr(block), block_offset,
+                                   record->cxl_offset, TARGET_PAGE_SIZE,
+                                   record->generation, fault_primary);
+    return 0;
+}
+
 static void cxl_hybrid_queue_publish_ready(const char *ramblock,
                                            uint64_t guest_offset,
                                            uint64_t cxl_offset,
@@ -2388,6 +2470,7 @@ static void cxl_hybrid_publish_fault_burst(const char *ramblock,
                                            uint64_t guest_offset,
                                            uint32_t page_len,
                                            uint32_t generation,
+                                           CXLHybridFaultReadyConsumer ready_consumer,
                                            Error **errp)
 {
     RAMBlock *block;
@@ -2408,6 +2491,8 @@ static void cxl_hybrid_publish_fault_burst(const char *ramblock,
     for (page = 1; page < CXL_HYBRID_FAULT_BURST_PAGES; page++) {
         uint64_t neighbor_offset;
         uint64_t cxl_offset;
+        size_t page_index;
+        CXLHybridFaultReadyRecord ready = { 0 };
         Error *local_err = NULL;
         int ret;
 
@@ -2429,9 +2514,23 @@ static void cxl_hybrid_publish_fault_burst(const char *ramblock,
             warn_report_err(local_err);
             continue;
         }
+        page_index = cxl_global_page_index(block, neighbor_offset);
+        ready.page_index = page_index;
+        ready.cxl_offset = cxl_offset;
+        ready.generation = generation;
+        ready.flags = CXL_HYBRID_FAULT_READY_F_BURST_NEIGHBOR;
+        if (cxl_hybrid_range_is_remapped(block, neighbor_offset,
+                                         TARGET_PAGE_SIZE)) {
+            ready.flags |= CXL_HYBRID_FAULT_READY_F_SOURCE_REMAPPED;
+        }
+        ready.ready_ts_ns = cxl_now_ns();
 
-        cxl_hybrid_queue_publish_ready(ramblock, neighbor_offset, cxl_offset,
-                                       TARGET_PAGE_SIZE, generation, false);
+        if (ready_consumer) {
+            ret = ready_consumer(&ready, &local_err);
+            if (ret) {
+                warn_report_err(local_err);
+            }
+        }
     }
 }
 
@@ -2442,6 +2541,35 @@ int cxl_hybrid_handle_publish_request(const char *ramblock,
                                       uint64_t req_recv_ns,
                                       Error **errp)
 {
+    CXLHybridFaultReadyRecord primary_ready = { 0 };
+    int ret;
+
+    cxl_hybrid_note_publish_request_received(ramblock, guest_offset,
+                                             generation, req_recv_ns);
+
+    ret = cxl_hybrid_publish_fault_request_core(ramblock, guest_offset,
+                                                page_len, generation, true,
+                                                &primary_ready,
+                                                cxl_hybrid_stream_ready_consumer,
+                                                errp);
+    if (ret) {
+        return ret;
+    }
+    return 0;
+}
+
+int cxl_hybrid_publish_fault_request_core(const char *ramblock,
+                                          uint64_t guest_offset,
+                                          uint32_t page_len,
+                                          uint32_t generation,
+                                          bool emit_burst,
+                                          CXLHybridFaultReadyRecord *primary_ready,
+                                          CXLHybridFaultReadyConsumer ready_consumer,
+                                          Error **errp)
+{
+    RAMBlock *block;
+    ram_addr_t block_offset;
+    size_t page_index;
     uint64_t cxl_offset;
     uint64_t handle_start_ns;
     uint64_t primary_start_ns;
@@ -2451,46 +2579,67 @@ int cxl_hybrid_handle_publish_request(const char *ramblock,
     uint64_t burst_time_ns;
     int ret;
 
-    trace_cxl_hybrid_publish_request_recv(ramblock, guest_offset, generation);
-    handle_start_ns = req_recv_ns ? req_recv_ns : cxl_now_ns();
-    if (cxl_state.publish_mutex_ready) {
-        qemu_mutex_lock(&cxl_state.publish_mutex);
-        cxl_hybrid_set_last_publish_request(
-            &cxl_state.last_publish_request,
-            ramblock,
-            guest_offset,
-            generation,
-            cxl_state.last_publish_request.count + 1);
-        qemu_mutex_unlock(&cxl_state.publish_mutex);
+    if (!ramblock || !primary_ready) {
+        error_setg(errp, "CXL hybrid publish fault request missing arguments");
+        return -EINVAL;
     }
-    primary_start_ns = cxl_now_ns();
+
+    block = qemu_ram_block_by_name(ramblock);
+    if (!block || !offset_in_ramblock(block, guest_offset) ||
+        guest_offset + page_len > block->used_length) {
+        error_setg(errp, "CXL hybrid publish fault request page is invalid");
+        return -EINVAL;
+    }
+
+    block_offset = guest_offset;
+    page_index = cxl_global_page_index(block, block_offset);
+    handle_start_ns = cxl_now_ns();
+    primary_start_ns = handle_start_ns;
     ret = cxl_hybrid_publish_page_to_cxl(ramblock, guest_offset, page_len,
                                          generation, &cxl_offset, errp);
     if (ret) {
         return ret;
     }
 
-    cxl_hybrid_queue_publish_ready(ramblock, guest_offset, cxl_offset, page_len,
-                                   generation, true);
-    handle_time_ns = cxl_now_ns() - handle_start_ns;
-    cxl_hybrid_record_timing(&cxl_state.fault_publish_req_handle_samples,
-                             &cxl_state.fault_publish_req_handle_time_ns,
-                             &cxl_state.max_fault_publish_req_handle_time_ns,
-                             handle_time_ns);
+    memset(primary_ready, 0, sizeof(*primary_ready));
+    primary_ready->page_index = page_index;
+    primary_ready->cxl_offset = cxl_offset;
+    primary_ready->generation = generation;
+    primary_ready->flags = CXL_HYBRID_FAULT_READY_F_PRIMARY;
+    if (cxl_hybrid_range_is_remapped(block, guest_offset, page_len)) {
+        primary_ready->flags |= CXL_HYBRID_FAULT_READY_F_SOURCE_REMAPPED;
+    }
+    primary_ready->ready_ts_ns = cxl_now_ns();
+
+    if (ready_consumer) {
+        ret = ready_consumer(primary_ready, errp);
+        if (ret) {
+            return ret;
+        }
+    }
+
     primary_time_ns = cxl_now_ns() - primary_start_ns;
     cxl_hybrid_record_timing(&cxl_state.fault_publish_primary_samples,
                              &cxl_state.fault_publish_primary_time_ns,
                              &cxl_state.max_fault_publish_primary_time_ns,
                              primary_time_ns);
 
-    burst_start_ns = cxl_now_ns();
-    cxl_hybrid_publish_fault_burst(ramblock, guest_offset, page_len,
-                                   generation, errp);
-    burst_time_ns = cxl_now_ns() - burst_start_ns;
-    cxl_hybrid_record_timing(&cxl_state.fault_publish_burst_samples,
-                             &cxl_state.fault_publish_burst_time_ns,
-                             &cxl_state.max_fault_publish_burst_time_ns,
-                             burst_time_ns);
+    if (emit_burst) {
+        burst_start_ns = cxl_now_ns();
+        cxl_hybrid_publish_fault_burst(ramblock, guest_offset, page_len,
+                                       generation, ready_consumer, errp);
+        burst_time_ns = cxl_now_ns() - burst_start_ns;
+        cxl_hybrid_record_timing(&cxl_state.fault_publish_burst_samples,
+                                 &cxl_state.fault_publish_burst_time_ns,
+                                 &cxl_state.max_fault_publish_burst_time_ns,
+                                 burst_time_ns);
+    }
+
+    handle_time_ns = cxl_now_ns() - handle_start_ns;
+    cxl_hybrid_record_timing(&cxl_state.fault_publish_req_handle_samples,
+                             &cxl_state.fault_publish_req_handle_time_ns,
+                             &cxl_state.max_fault_publish_req_handle_time_ns,
+                             handle_time_ns);
     return 0;
 }
 
@@ -2920,7 +3069,11 @@ static bool cxl_check_dev_size(QIOChannelCXL *cioc, const char *path,
                                Error **errp)
 {
     if (cioc->dev_size > 0) {
-        uint64_t required = cxl_mapped_ram_required_bytes(cioc->align);
+        uint64_t required = cxl_hybrid_mapped_ram_required_bytes(cioc->align);
+
+        if (migrate_cxl_fault_control_plane_cxl()) {
+            required += cxl_hybrid_fault_control_region_bytes();
+        }
 
         if ((uint64_t)cioc->dev_size < required) {
             error_setg(errp, "CXL device %s too small: %" PRId64
@@ -3197,7 +3350,7 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
         warn_report("CXL write-redirect: failed to dup fd, disabled");
         return;
     }
-    cxl_state.mmap_size = cxl_mapped_ram_required_bytes(align);
+    cxl_state.mmap_size = cxl_hybrid_mapped_ram_required_bytes(align);
     if (dev_size > 0 && (uint64_t)dev_size < cxl_state.mmap_size) {
         warn_report("CXL write-redirect: device too small for mmap state (%"
                     PRIu64 " < %" PRIu64 ")",
@@ -3725,7 +3878,20 @@ uint64_t cxl_clear_remapped_dirty_bits(RAMBlock *block)
 
 bool cxl_hybrid_init_source(void)
 {
-    return cxl_state.hybrid_enabled;
+    Error *local_err = NULL;
+    int ret;
+
+    if (!cxl_state.hybrid_enabled) {
+        return false;
+    }
+    if (migrate_cxl_fault_control_plane_cxl()) {
+        ret = cxl_hybrid_control_init_source(&local_err);
+        if (ret) {
+            error_report_err(local_err);
+            return false;
+        }
+    }
+    return true;
 }
 
 void cxl_hybrid_enter_phase(CXLHybridPhase phase,
@@ -3753,6 +3919,7 @@ void cxl_hybrid_enter_phase(CXLHybridPhase phase,
 
 void cxl_hybrid_cleanup_source(void)
 {
+    cxl_hybrid_control_cleanup_source();
     cxl_cleanup_outgoing_migration();
 }
 

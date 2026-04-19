@@ -81,6 +81,8 @@
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_BATCH_PAGES 0
 #define DEFAULT_MIGRATE_X_CXL_DST_CACHE_SIZE 0
 #define DEFAULT_MIGRATE_X_CXL_SHARED_BACKING false
+#define DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE \
+    CXL_HYBRID_FAULT_CONTROL_PLANE_STREAM
 #define DEFAULT_MIGRATE_X_CXL_WARM_TRANSPORT CXL_HYBRID_WARM_TRANSPORT_AUTO
 #define DEFAULT_MIGRATE_X_CXL_DST_INSTALL_POLICY \
     CXL_HYBRID_DST_INSTALL_POLICY_ON_DEMAND
@@ -230,6 +232,10 @@ const Property migration_properties[] = {
     DEFINE_PROP_BOOL("x-cxl-shared-backing", MigrationState,
                       parameters.x_cxl_shared_backing,
                       DEFAULT_MIGRATE_X_CXL_SHARED_BACKING),
+    DEFINE_PROP_CXL_HYBRID_FAULT_CONTROL_PLANE("x-cxl-fault-control-plane",
+                      MigrationState,
+                      parameters.x_cxl_fault_control_plane,
+                      DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE),
     DEFINE_PROP_CXL_HYBRID_WARM_TRANSPORT("x-cxl-warm-transport",
                       MigrationState,
                       parameters.x_cxl_warm_transport,
@@ -1046,6 +1052,19 @@ bool migrate_cxl_shared_backing(void)
     return s->parameters.x_cxl_shared_backing;
 }
 
+CXLHybridFaultControlPlane migrate_cxl_fault_control_plane(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_fault_control_plane;
+}
+
+bool migrate_cxl_fault_control_plane_cxl(void)
+{
+    return migrate_cxl_fault_control_plane() ==
+           CXL_HYBRID_FAULT_CONTROL_PLANE_CXL;
+}
+
 CXLHybridWarmTransport migrate_cxl_warm_transport(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1263,6 +1282,7 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_prefetch_batch_pages,
         &p->has_x_cxl_dst_cache_size,
         &p->has_x_cxl_shared_backing,
+        &p->has_x_cxl_fault_control_plane,
         &p->has_x_cxl_warm_transport,
         &p->has_x_cxl_dst_install_policy,
         &p->has_cpr_exec_command,
@@ -1298,6 +1318,8 @@ MigrationParameters *qmp_query_migrate_parameters(Error **errp)
 
 void migrate_params_init(MigrationParameters *params)
 {
+    params->x_cxl_fault_control_plane =
+        DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE;
     params->x_cxl_dst_install_policy =
         DEFAULT_MIGRATE_X_CXL_DST_INSTALL_POLICY;
     migrate_mark_all_params_present(params);
@@ -1485,6 +1507,13 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->x_cxl_fault_control_plane >=
+        CXL_HYBRID_FAULT_CONTROL_PLANE__MAX) {
+        error_setg(errp, "Invalid x-cxl-fault-control-plane value %d",
+                   params->x_cxl_fault_control_plane);
+        return false;
+    }
+
     if (params->x_cxl_warm_transport >= CXL_HYBRID_WARM_TRANSPORT__MAX) {
         error_setg(errp, "Invalid x-cxl-warm-transport value %d",
                    params->x_cxl_warm_transport);
@@ -1502,6 +1531,14 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         !params->x_cxl_shared_backing) {
         error_setg(errp,
                    "x-cxl-warm-transport=cxl-offset requires x-cxl-shared-backing=true");
+        return false;
+    }
+
+    if (params->x_cxl_fault_control_plane ==
+            CXL_HYBRID_FAULT_CONTROL_PLANE_CXL &&
+        !params->x_cxl_shared_backing) {
+        error_setg(errp,
+                   "x-cxl-fault-control-plane=cxl requires x-cxl-shared-backing=true");
         return false;
     }
 
@@ -1673,6 +1710,9 @@ static void migrate_params_test_apply(MigrationParameters *params,
     }
     if (params->has_x_cxl_shared_backing) {
         dest->x_cxl_shared_backing = params->x_cxl_shared_backing;
+    }
+    if (params->has_x_cxl_fault_control_plane) {
+        dest->x_cxl_fault_control_plane = params->x_cxl_fault_control_plane;
     }
     if (params->has_x_cxl_warm_transport) {
         dest->x_cxl_warm_transport = params->x_cxl_warm_transport;
@@ -1850,6 +1890,10 @@ static void migrate_params_apply(MigrationParameters *params)
     }
     if (params->has_x_cxl_shared_backing) {
         s->parameters.x_cxl_shared_backing = params->x_cxl_shared_backing;
+    }
+    if (params->has_x_cxl_fault_control_plane) {
+        s->parameters.x_cxl_fault_control_plane =
+            params->x_cxl_fault_control_plane;
     }
     if (params->has_x_cxl_warm_transport) {
         s->parameters.x_cxl_warm_transport = params->x_cxl_warm_transport;

@@ -16,6 +16,10 @@
 #include "multifd.h"
 
 #define CXL_HYBRID_METADATA_VERSION 1
+#define CXL_HYBRID_CTRL_MAGIC 0x43584c48U
+#define CXL_HYBRID_CTRL_VERSION 1
+#define CXL_HYBRID_CTRL_REQUEST_ORDER 10
+#define CXL_HYBRID_CTRL_READY_ORDER 11
 
 typedef enum CXLHybridPhase {
     CXL_HYBRID_PHASE_DISABLED = 0,
@@ -79,8 +83,45 @@ typedef struct CXLHybridPublishNotify {
     uint32_t generation;
 } CXLHybridPublishNotify;
 
+typedef struct CXLHybridControlHeader {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t flags;
+    uint32_t request_ring_order;
+    uint32_t ready_ring_order;
+    uint32_t generation;
+    uint32_t reserved0;
+    uint64_t request_prod;
+    uint64_t request_cons;
+    uint64_t ready_prod;
+    uint64_t ready_cons;
+} CXLHybridControlHeader;
+
+typedef struct CXLHybridFaultRequestRecord {
+    uint64_t seq;
+    uint64_t page_index;
+    uint32_t generation;
+    uint32_t flags;
+    uint64_t request_ts_ns;
+} CXLHybridFaultRequestRecord;
+
+typedef struct CXLHybridFaultReadyRecord {
+    uint64_t seq;
+    uint64_t page_index;
+    uint64_t cxl_offset;
+    uint32_t generation;
+    uint32_t flags;
+    uint64_t ready_ts_ns;
+} CXLHybridFaultReadyRecord;
+
+typedef int (*CXLHybridFaultReadyConsumer)(
+    const CXLHybridFaultReadyRecord *record, Error **errp);
+
 #define CXL_HYBRID_WARM_DESC_F_SHARED_CXL      (1U << 0)
 #define CXL_HYBRID_WARM_DESC_F_SOURCE_REMAPPED (1U << 1)
+#define CXL_HYBRID_FAULT_READY_F_PRIMARY        (1U << 0)
+#define CXL_HYBRID_FAULT_READY_F_BURST_NEIGHBOR (1U << 1)
+#define CXL_HYBRID_FAULT_READY_F_SOURCE_REMAPPED (1U << 2)
 
 typedef struct CXLHybridWarmStats {
     uint64_t source_heat_updates;
@@ -300,16 +341,37 @@ bool cxl_hybrid_global_page_offset(const RAMBlock *block,
                                    uint64_t guest_offset,
                                    size_t page_size,
                                    ram_addr_t *global_offsetp);
+uint64_t cxl_hybrid_mapped_ram_required_bytes(uint64_t align);
+bool cxl_hybrid_lookup_global_page(size_t page_index,
+                                   RAMBlock **blockp,
+                                   ram_addr_t *block_offsetp);
 int cxl_hybrid_send_warm_descriptor(QEMUFile *f, const char *ramblock,
                                     uint64_t guest_offset, Error **errp);
 int cxl_hybrid_send_warm_page(QEMUFile *f, const char *ramblock,
                               uint64_t offset, const uint8_t *data,
                               size_t len, Error **errp);
+int cxl_hybrid_control_init_source(Error **errp);
+int cxl_hybrid_control_init_destination(Error **errp);
+void cxl_hybrid_control_cleanup_source(void);
+void cxl_hybrid_control_cleanup_destination(void);
+uint64_t cxl_hybrid_fault_control_region_bytes(void);
+int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
+                                          uint32_t generation,
+                                          uint64_t request_ts_ns,
+                                          Error **errp);
+bool cxl_hybrid_ctrl_dequeue_fault_request(CXLHybridFaultRequestRecord *record);
+int cxl_hybrid_ctrl_enqueue_fault_ready(
+    const CXLHybridFaultReadyRecord *record, Error **errp);
+bool cxl_hybrid_ctrl_dequeue_fault_ready(CXLHybridFaultReadyRecord *record);
 
 void cxl_hybrid_get_publish_stats(CXLHybridPublishStats *stats);
 bool cxl_hybrid_get_published_page_state(const char *ramblock,
                                          uint64_t guest_offset,
                                          CXLHybridPublishedPageState *state);
+void cxl_hybrid_note_publish_request_received(const char *ramblock,
+                                              uint64_t guest_offset,
+                                              uint32_t generation,
+                                              uint64_t req_recv_ns);
 void cxl_hybrid_record_publish_req_recv_time(uint64_t elapsed_ns);
 void cxl_hybrid_record_publish_ready_recv_time(uint64_t elapsed_ns);
 int cxl_hybrid_handle_publish_request(const char *ramblock,
@@ -318,6 +380,14 @@ int cxl_hybrid_handle_publish_request(const char *ramblock,
                                       uint32_t generation,
                                       uint64_t req_recv_ns,
                                       Error **errp);
+int cxl_hybrid_publish_fault_request_core(const char *ramblock,
+                                          uint64_t guest_offset,
+                                          uint32_t page_len,
+                                          uint32_t generation,
+                                          bool emit_burst,
+                                          CXLHybridFaultReadyRecord *primary_ready,
+                                          CXLHybridFaultReadyConsumer ready_consumer,
+                                          Error **errp);
 int cxl_hybrid_handle_publish_quiesce(MigrationIncomingState *mis,
                                       Error **errp);
 int cxl_hybrid_send_pending_publish_ready(QEMUFile *f, Error **errp);

@@ -101,6 +101,8 @@ uint64_t migrate_cxl_prefetch_heat_window_ms(void);
 uint32_t migrate_cxl_prefetch_batch_pages(void);
 uint64_t migrate_cxl_dst_cache_size(void);
 bool migrate_cxl_shared_backing(void);
+CXLHybridFaultControlPlane migrate_cxl_fault_control_plane(void);
+bool migrate_cxl_fault_control_plane_cxl(void);
 CXLHybridWarmTransport migrate_cxl_warm_transport(void);
 CXLHybridDstInstallPolicy migrate_cxl_dst_install_policy(void);
 
