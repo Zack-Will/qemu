@@ -265,7 +265,7 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
         if (cxl_hybrid_ctrl_dequeue_fault_request(&record)) {
             Error *local_err = NULL;
 
-            if (record.generation != cxl_hybrid_fault_publish_generation()) {
+            if (record.generation != state->hdr->generation) {
                 continue;
             }
             if (!cxl_hybrid_lookup_global_page(record.page_index, &block,
@@ -305,7 +305,7 @@ static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)
         if (cxl_hybrid_ctrl_dequeue_fault_ready(&record)) {
             Error *local_err = NULL;
 
-            if (record.generation != cxl_hybrid_fault_publish_generation()) {
+            if (record.generation != state->hdr->generation) {
                 continue;
             }
             cxl_hybrid_handle_fault_ready_record(&record, &local_err);
