@@ -82,6 +82,7 @@ cxl_hybrid_publish_ready_drain_begin(uint64_t pending) "pending=%" PRIu64
 cxl_hybrid_publish_ready_drain_end(int sent, uint64_t pending) "sent=%d pending=%" PRIu64
 cxl_hybrid_publish_ready_send(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u"
 cxl_hybrid_publish_ready_recv(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u"
+cxl_hybrid_iteration_profile(uint32_t phase, uint64_t ram_pages, uint64_t staged_delta, uint64_t staged_pages, uint64_t total_pages, uint64_t warm_push_pages, uint64_t fault_primary_pages, uint64_t fault_burst_pages, uint64_t publish_ready_pages) "phase=%u ram_pages=%" PRIu64 " staged_delta=%" PRIu64 " staged_pages=%" PRIu64 " total_pages=%" PRIu64 " warm_push_pages=%" PRIu64 " fault_primary_pages=%" PRIu64 " fault_burst_pages=%" PRIu64 " publish_ready_pages=%" PRIu64
 cxl_hybrid_ctrl_request_worker_start(void) ""
 cxl_hybrid_ctrl_request_worker_stop(void) ""
 cxl_hybrid_ctrl_ready_poller_start(void) ""

@@ -153,6 +153,15 @@ typedef struct CXLHybridPublishedPageState {
     uint64_t cxl_offset;
 } CXLHybridPublishedPageState;
 
+typedef enum CXLHybridPublishSource {
+    CXL_HYBRID_PUBLISH_SOURCE_UNSPECIFIED = 0,
+    CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH,
+    CXL_HYBRID_PUBLISH_SOURCE_FAULT_PRIMARY,
+    CXL_HYBRID_PUBLISH_SOURCE_FAULT_BURST,
+    CXL_HYBRID_PUBLISH_SOURCE_PENDING_READY,
+    CXL_HYBRID_PUBLISH_SOURCE_COMPLETION,
+} CXLHybridPublishSource;
+
 typedef struct CXLHybridDstStagingStats {
     uint64_t capacity_bytes;
     uint64_t slots;
@@ -335,8 +344,11 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
                                    uint64_t guest_offset,
                                    uint32_t page_len,
                                    uint32_t generation,
+                                   CXLHybridPublishSource source,
                                    uint64_t *cxl_offsetp,
                                    Error **errp);
+void cxl_hybrid_iteration_snapshot_begin(uint64_t ram_pages);
+void cxl_hybrid_iteration_snapshot_end(uint64_t ram_pages);
 bool cxl_hybrid_global_page_offset(const RAMBlock *block,
                                    uint64_t guest_offset,
                                    size_t page_size,

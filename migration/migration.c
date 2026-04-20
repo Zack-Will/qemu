@@ -3652,10 +3652,16 @@ static MigIterateState migration_iteration_run(MigrationState *s)
 {
     uint64_t must_precopy, can_postcopy, pending_size;
     Error *local_err = NULL;
+    uint64_t iter_ram_pages_begin = ram_get_total_transferred_pages();
     bool in_postcopy = (s->state == MIGRATION_STATUS_POSTCOPY_DEVICE ||
                         s->state == MIGRATION_STATUS_POSTCOPY_ACTIVE);
     bool can_switchover = migration_can_switchover(s);
     bool complete_ready;
+    MigIterateState ret = MIG_ITERATE_RESUME;
+
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_iteration_snapshot_begin(iter_ram_pages_begin);
+    }
 
     /* Fast path - get the estimated amount of pending data */
     qemu_savevm_state_pending_estimate(&must_precopy, &can_postcopy);
@@ -3711,7 +3717,8 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                 migrate_error_propagate(s, error_copy(local_err));
                 error_report_err(local_err);
             }
-            return MIG_ITERATE_SKIP;
+            ret = MIG_ITERATE_SKIP;
+            goto out;
         }
 
         /*
@@ -3731,11 +3738,13 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                                                   &local_err) < 0) {
             migrate_error_propagate(s, error_copy(local_err));
             error_report_err(local_err);
-            return MIG_ITERATE_BREAK;
+            ret = MIG_ITERATE_BREAK;
+            goto out;
         }
         trace_migration_thread_low_pending(pending_size);
         migration_completion(s);
-        return MIG_ITERATE_BREAK;
+        ret = MIG_ITERATE_BREAK;
+        goto out;
     }
 
     /* Just another iteration step */
@@ -3746,15 +3755,22 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                                                   &local_err) < 0) {
             migrate_error_propagate(s, error_copy(local_err));
             error_report_err(local_err);
-            return MIG_ITERATE_BREAK;
+            ret = MIG_ITERATE_BREAK;
+            goto out;
         }
         if (cxl_hybrid_warm_push_iteration(s, &local_err) < 0) {
             migrate_error_propagate(s, error_copy(local_err));
             error_report_err(local_err);
-            return MIG_ITERATE_BREAK;
+            ret = MIG_ITERATE_BREAK;
+            goto out;
         }
     }
-    return MIG_ITERATE_RESUME;
+
+out:
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_iteration_snapshot_end(ram_get_total_transferred_pages());
+    }
+    return ret;
 }
 
 static void migration_iteration_finish(MigrationState *s)

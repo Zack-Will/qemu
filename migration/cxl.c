@@ -158,6 +158,7 @@ static struct CXLMigrationState {
     QEMUBH *remap_bh;
     size_t total_pages;
     size_t total_regions;
+    uint64_t staged_pages;
     uint32_t senders_in_flight;
     uint64_t remapped_regions;
     uint64_t remap_attempts;
@@ -200,6 +201,11 @@ static struct CXLMigrationState {
     uint64_t source_warm_skip_unstaged;
     uint64_t source_warm_last_miss_offset;
     uint64_t warm_publish_pages;
+    uint64_t warm_push_publish_pages;
+    uint64_t fault_primary_publish_pages;
+    uint64_t fault_burst_publish_pages;
+    uint64_t pending_ready_publish_pages;
+    uint64_t completion_publish_pages;
     uint64_t fault_publish_requests;
     uint64_t fault_publish_waits;
     uint64_t fault_publish_wait_time_ns;
@@ -238,6 +244,7 @@ static struct CXLMigrationState {
     uint64_t max_fault_wait_after_ready_recv_time_ns;
     uint64_t pending_publish_ready;
     uint64_t completion_pending_publish_ready;
+    uint64_t publish_ready_sent_pages;
     CXLHybridLastPublishRequestInfo last_publish_request;
     CXLHybridLastPublishReadyInfo last_publish_ready;
     CXLHybridLastPublishReadyInfo last_completion_publish_ready;
@@ -249,6 +256,24 @@ static struct CXLMigrationState {
     uint64_t publish_copied_bytes;
     uint64_t publish_skip_ready;
     uint64_t publish_failures;
+    struct {
+        uint64_t ram_pages;
+        uint64_t staged_pages;
+        uint64_t warm_push_publish_pages;
+        uint64_t fault_primary_publish_pages;
+        uint64_t fault_burst_publish_pages;
+        uint64_t pending_ready_publish_pages;
+        uint64_t completion_publish_pages;
+        uint64_t publish_ready_sent_pages;
+        CXLHybridPhase phase;
+    } iter_begin;
+    uint64_t last_iterate_ram_pages;
+    uint64_t last_iterate_staged_pages_delta;
+    uint64_t last_iterate_warm_push_pages;
+    uint64_t last_iterate_fault_primary_pages;
+    uint64_t last_iterate_fault_burst_pages;
+    uint64_t last_iterate_publish_ready_pages;
+    CXLHybridPhase last_iterate_phase;
     size_t warm_scan_cursor;
     ram_addr_t warm_last_miss_offset;
     char *warm_last_miss_ramblock;
@@ -448,6 +473,119 @@ static void cxl_hybrid_set_last_publish_wait(
     info->wait_time_ns = wait_time_ns;
     info->has_ret = has_ret;
     info->ret = ret;
+}
+
+static uint64_t cxl_hybrid_current_staged_pages(void)
+{
+    return qatomic_read(&cxl_state.staged_pages);
+}
+
+static bool cxl_hybrid_test_and_set_bit_atomic(size_t nr, unsigned long *addr)
+{
+    unsigned long mask = BIT_MASK(nr);
+    unsigned long *p = addr + BIT_WORD(nr);
+
+    return (qatomic_fetch_or(p, mask) & mask) != 0;
+}
+
+static void cxl_hybrid_mark_page_staged(size_t page_idx)
+{
+    if (!cxl_state.migrated_bmap ||
+        page_idx >= cxl_state.total_pages ||
+        cxl_hybrid_test_and_set_bit_atomic(page_idx, cxl_state.migrated_bmap)) {
+        return;
+    }
+
+    qatomic_inc(&cxl_state.staged_pages);
+}
+
+static void cxl_hybrid_record_publish_source(CXLHybridPublishSource source,
+                                             uint64_t npages)
+{
+    switch (source) {
+    case CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH:
+        qatomic_add(&cxl_state.warm_push_publish_pages, npages);
+        break;
+    case CXL_HYBRID_PUBLISH_SOURCE_FAULT_PRIMARY:
+        qatomic_add(&cxl_state.fault_primary_publish_pages, npages);
+        break;
+    case CXL_HYBRID_PUBLISH_SOURCE_FAULT_BURST:
+        qatomic_add(&cxl_state.fault_burst_publish_pages, npages);
+        break;
+    case CXL_HYBRID_PUBLISH_SOURCE_PENDING_READY:
+        qatomic_add(&cxl_state.pending_ready_publish_pages, npages);
+        break;
+    case CXL_HYBRID_PUBLISH_SOURCE_COMPLETION:
+        qatomic_add(&cxl_state.completion_publish_pages, npages);
+        break;
+    case CXL_HYBRID_PUBLISH_SOURCE_UNSPECIFIED:
+    default:
+        break;
+    }
+}
+
+void cxl_hybrid_iteration_snapshot_begin(uint64_t ram_pages)
+{
+    cxl_state.iter_begin.ram_pages = ram_pages;
+    cxl_state.iter_begin.staged_pages = cxl_hybrid_current_staged_pages();
+    cxl_state.iter_begin.warm_push_publish_pages =
+        qatomic_read(&cxl_state.warm_push_publish_pages);
+    cxl_state.iter_begin.fault_primary_publish_pages =
+        qatomic_read(&cxl_state.fault_primary_publish_pages);
+    cxl_state.iter_begin.fault_burst_publish_pages =
+        qatomic_read(&cxl_state.fault_burst_publish_pages);
+    cxl_state.iter_begin.pending_ready_publish_pages =
+        qatomic_read(&cxl_state.pending_ready_publish_pages);
+    cxl_state.iter_begin.completion_publish_pages =
+        qatomic_read(&cxl_state.completion_publish_pages);
+    cxl_state.iter_begin.publish_ready_sent_pages =
+        qatomic_read(&cxl_state.publish_ready_sent_pages);
+    cxl_state.iter_begin.phase = cxl_state.phase;
+}
+
+void cxl_hybrid_iteration_snapshot_end(uint64_t ram_pages)
+{
+    uint64_t staged_pages = cxl_hybrid_current_staged_pages();
+    uint64_t warm_push = qatomic_read(&cxl_state.warm_push_publish_pages);
+    uint64_t fault_primary = qatomic_read(&cxl_state.fault_primary_publish_pages);
+    uint64_t fault_burst = qatomic_read(&cxl_state.fault_burst_publish_pages);
+    uint64_t pending_ready = qatomic_read(&cxl_state.pending_ready_publish_pages);
+    uint64_t completion = qatomic_read(&cxl_state.completion_publish_pages);
+    uint64_t publish_ready_sent_pages =
+        qatomic_read(&cxl_state.publish_ready_sent_pages);
+
+    qatomic_set(&cxl_state.last_iterate_ram_pages,
+                ram_pages - cxl_state.iter_begin.ram_pages);
+    qatomic_set(&cxl_state.last_iterate_staged_pages_delta,
+                staged_pages - cxl_state.iter_begin.staged_pages);
+    qatomic_set(&cxl_state.last_iterate_warm_push_pages,
+                warm_push - cxl_state.iter_begin.warm_push_publish_pages);
+    qatomic_set(&cxl_state.last_iterate_fault_primary_pages,
+                fault_primary - cxl_state.iter_begin.fault_primary_publish_pages);
+    qatomic_set(&cxl_state.last_iterate_fault_burst_pages,
+                fault_burst - cxl_state.iter_begin.fault_burst_publish_pages);
+    qatomic_set(&cxl_state.last_iterate_publish_ready_pages,
+                publish_ready_sent_pages - cxl_state.iter_begin.publish_ready_sent_pages);
+    qatomic_set(&cxl_state.last_iterate_phase, cxl_state.iter_begin.phase);
+
+    trace_cxl_hybrid_iteration_profile(
+        qatomic_read(&cxl_state.last_iterate_phase),
+        qatomic_read(&cxl_state.last_iterate_ram_pages),
+        qatomic_read(&cxl_state.last_iterate_staged_pages_delta),
+        staged_pages,
+        cxl_state.total_pages,
+        qatomic_read(&cxl_state.last_iterate_warm_push_pages),
+        qatomic_read(&cxl_state.last_iterate_fault_primary_pages),
+        qatomic_read(&cxl_state.last_iterate_fault_burst_pages),
+        qatomic_read(&cxl_state.last_iterate_publish_ready_pages));
+
+    /*
+     * Keep completion-originated republishes in their own cumulative counter.
+     * They are not reported as a distinct per-iteration field yet because the
+     * user-facing question is about warm push and fault-triggered traffic.
+     */
+    (void)(pending_ready - cxl_state.iter_begin.pending_ready_publish_pages);
+    (void)(completion - cxl_state.iter_begin.completion_publish_pages);
 }
 
 static CXLMigrationPublishRequestInfo *cxl_hybrid_export_last_publish_request(
@@ -1198,9 +1336,11 @@ void cxl_populate_migration_info(MigrationInfo *info)
     info->x_cxl->dst_fault_read_time_ns = dst_stats.fault_read_time_ns;
     info->x_cxl->dst_fault_place_successes = dst_stats.fault_place_successes;
     info->x_cxl->dst_fault_place_failures = dst_stats.fault_place_failures;
-    if (cxl_state.migrated_bmap) {
-        info->x_cxl->staged_pages =
-            bitmap_count_one(cxl_state.migrated_bmap, cxl_state.total_pages);
+    info->x_cxl->staged_pages = cxl_hybrid_current_staged_pages();
+    if (cxl_state.total_pages) {
+        info->x_cxl->staged_pages_percent =
+            ((double)info->x_cxl->staged_pages * 100.0) /
+            (double)cxl_state.total_pages;
     }
     info->x_cxl->warm_desc_sent_pages =
         qatomic_read(&cxl_state.source_warm_desc_sent_pages);
@@ -1212,6 +1352,20 @@ void cxl_populate_migration_info(MigrationInfo *info)
         qatomic_read(&cxl_state.source_warm_desc_skip_unremapped);
     info->x_cxl->warm_publish_pages =
         qatomic_read(&cxl_state.warm_publish_pages);
+    info->x_cxl->last_iterate_ram_pages =
+        qatomic_read(&cxl_state.last_iterate_ram_pages);
+    info->x_cxl->last_iterate_staged_pages_delta =
+        qatomic_read(&cxl_state.last_iterate_staged_pages_delta);
+    info->x_cxl->last_iterate_warm_push_pages =
+        qatomic_read(&cxl_state.last_iterate_warm_push_pages);
+    info->x_cxl->last_iterate_fault_primary_pages =
+        qatomic_read(&cxl_state.last_iterate_fault_primary_pages);
+    info->x_cxl->last_iterate_fault_burst_pages =
+        qatomic_read(&cxl_state.last_iterate_fault_burst_pages);
+    info->x_cxl->last_iterate_publish_ready_pages =
+        qatomic_read(&cxl_state.last_iterate_publish_ready_pages);
+    info->x_cxl->last_iterate_phase =
+        qatomic_read(&cxl_state.last_iterate_phase);
     info->x_cxl->fault_publish_requests =
         qatomic_read(&cxl_state.fault_publish_requests);
     info->x_cxl->fault_publish_waits =
@@ -1433,6 +1587,7 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
     case CXL_HYBRID_WARM_TRANSPORT_AUTO:
         ret = cxl_hybrid_publish_page_to_cxl(block->idstr, offset,
                                              TARGET_PAGE_SIZE, generation,
+                                             CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH,
                                              &cxl_offset, errp);
         if (ret) {
             return ret;
@@ -1773,6 +1928,7 @@ static int cxl_hybrid_completion_publish_remaining_page(
     generation = builder->batch.generation;
     ret = cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,
                                          TARGET_PAGE_SIZE, generation,
+                                         CXL_HYBRID_PUBLISH_SOURCE_COMPLETION,
                                          &(uint64_t){ 0 }, errp);
     if (ret) {
         return ret;
@@ -2356,6 +2512,7 @@ static int cxl_hybrid_republish_pending_ready(CXLHybridPendingReady *ready,
                                          ready->notify.guest_offset,
                                          ready->notify.page_len,
                                          ready->notify.generation,
+                                         CXL_HYBRID_PUBLISH_SOURCE_PENDING_READY,
                                          &cxl_offset, errp);
     if (ret) {
         return ret;
@@ -2424,6 +2581,7 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
                                    uint64_t guest_offset,
                                    uint32_t page_len,
                                    uint32_t generation,
+                                   CXLHybridPublishSource source,
                                    uint64_t *cxl_offsetp,
                                    Error **errp)
 {
@@ -2526,6 +2684,7 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
     entry->ready = true;
     entry->source_remapped = source_remapped;
     cxl_hybrid_mark_page_cxl_visible(page_idx);
+    cxl_hybrid_record_publish_source(source, page_len >> TARGET_PAGE_BITS);
     if (cxl_state.publish_mutex_ready) {
         qemu_mutex_unlock(&cxl_state.publish_mutex);
     }
@@ -2578,6 +2737,7 @@ static void cxl_hybrid_publish_fault_burst(const char *ramblock,
 
         ret = cxl_hybrid_publish_page_to_cxl(ramblock, neighbor_offset,
                                              TARGET_PAGE_SIZE, generation,
+                                             CXL_HYBRID_PUBLISH_SOURCE_FAULT_BURST,
                                              &cxl_offset, &local_err);
         if (ret) {
             warn_report_err(local_err);
@@ -2665,7 +2825,9 @@ int cxl_hybrid_publish_fault_request_core(const char *ramblock,
     handle_start_ns = cxl_now_ns();
     primary_start_ns = handle_start_ns;
     ret = cxl_hybrid_publish_page_to_cxl(ramblock, guest_offset, page_len,
-                                         generation, &cxl_offset, errp);
+                                         generation,
+                                         CXL_HYBRID_PUBLISH_SOURCE_FAULT_PRIMARY,
+                                         &cxl_offset, errp);
     if (ret) {
         return ret;
     }
@@ -2813,6 +2975,7 @@ int cxl_hybrid_send_pending_publish_ready(QEMUFile *f, Error **errp)
                         cxl_state.last_publish_ready.count + 1);
                     qemu_mutex_unlock(&cxl_state.publish_mutex);
                 }
+                qatomic_inc(&cxl_state.publish_ready_sent_pages);
             }
         }
 
@@ -3920,7 +4083,7 @@ int cxl_write_ramblock_iov(QIOChannel *ioc, const struct iovec *iov,
                 size_t p;
 
                 for (p = 0; p < npages && (first_page + p) < cxl_state.total_pages; p++) {
-                    set_bit_atomic(first_page + p, cxl_state.migrated_bmap);
+                    cxl_hybrid_mark_page_staged(first_page + p);
                     cxl_hybrid_mark_page_remaining(first_page + p);
                 }
                 written_bytes += iov[j].iov_len;

@@ -546,6 +546,9 @@
 # @staged-pages: number of guest pages known to be staged in the
 #     source-side CXL backing
 #
+# @staged-pages-percent: percentage of tracked guest pages currently
+#     marked staged in source-side CXL backing
+#
 # @warm-desc-sent-pages: number of warm pages published as CXL offset
 #     descriptors instead of page payloads
 #
@@ -561,6 +564,28 @@
 #
 # @warm-publish-pages: number of warm-publish operations issued to the
 #     destination-side install pipeline
+#
+# @last-iterate-ram-pages: RAM pages transferred during the
+#     most recent migration main-loop iteration
+#
+# @last-iterate-staged-pages-delta: delta in @staged-pages across the
+#     most recent migration main-loop iteration
+#
+# @last-iterate-warm-push-pages: warm-push publish pages issued during
+#     the most recent migration main-loop iteration
+#
+# @last-iterate-fault-primary-pages: primary fault-publish pages
+#     issued during the most recent migration main-loop iteration
+#
+# @last-iterate-fault-burst-pages: neighbor fault-burst pages issued
+#     during the most recent migration main-loop iteration
+#
+# @last-iterate-publish-ready-pages: publish-ready notifications
+#     emitted onto the migration stream during the most recent
+#     migration main-loop iteration
+#
+# @last-iterate-phase: CXL hybrid phase observed at the
+#     beginning of the most recent migration main-loop iteration
 #
 # @fault-publish-requests: number of destination fault handlers that
 #     requested warm-publish processing
@@ -726,9 +751,15 @@
 #     @dst-fault-read-bytes, @dst-fault-read-time-ns,
 #     @dst-fault-place-successes,
 #     @dst-fault-place-failures, @staged-pages,
+#     @staged-pages-percent,
 #     @warm-desc-sent-pages, @warm-desc-sent-bytes,
 #     @warm-payload-fallback-pages,
 #     @warm-desc-skip-unremapped, @warm-publish-pages,
+#     @last-iterate-ram-pages, @last-iterate-staged-pages-delta,
+#     @last-iterate-warm-push-pages,
+#     @last-iterate-fault-primary-pages,
+#     @last-iterate-fault-burst-pages,
+#     @last-iterate-publish-ready-pages, @last-iterate-phase,
 #     @fault-publish-requests, @fault-publish-waits,
 #     @fault-publish-wait-time-ns,
 #     @fault-publish-primary-samples,
@@ -832,6 +863,8 @@
                                           'features': [ 'unstable' ] },
             'staged-pages': { 'type': 'uint64',
                               'features': [ 'unstable' ] },
+            'staged-pages-percent': { 'type': 'number',
+                                      'features': [ 'unstable' ] },
             'warm-desc-sent-pages': { 'type': 'uint64',
                                       'features': [ 'unstable' ] },
             'warm-desc-sent-bytes': { 'type': 'uint64',
@@ -841,6 +874,20 @@
             'warm-desc-skip-unremapped': { 'type': 'uint64',
                                            'features': [ 'unstable' ] },
             'warm-publish-pages': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'last-iterate-ram-pages': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'last-iterate-staged-pages-delta': { 'type': 'uint64',
+                                                 'features': [ 'unstable' ] },
+            'last-iterate-warm-push-pages': { 'type': 'uint64',
+                                              'features': [ 'unstable' ] },
+            'last-iterate-fault-primary-pages': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'last-iterate-fault-burst-pages': { 'type': 'uint64',
+                                                'features': [ 'unstable' ] },
+            'last-iterate-publish-ready-pages': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'last-iterate-phase': { 'type': 'CXLMigrationPhase',
                                     'features': [ 'unstable' ] },
             'fault-publish-requests': { 'type': 'uint64',
                                         'features': [ 'unstable' ] },
