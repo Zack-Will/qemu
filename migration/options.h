@@ -92,6 +92,7 @@ const char *migrate_cxl_path(void);
 bool migrate_cxl_path_enabled(void);
 uint64_t migrate_cxl_switch_dirty_threshold(void);
 uint32_t migrate_cxl_switch_max_iters(void);
+uint64_t migrate_cxl_switch_max_precopy_ms(void);
 uint64_t migrate_cxl_switch_min_remaining(void);
 uint64_t migrate_cxl_switch_gain_floor(void);
 bool migrate_cxl_brake_enable(void);

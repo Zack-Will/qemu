@@ -391,6 +391,7 @@ struct MigrationState {
     bool start_postcopy_auto;
     uint64_t cxl_hybrid_iteration;
     uint64_t cxl_hybrid_prev_remaining;
+    int64_t cxl_hybrid_precopy_start_ms;
 
     /* Flag set once the migration thread is running (and needs joining) */
     bool migration_thread_running;

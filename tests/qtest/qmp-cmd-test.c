@@ -343,6 +343,31 @@ static void test_object_add_failure_modes(void)
     qtest_quit(qts);
 }
 
+static void test_migrate_set_parameters_cxl_switch_max_precopy_ms(void)
+{
+    QTestState *qts;
+    QDict *resp;
+    QDict *ret;
+
+    qts = qtest_init(common_args);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': { 'x-cxl-switch-max-precopy-ms': 420 } }");
+    g_assert_nonnull(resp);
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'query-migrate-parameters' }");
+    g_assert_nonnull(resp);
+    ret = qdict_get_qdict(resp, "return");
+    g_assert_nonnull(ret);
+    g_assert_cmpint(qdict_get_int(ret, "x-cxl-switch-max-precopy-ms"), ==,
+                    420);
+    qobject_unref(resp);
+
+    qtest_quit(qts);
+}
+
 int main(int argc, char *argv[])
 {
     QmpSchema schema;
@@ -355,6 +380,8 @@ int main(int argc, char *argv[])
 
     qtest_add_func("qmp/object-add-failure-modes",
                    test_object_add_failure_modes);
+    qtest_add_func("qmp/migrate-set-parameters/cxl-switch-max-precopy-ms",
+                   test_migrate_set_parameters_cxl_switch_max_precopy_ms);
 
     ret = g_test_run();
 

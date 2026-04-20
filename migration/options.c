@@ -72,6 +72,7 @@
 #define DEFAULT_MIGRATE_MAX_POSTCOPY_BANDWIDTH 0
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_DIRTY_THRESHOLD 0
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_ITERS 0
+#define DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_PRECOPY_MS 0
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_MIN_REMAINING 0
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_GAIN_FLOOR 0
 #define DEFAULT_MIGRATE_X_CXL_BRAKE_ENABLE false
@@ -205,6 +206,9 @@ const Property migration_properties[] = {
     DEFINE_PROP_UINT32("x-cxl-switch-max-iters", MigrationState,
                       parameters.x_cxl_switch_max_iters,
                       DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_ITERS),
+    DEFINE_PROP_UINT64("x-cxl-switch-max-precopy-ms", MigrationState,
+                      parameters.x_cxl_switch_max_precopy_ms,
+                      DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_PRECOPY_MS),
     DEFINE_PROP_SIZE("x-cxl-switch-min-remaining", MigrationState,
                       parameters.x_cxl_switch_min_remaining,
                       DEFAULT_MIGRATE_X_CXL_SWITCH_MIN_REMAINING),
@@ -989,6 +993,13 @@ uint32_t migrate_cxl_switch_max_iters(void)
     return s->parameters.x_cxl_switch_max_iters;
 }
 
+uint64_t migrate_cxl_switch_max_precopy_ms(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_switch_max_precopy_ms;
+}
+
 uint64_t migrate_cxl_switch_min_remaining(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1273,6 +1284,7 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_mode, &p->has_zero_page_detection, &p->has_direct_io,
         &p->has_x_cxl_switch_dirty_threshold,
         &p->has_x_cxl_switch_max_iters,
+        &p->has_x_cxl_switch_max_precopy_ms,
         &p->has_x_cxl_switch_min_remaining,
         &p->has_x_cxl_switch_gain_floor,
         &p->has_x_cxl_brake_enable,
@@ -1680,6 +1692,10 @@ static void migrate_params_test_apply(MigrationParameters *params,
     if (params->has_x_cxl_switch_max_iters) {
         dest->x_cxl_switch_max_iters = params->x_cxl_switch_max_iters;
     }
+    if (params->has_x_cxl_switch_max_precopy_ms) {
+        dest->x_cxl_switch_max_precopy_ms =
+            params->x_cxl_switch_max_precopy_ms;
+    }
     if (params->has_x_cxl_switch_min_remaining) {
         dest->x_cxl_switch_min_remaining =
             params->x_cxl_switch_min_remaining;
@@ -1858,6 +1874,10 @@ static void migrate_params_apply(MigrationParameters *params)
     }
     if (params->has_x_cxl_switch_max_iters) {
         s->parameters.x_cxl_switch_max_iters = params->x_cxl_switch_max_iters;
+    }
+    if (params->has_x_cxl_switch_max_precopy_ms) {
+        s->parameters.x_cxl_switch_max_precopy_ms =
+            params->x_cxl_switch_max_precopy_ms;
     }
     if (params->has_x_cxl_switch_min_remaining) {
         s->parameters.x_cxl_switch_min_remaining =

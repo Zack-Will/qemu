@@ -120,51 +120,83 @@ static void migration_request_postcopy(MigrationState *s,
     }
 }
 
+static void migration_trace_postcopy_timeline(MigrationState *s,
+                                              const char *stage,
+                                              uint64_t pending_size)
+{
+    trace_migration_postcopy_timeline(stage,
+                                      qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                                      s ? s->state : 0,
+                                      s ? s->cxl_hybrid_iteration : 0,
+                                      pending_size,
+                                      s ? s->postcopy_package_loaded : false);
+}
+
 static bool migration_cxl_hybrid_should_start_postcopy(MigrationState *s,
                                                        uint64_t pending_size)
 {
+    int64_t now_ms;
+    uint64_t elapsed_ms;
     uint64_t dirty_rate;
     uint64_t remaining_threshold;
     uint64_t dirty_threshold;
     uint64_t gain_floor;
+    uint64_t max_precopy_ms;
     uint32_t max_iters;
     uint64_t previous_remaining;
     uint64_t gain;
+    bool dirty_trigger;
+    bool max_iters_trigger;
+    bool gain_trigger;
+    bool remaining_trigger;
+    bool time_cap_trigger;
     CXLMigrationSwitchReason reason = CXL_MIGRATION_SWITCH_REASON_NONE;
 
     if (!migrate_cxl_hybrid() || qatomic_read(&s->start_postcopy)) {
         return false;
     }
 
+    now_ms = qemu_clock_get_ms(QEMU_CLOCK_HOST);
+    if (s->cxl_hybrid_precopy_start_ms < 0) {
+        s->cxl_hybrid_precopy_start_ms = now_ms;
+    }
+
     s->cxl_hybrid_iteration++;
+    elapsed_ms = now_ms - s->cxl_hybrid_precopy_start_ms;
     dirty_rate = qatomic_read(&mig_stats.dirty_pages_rate);
     remaining_threshold = migrate_cxl_switch_min_remaining();
     dirty_threshold = migrate_cxl_switch_dirty_threshold();
     gain_floor = migrate_cxl_switch_gain_floor();
+    max_precopy_ms = migrate_cxl_switch_max_precopy_ms();
     max_iters = migrate_cxl_switch_max_iters();
     previous_remaining = s->cxl_hybrid_prev_remaining;
     gain = previous_remaining > pending_size ? previous_remaining - pending_size : 0;
     s->cxl_hybrid_prev_remaining = pending_size;
+    dirty_trigger = dirty_threshold && dirty_rate >= dirty_threshold;
+    max_iters_trigger = max_iters && s->cxl_hybrid_iteration >= max_iters;
+    gain_trigger = gain_floor && previous_remaining && gain <= gain_floor;
+    remaining_trigger = remaining_threshold && pending_size <= remaining_threshold;
+    time_cap_trigger = max_precopy_ms && elapsed_ms >= max_precopy_ms;
 
     if (cxl_hybrid_phase() == CXL_HYBRID_PHASE_PRECOPY_BULK &&
         migrate_cxl_brake_enable() &&
-        ((dirty_threshold && dirty_rate >= dirty_threshold) ||
-         (gain_floor && previous_remaining && gain <= gain_floor) ||
-         (max_iters && s->cxl_hybrid_iteration >= max_iters))) {
+        !remaining_trigger && !time_cap_trigger &&
+        (dirty_trigger || gain_trigger || max_iters_trigger)) {
         cxl_hybrid_enter_phase(CXL_HYBRID_PHASE_PRECOPY_BRAKE,
                                CXL_MIGRATION_SWITCH_REASON_NONE,
                                s->cxl_hybrid_iteration);
         return false;
     }
 
-    if (remaining_threshold && pending_size <= remaining_threshold) {
+    if (remaining_trigger) {
         reason = CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL;
-    } else if (dirty_threshold && dirty_rate >= dirty_threshold &&
-               !migrate_cxl_brake_enable()) {
+    } else if (time_cap_trigger) {
+        reason = CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP;
+    } else if (dirty_trigger && !migrate_cxl_brake_enable()) {
         reason = CXL_MIGRATION_SWITCH_REASON_DIRTY_RATE_HIGH;
-    } else if (max_iters && s->cxl_hybrid_iteration >= max_iters) {
+    } else if (max_iters_trigger) {
         reason = CXL_MIGRATION_SWITCH_REASON_MAX_ITERS;
-    } else if (gain_floor && previous_remaining && gain <= gain_floor) {
+    } else if (gain_trigger) {
         reason = CXL_MIGRATION_SWITCH_REASON_GAIN_COLLAPSED;
     }
 
@@ -175,6 +207,7 @@ static bool migration_cxl_hybrid_should_start_postcopy(MigrationState *s,
     if (migrate_cxl_brake_enable() &&
         cxl_hybrid_phase() == CXL_HYBRID_PHASE_PRECOPY_BRAKE &&
         reason != CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL &&
+        reason != CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP &&
         reason != CXL_MIGRATION_SWITCH_REASON_MAX_ITERS &&
         reason != CXL_MIGRATION_SWITCH_REASON_GAIN_COLLAPSED) {
         return false;
@@ -1858,6 +1891,7 @@ int migrate_init(MigrationState *s, Error **errp)
     s->threshold_size = 0;
     s->cxl_hybrid_iteration = 0;
     s->cxl_hybrid_prev_remaining = 0;
+    s->cxl_hybrid_precopy_start_ms = -1;
     s->switchover_acked = false;
     s->cxl_publish_quiesce_acked = false;
     s->rdma_migration = false;
@@ -2534,6 +2568,8 @@ static void *source_return_path_thread(void *opaque)
             if (tmp32 == QEMU_VM_PING_PACKAGED_LOADED) {
                 trace_source_return_path_thread_postcopy_package_loaded();
                 ms->postcopy_package_loaded = true;
+                migration_trace_postcopy_timeline(ms, "package-loaded",
+                                                  UINT64_MAX);
                 qemu_event_set(&ms->postcopy_package_loaded_event);
             }
             break;
@@ -2857,6 +2893,7 @@ static int postcopy_start(MigrationState *ms, Error **errp)
     }
 
     trace_postcopy_start();
+    migration_trace_postcopy_timeline(ms, "start", UINT64_MAX);
     bql_lock();
     trace_postcopy_start_set_run();
 
@@ -2979,6 +3016,7 @@ static int postcopy_start(MigrationState *ms, Error **errp)
     }
 
     migration_downtime_end(ms);
+    migration_trace_postcopy_timeline(ms, "downtime-end", UINT64_MAX);
 
     if (migrate_postcopy_ram()) {
         /*
@@ -3013,6 +3051,11 @@ static int postcopy_start(MigrationState *ms, Error **errp)
                       ms->rp_state.rp_thread_created ?
                       MIGRATION_STATUS_POSTCOPY_DEVICE :
                       MIGRATION_STATUS_POSTCOPY_ACTIVE);
+    migration_trace_postcopy_timeline(
+        ms,
+        ms->rp_state.rp_thread_created ? "state-postcopy-device" :
+                                         "state-postcopy-active",
+        UINT64_MAX);
 
     bql_unlock();
 
@@ -3146,6 +3189,8 @@ out_unlock:
 static void migration_completion_postcopy(MigrationState *s)
 {
     trace_migration_completion_postcopy_end();
+    migration_trace_postcopy_timeline(s, "completion-postcopy-begin",
+                                      UINT64_MAX);
 
     bql_lock();
     qemu_savevm_state_complete_postcopy(s->to_dst_file);
@@ -3160,6 +3205,8 @@ static void migration_completion_postcopy(MigrationState *s)
     }
 
     trace_migration_completion_postcopy_end_after_complete();
+    migration_trace_postcopy_timeline(s, "completion-postcopy-done",
+                                      UINT64_MAX);
 }
 
 /**
@@ -3176,6 +3223,8 @@ static void migration_completion(MigrationState *s)
     if (s->state == MIGRATION_STATUS_ACTIVE) {
         ret = migration_completion_precopy(s);
     } else if (s->state == MIGRATION_STATUS_POSTCOPY_ACTIVE) {
+        migration_trace_postcopy_timeline(s, "completion-enter",
+                                          UINT64_MAX);
         if (migrate_cxl_hybrid()) {
             ret = migration_completion_prepare_cxl_postcopy(s, &local_err);
             if (ret < 0) {
@@ -3186,6 +3235,8 @@ static void migration_completion(MigrationState *s)
                 goto fail;
             }
             cxl_hybrid_mark_completion_pending_publish_ready();
+            migration_trace_postcopy_timeline(s, "completion-prepare-done",
+                                              UINT64_MAX);
         }
         migration_completion_postcopy(s);
     } else {
@@ -3496,6 +3547,7 @@ static void migration_completion_end(MigrationState *s)
 
     migrate_set_state(&s->state, s->state,
                       MIGRATION_STATUS_COMPLETED);
+    migration_trace_postcopy_timeline(s, "completed", UINT64_MAX);
     bql_unlock();
 }
 
@@ -3611,6 +3663,7 @@ static MigIterateState migration_iteration_run(MigrationState *s)
     trace_migrate_pending_estimate(pending_size, must_precopy, can_postcopy);
 
     if (in_postcopy) {
+        migration_trace_postcopy_timeline(s, "iterate", pending_size);
         /*
          * Iterate in postcopy until all pending data flushed.  Note that
          * postcopy completion doesn't rely on can_switchover, because when
@@ -3625,9 +3678,15 @@ static MigIterateState migration_iteration_run(MigrationState *s)
              * completion, we need to wait for destination to load the postcopy
              * package before actually completing.
              */
+            migration_trace_postcopy_timeline(s, "device-ready",
+                                              pending_size);
             qemu_event_wait(&s->postcopy_package_loaded_event);
+            migration_trace_postcopy_timeline(s, "device-wait-done",
+                                              pending_size);
             migrate_set_state(&s->state, MIGRATION_STATUS_POSTCOPY_DEVICE,
                               MIGRATION_STATUS_POSTCOPY_ACTIVE);
+            migration_trace_postcopy_timeline(s, "state-postcopy-active",
+                                              pending_size);
         }
     } else {
         /*

@@ -232,6 +232,9 @@
 #
 # @remaining-small: remaining dirty bytes dropped below threshold
 #
+# @precopy-time-cap: elapsed bulk precopy time reached the configured
+#     hard limit
+#
 # @gain-collapsed: recent iteration gain fell below threshold
 #
 # @manual: manual postcopy request was used
@@ -247,6 +250,7 @@
             { 'name': 'dirty-rate-high', 'features': [ 'unstable' ] },
             { 'name': 'max-iters', 'features': [ 'unstable' ] },
             { 'name': 'remaining-small', 'features': [ 'unstable' ] },
+            { 'name': 'precopy-time-cap', 'features': [ 'unstable' ] },
             { 'name': 'gain-collapsed', 'features': [ 'unstable' ] },
             { 'name': 'manual', 'features': [ 'unstable' ] } ] }
 
@@ -1555,13 +1559,14 @@
 #
 # @unstable: Members @x-checkpoint-delay,
 #     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
-#     @x-cxl-switch-max-iters, @x-cxl-switch-min-remaining,
-#     @x-cxl-switch-gain-floor, @x-cxl-brake-enable,
-#     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
-#     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
-#     @x-cxl-dst-cache-size, @x-cxl-shared-backing,
-#     @x-cxl-warm-transport, @x-cxl-dst-install-policy, and
-#     @x-cxl-fault-control-plane are experimental.
+#     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
+#     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
+#     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
+#     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
+#     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
+#     @x-cxl-shared-backing, @x-cxl-warm-transport,
+#     @x-cxl-dst-install-policy, and @x-cxl-fault-control-plane are
+#     experimental.
 #
 # Since: 2.4
 ##
@@ -1589,6 +1594,8 @@
            { 'name': 'x-cxl-switch-dirty-threshold',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-switch-max-iters',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-max-precopy-ms',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-switch-min-remaining',
              'features': [ 'unstable' ] },
@@ -1799,6 +1806,11 @@
 #     hybrid migration may switch away from bulk precopy.  Zero means
 #     no explicit iteration limit.  (Since 11.0)
 #
+# @x-cxl-switch-max-precopy-ms: Hard upper bound, in milliseconds, on
+#     elapsed hybrid bulk precopy time before hybrid migration may
+#     switch away from bulk precopy.  Zero disables this limit.
+#     (Since 11.0)
+#
 # @x-cxl-switch-min-remaining: Remaining migration payload threshold,
 #     in bytes, below which hybrid migration may switch away from
 #     bulk precopy.  Zero disables this threshold.  (Since 11.0)
@@ -1854,13 +1866,14 @@
 #
 # @unstable: Members @x-checkpoint-delay,
 #     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
-#     @x-cxl-switch-max-iters, @x-cxl-switch-min-remaining,
-#     @x-cxl-switch-gain-floor, @x-cxl-brake-enable,
-#     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
-#     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
-#     @x-cxl-dst-cache-size, @x-cxl-shared-backing,
-#     @x-cxl-warm-transport, @x-cxl-dst-install-policy, and
-#     @x-cxl-fault-control-plane are experimental.
+#     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
+#     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
+#     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
+#     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
+#     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
+#     @x-cxl-shared-backing, @x-cxl-warm-transport,
+#     @x-cxl-dst-install-policy, and @x-cxl-fault-control-plane are
+#     experimental.
 #
 # Since: 2.4
 ##
@@ -1901,6 +1914,8 @@
                 'type': 'uint64', 'features': [ 'unstable' ] },
             '*x-cxl-switch-max-iters': {
                 'type': 'uint32', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-max-precopy-ms': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
             '*x-cxl-switch-min-remaining': {
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-switch-gain-floor': {
