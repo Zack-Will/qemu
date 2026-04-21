@@ -364,9 +364,13 @@ int cxl_hybrid_send_warm_page(QEMUFile *f, const char *ramblock,
                               size_t len, Error **errp);
 int cxl_hybrid_control_init_source(Error **errp);
 int cxl_hybrid_control_init_destination(Error **errp);
+int cxl_hybrid_control_begin_source_run(Error **errp);
+int cxl_hybrid_control_activate_destination(Error **errp);
 void cxl_hybrid_control_cleanup_source(void);
 void cxl_hybrid_control_cleanup_destination(void);
 uint64_t cxl_hybrid_fault_control_region_bytes(void);
+void cxl_hybrid_control_reset_header_for_run(CXLHybridControlHeader *hdr,
+                                             uint32_t generation);
 int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
                                           uint32_t generation,
                                           uint64_t request_ts_ns,

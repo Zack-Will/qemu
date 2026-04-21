@@ -124,8 +124,10 @@ endif
 
 if have_system
   tests += {
+    'test-cxl-hybrid-control': [migration],
     'ptimer-test': ['ptimer-test-stubs.c', meson.project_source_root() / 'hw/core/ptimer.c'],
     'test-iov': [],
+    'test-migration-downtime': [migration],
     'test-opts-visitor': [testqapi],
     'test-xs-node': [qom],
     'test-virtio-dmabuf': [meson.project_source_root() / 'hw/display/virtio-dmabuf.c'],

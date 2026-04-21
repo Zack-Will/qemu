@@ -373,6 +373,7 @@ struct MigrationState {
     /* Timestamp when VM is down (ms) to migrate the last stuff */
     int64_t downtime_start;
     int64_t downtime;
+    bool downtime_set;
     int64_t expected_downtime;
     bool capabilities[MIGRATION_CAPABILITY__MAX];
     int64_t setup_time;
@@ -608,6 +609,8 @@ void migration_consume_urgent_request(void);
 void migration_mark_cxl_hybrid_ready_urgent(void);
 bool migration_cxl_hybrid_ready_urgent(void);
 void migration_clear_cxl_hybrid_ready_urgent(void);
+void migration_downtime_reset(MigrationState *s);
+void migration_record_downtime(MigrationState *s, int64_t downtime_ms);
 bool migration_rate_limit(void);
 void migration_bh_schedule(QEMUBHFunc *cb, void *opaque);
 void migration_cancel(void);

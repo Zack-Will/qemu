@@ -252,8 +252,8 @@ static void migration_downtime_end(MigrationState *s)
      * If downtime already set, should mean that postcopy already set it,
      * then that should be the real downtime already.
      */
-    if (!s->downtime) {
-        s->downtime = now - s->downtime_start;
+    if (!s->downtime_set) {
+        migration_record_downtime(s, now - s->downtime_start);
         trace_vmstate_downtime_checkpoint("src-downtime-end");
     }
 }
@@ -435,6 +435,7 @@ static int migration_stop_vm(MigrationState *s, RunState state)
 {
     int ret;
 
+    migration_downtime_reset(s);
     migration_downtime_start(s);
 
     s->vm_old_state = runstate_get();
@@ -2890,6 +2891,11 @@ static int postcopy_start(MigrationState *ms, Error **errp)
                                CXL_MIGRATION_SWITCH_REASON_NONE :
                                CXL_MIGRATION_SWITCH_REASON_MANUAL,
                                ms->cxl_hybrid_iteration);
+        if (cxl_hybrid_control_begin_source_run(errp)) {
+            error_prepend(errp,
+                          "Failed to publish CXL hybrid source run state: ");
+            return -1;
+        }
     }
 
     trace_postcopy_start();

@@ -810,6 +810,14 @@ int cxl_hybrid_metadata_recv(const uint8_t *buf, size_t len, Error **errp)
             return ret;
         }
     }
+    if (migrate_cxl_fault_control_plane_cxl()) {
+        ret = cxl_hybrid_control_activate_destination(errp);
+        if (ret) {
+            cxl_hybrid_metadata_cleanup(&cxl_incoming_meta_state.last_meta);
+            cxl_incoming_meta_state.valid = false;
+            return ret;
+        }
+    }
     trace_cxl_hybrid_metadata_recv(meta.generation, meta.nr_entries, len);
     return 0;
 }

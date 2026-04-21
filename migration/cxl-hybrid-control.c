@@ -93,16 +93,6 @@ static void cxl_hybrid_ctrl_bind_state(CXLHybridControlState *state)
     state->shutdown = false;
 }
 
-static void cxl_hybrid_ctrl_reset_header(CXLHybridControlHeader *hdr)
-{
-    memset(hdr, 0, sizeof(*hdr));
-    hdr->magic = CXL_HYBRID_CTRL_MAGIC;
-    hdr->version = CXL_HYBRID_CTRL_VERSION;
-    hdr->request_ring_order = CXL_HYBRID_CTRL_REQUEST_ORDER;
-    hdr->ready_ring_order = CXL_HYBRID_CTRL_READY_ORDER;
-    hdr->generation = cxl_hybrid_fault_publish_generation();
-}
-
 static void cxl_hybrid_ctrl_release_region(void)
 {
     if (cxl_hybrid_control_region.map_base) {
@@ -206,13 +196,6 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
         (CXLHybridFaultReadyRecord *)(
             cxl_hybrid_control_region.request_ring +
             cxl_hybrid_control_region.request_ring_entries);
-
-    /*
-     * Reset ring state on each endpoint initialization so persisted backing
-     * cannot leak stale control records across migration runs. Both endpoints
-     * initialize during setup before any fault traffic is allowed.
-     */
-    cxl_hybrid_ctrl_reset_header(hdr);
 
     return 0;
 }
@@ -544,7 +527,6 @@ int cxl_hybrid_control_init_source(Error **errp)
         return ret;
     }
 
-    cxl_hybrid_ctrl_start_request_worker(&cxl_hybrid_control_source);
     return 0;
 }
 
@@ -559,6 +541,59 @@ int cxl_hybrid_control_init_destination(Error **errp)
     ret = cxl_hybrid_ctrl_state_init(&cxl_hybrid_control_destination, errp);
     if (ret) {
         return ret;
+    }
+
+    return 0;
+}
+
+int cxl_hybrid_control_begin_source_run(Error **errp)
+{
+    int ret;
+    uint32_t generation;
+
+    if (!migrate_cxl_fault_control_plane_cxl()) {
+        return 0;
+    }
+
+    ret = cxl_hybrid_ctrl_state_init(&cxl_hybrid_control_source, errp);
+    if (ret) {
+        return ret;
+    }
+
+    generation = cxl_hybrid_fault_publish_generation();
+    cxl_hybrid_control_reset_header_for_run(cxl_hybrid_control_source.hdr,
+                                            generation);
+    cxl_hybrid_ctrl_start_request_worker(&cxl_hybrid_control_source);
+    return 0;
+}
+
+int cxl_hybrid_control_activate_destination(Error **errp)
+{
+    int ret;
+    uint32_t generation;
+
+    if (!migrate_cxl_fault_control_plane_cxl()) {
+        return 0;
+    }
+
+    ret = cxl_hybrid_ctrl_state_init(&cxl_hybrid_control_destination, errp);
+    if (ret) {
+        return ret;
+    }
+
+    if (!cxl_hybrid_ctrl_state_ready(&cxl_hybrid_control_destination)) {
+        error_setg(errp, "CXL hybrid fault control header is not initialized");
+        return -EINVAL;
+    }
+
+    generation = cxl_hybrid_fault_publish_generation();
+    if (cxl_hybrid_control_destination.hdr->generation != generation) {
+        error_setg(errp,
+                   "CXL hybrid fault control generation mismatch "
+                   "(header=%u expected=%u)",
+                   cxl_hybrid_control_destination.hdr->generation,
+                   generation);
+        return -EINVAL;
     }
 
     cxl_hybrid_ctrl_start_ready_poller(&cxl_hybrid_control_destination);
