@@ -277,19 +277,12 @@ static bool cxl_hybrid_ctrl_state_ready(const CXLHybridControlState *state)
            state->hdr->ready_ring_order == CXL_HYBRID_CTRL_READY_ORDER;
 }
 
-static int cxl_hybrid_ctrl_ring_ready_consumer(
-    const CXLHybridFaultReadyRecord *record, Error **errp)
-{
-    return cxl_hybrid_ctrl_enqueue_fault_ready(record, errp);
-}
-
 static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
 {
     CXLHybridControlState *state = opaque;
     CXLHybridFaultRequestRecord record;
     RAMBlock *block;
     ram_addr_t block_offset;
-    CXLHybridFaultReadyRecord primary_ready;
 
     trace_cxl_hybrid_ctrl_request_worker_start();
     while (!qatomic_read(&state->shutdown)) {
@@ -313,8 +306,8 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                                                       TARGET_PAGE_SIZE,
                                                       record.generation,
                                                       true,
-                                                      &primary_ready,
-                                                      cxl_hybrid_ctrl_ring_ready_consumer,
+                                                      &(CXLHybridFaultReadyRecord){ 0 },
+                                                      NULL,
                                                       &local_err)) {
                 error_free(local_err);
             }

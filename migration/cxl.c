@@ -915,9 +915,11 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
     void *aligned;
     bool publish_req_sent = false;
     size_t page_index;
+    size_t pagesize;
     uint32_t generation;
     uint64_t wait_start_ns;
     uint64_t wait_time_ns;
+    uint64_t cxl_offset;
     uint64_t ready_recv_ns = 0;
     uint64_t wait_ready_recv_time_ns = 0;
     uint64_t wait_after_ready_recv_time_ns = 0;
@@ -937,7 +939,8 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
     }
 
     ramblock = qemu_ram_get_idstr(rb);
-    aligned = (void *)(uintptr_t)ROUND_DOWN(haddr, qemu_ram_pagesize(rb));
+    pagesize = qemu_ram_pagesize(rb);
+    aligned = (void *)(uintptr_t)ROUND_DOWN(haddr, pagesize);
 
     /*
      * Hybrid postcopy must resolve misses through CXL.  Mark the fault as
@@ -971,23 +974,28 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
     }
     if (migrate_cxl_fault_control_plane_cxl()) {
         page_index = cxl_global_page_index(rb, offset);
-        ret = cxl_hybrid_ctrl_enqueue_fault_request(page_index, generation,
-                                                    wait_start_ns, errp);
-        publish_req_sent = (ret == 0);
+        if (!cxl_hybrid_ctrl_page_visible(page_index, generation)) {
+            ret = cxl_hybrid_ctrl_enqueue_fault_request(page_index, generation,
+                                                        wait_start_ns, errp);
+            publish_req_sent = (ret == 0);
+            if (ret) {
+                return ret;
+            }
+        }
     } else {
         ret = migrate_send_rp_cxl_publish_req(mis, rb, offset,
-                                              qemu_ram_pagesize(rb),
+                                              pagesize,
                                               generation,
                                               &publish_req_sent);
-    }
-    if (ret) {
-        if (cxl_state.publish_mutex_ready) {
-            qemu_mutex_lock(&cxl_state.publish_mutex);
-            cxl_hybrid_take_fault_wait_ready_recv_ns_locked(
-                ramblock, offset, generation);
-            qemu_mutex_unlock(&cxl_state.publish_mutex);
+        if (ret) {
+            if (cxl_state.publish_mutex_ready) {
+                qemu_mutex_lock(&cxl_state.publish_mutex);
+                cxl_hybrid_take_fault_wait_ready_recv_ns_locked(
+                    ramblock, offset, generation);
+                qemu_mutex_unlock(&cxl_state.publish_mutex);
+            }
+            return ret;
         }
-        return ret;
     }
     if (publish_req_sent) {
         qatomic_inc(&cxl_state.fault_publish_requests);
@@ -1008,8 +1016,24 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
         qemu_mutex_unlock(&cxl_state.publish_mutex);
     }
     trace_cxl_hybrid_publish_wait_begin(ramblock, offset, generation);
-    ret = cxl_hybrid_dst_staging_wait_range_present(
-        ramblock, offset, qemu_ram_pagesize(rb), errp);
+    if (migrate_cxl_fault_control_plane_cxl()) {
+        ret = cxl_hybrid_ctrl_wait_page_visible(page_index, generation, errp);
+        if (!ret &&
+            !cxl_hybrid_source_page_cxl_offset(ramblock, offset, &cxl_offset)) {
+            error_setg(errp,
+                       "CXL hybrid fault page %s/0x%" PRIx64
+                       " has no stable CXL offset",
+                       ramblock, (uint64_t)offset);
+            ret = -EINVAL;
+        }
+        if (!ret) {
+            ret = cxl_hybrid_dst_staging_register_external_page(
+                ramblock, offset, cxl_offset, pagesize, errp);
+        }
+    } else {
+        ret = cxl_hybrid_dst_staging_wait_range_present(
+            ramblock, offset, pagesize, errp);
+    }
     wait_time_ns = cxl_now_ns() - wait_start_ns;
     qatomic_add(&cxl_state.fault_publish_wait_time_ns, wait_time_ns);
     if (cxl_state.publish_mutex_ready) {
@@ -1022,11 +1046,13 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
             cxl_state.last_publish_wait_complete.count + 1,
             true, wait_time_ns,
             true, ret);
-        ready_recv_ns = cxl_hybrid_take_fault_wait_ready_recv_ns_locked(
-            ramblock, offset, generation);
+        if (!migrate_cxl_fault_control_plane_cxl()) {
+            ready_recv_ns = cxl_hybrid_take_fault_wait_ready_recv_ns_locked(
+                ramblock, offset, generation);
+        }
         qemu_mutex_unlock(&cxl_state.publish_mutex);
     }
-    if (ready_recv_ns) {
+    if (!migrate_cxl_fault_control_plane_cxl() && ready_recv_ns) {
         if (ready_recv_ns > wait_start_ns) {
             wait_ready_recv_time_ns = ready_recv_ns - wait_start_ns;
             if (wait_ready_recv_time_ns > wait_time_ns) {
