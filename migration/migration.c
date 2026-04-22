@@ -2769,7 +2769,6 @@ static int migration_completion_prepare_cxl_postcopy(MigrationState *ms,
 {
     int remaining_sent;
     int ret;
-    int ready_sent = 0;
 
     if (!migrate_cxl_hybrid() ||
         ms->state != MIGRATION_STATUS_POSTCOPY_ACTIVE ||
@@ -2804,37 +2803,25 @@ static int migration_completion_prepare_cxl_postcopy(MigrationState *ms,
         return ret;
     }
 
-    ret = cxl_hybrid_send_pending_publish_ready(ms->to_dst_file, errp);
-    if (ret < 0) {
-        trace_cxl_hybrid_completion_prepare_end(
-            remaining_sent, ret, cxl_hybrid_pending_publish_ready(), ret);
-        return ret;
-    }
-    ready_sent = ret;
-
-    if ((remaining_sent > 0 || ready_sent > 0) &&
+    if (remaining_sent > 0 &&
         qemu_fflush(ms->to_dst_file)) {
         error_setg(errp, "CXL hybrid completion flush failed");
         trace_cxl_hybrid_completion_prepare_end(
-            remaining_sent, ready_sent, cxl_hybrid_pending_publish_ready(),
+            remaining_sent, 0, cxl_hybrid_pending_publish_ready(),
             -EIO);
         return -EIO;
-    }
-
-    if (ready_sent > 0) {
-        cxl_hybrid_mark_completion_publish_ready_flushed();
     }
 
     if (qemu_file_get_error(ms->to_dst_file)) {
         error_setg(errp, "CXL hybrid completion flush hit migration stream error");
         trace_cxl_hybrid_completion_prepare_end(
-            remaining_sent, ready_sent, cxl_hybrid_pending_publish_ready(),
+            remaining_sent, 0, cxl_hybrid_pending_publish_ready(),
             -EIO);
         return -EIO;
     }
 
     trace_cxl_hybrid_completion_prepare_end(
-        remaining_sent, ready_sent, cxl_hybrid_pending_publish_ready(), 0);
+        remaining_sent, 0, cxl_hybrid_pending_publish_ready(), 0);
     return 0;
 }
 
@@ -3738,15 +3725,6 @@ static MigIterateState migration_iteration_run(MigrationState *s)
     }
 
     if (complete_ready) {
-        if (in_postcopy && migrate_cxl_hybrid() &&
-            cxl_hybrid_phase() == CXL_HYBRID_PHASE_POSTCOPY_WARM &&
-            cxl_hybrid_send_pending_publish_ready(s->to_dst_file,
-                                                  &local_err) < 0) {
-            migrate_error_propagate(s, error_copy(local_err));
-            error_report_err(local_err);
-            ret = MIG_ITERATE_BREAK;
-            goto out;
-        }
         trace_migration_thread_low_pending(pending_size);
         migration_completion(s);
         ret = MIG_ITERATE_BREAK;
@@ -3757,13 +3735,6 @@ static MigIterateState migration_iteration_run(MigrationState *s)
     qemu_savevm_state_iterate(s->to_dst_file, in_postcopy);
     if (in_postcopy && migrate_cxl_hybrid() &&
         cxl_hybrid_phase() == CXL_HYBRID_PHASE_POSTCOPY_WARM) {
-        if (cxl_hybrid_send_pending_publish_ready(s->to_dst_file,
-                                                  &local_err) < 0) {
-            migrate_error_propagate(s, error_copy(local_err));
-            error_report_err(local_err);
-            ret = MIG_ITERATE_BREAK;
-            goto out;
-        }
         if (cxl_hybrid_warm_push_iteration(s, &local_err) < 0) {
             migrate_error_propagate(s, error_copy(local_err));
             error_report_err(local_err);

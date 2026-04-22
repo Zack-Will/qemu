@@ -54,15 +54,6 @@ typedef struct CXLHybridPendingReady {
     QSIMPLEQ_ENTRY(CXLHybridPendingReady) next;
 } CXLHybridPendingReady;
 
-typedef struct CXLHybridWarmDescBatchBuilder {
-    MigrationState *s;
-    CXLHybridWarmDescBatch batch;
-    size_t encoded_len;
-    uint32_t pages;
-    bool have_open_range;
-    CXLHybridWarmDescRange open_range;
-} CXLHybridWarmDescBatchBuilder;
-
 typedef struct CXLHybridLastPublishRequestInfo {
     uint64_t count;
     uint64_t guest_offset;
@@ -122,8 +113,6 @@ static bool cxl_hybrid_range_is_remapped(RAMBlock *block,
 static void cxl_hybrid_ensure_publish_mutex(void);
 static void cxl_hybrid_ensure_fault_wait_records(void);
 
-#define CXL_HYBRID_WARM_DESC_BATCH_HEADER_LEN (4 + 4)
-#define CXL_HYBRID_WARM_DESC_BATCH_ENTRY_HEADER_LEN (1 + 8 + 8 + 4 + 4)
 #define CXL_HYBRID_FAULT_BURST_PAGES 4
 
 /*
@@ -1625,11 +1614,6 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
                                              TARGET_PAGE_SIZE, generation,
                                              CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH,
                                              &cxl_offset, errp);
-        if (ret) {
-            return ret;
-        }
-        ret = cxl_hybrid_send_warm_descriptor(s->to_dst_file, block->idstr,
-                                              offset, errp);
         break;
     case CXL_HYBRID_WARM_TRANSPORT_PAYLOAD:
         error_setg(errp, "CXL-only hybrid warm push does not support payload transport");
@@ -1648,292 +1632,23 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
     set_bit_atomic(page_idx, cxl_state.warm_sent_bmap);
     clear_bit_atomic(page_idx, cxl_state.warm_dirty_bmap);
     qatomic_inc(&cxl_state.source_warm_queue_pages);
+    qatomic_inc(&cxl_state.source_warm_sent_pages);
+    qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
     trace_cxl_hybrid_warm_page_queued(block->idstr, block_offset);
     return 1;
 }
-
-static void cxl_hybrid_warm_desc_batch_builder_cleanup(
-    CXLHybridWarmDescBatchBuilder *builder)
-{
-    if (!builder) {
-        return;
-    }
-
-    cxl_hybrid_warm_desc_batch_cleanup(&builder->batch);
-    g_free(builder->open_range.ramblock);
-    builder->open_range.ramblock = NULL;
-    builder->have_open_range = false;
-    builder->encoded_len = CXL_HYBRID_WARM_DESC_BATCH_HEADER_LEN;
-    builder->pages = 0;
-}
-
-static size_t cxl_hybrid_warm_desc_batch_entry_len(
-    const CXLHybridWarmDescRange *range)
-{
-    return CXL_HYBRID_WARM_DESC_BATCH_ENTRY_HEADER_LEN +
-           strlen(range->ramblock);
-}
-
-static int cxl_hybrid_build_warm_desc_range(const char *ramblock,
-                                            uint64_t guest_offset,
-                                            uint32_t page_len,
-                                            CXLHybridWarmDescRange *range,
-                                            Error **errp)
-{
-    RAMBlock *block;
-    ram_addr_t global_offset;
-    CXLHybridPublishedPageState publish_state = { 0 };
-
-    if (!ramblock || !range) {
-        error_setg(errp, "CXL hybrid warm descriptor range missing arguments");
-        return -EINVAL;
-    }
-
-    block = qemu_ram_block_by_name(ramblock);
-    if (!block) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor range %s/0x%" PRIx64
-                   " has no RAMBlock",
-                   ramblock, guest_offset);
-        return -ENOENT;
-    }
-
-    if (!cxl_hybrid_source_page_cxl_offset(ramblock, guest_offset,
-                                           &range->cxl_offset)) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor range %s/0x%" PRIx64
-                   " has no stable CXL offset",
-                   ramblock, guest_offset);
-        return -EINVAL;
-    }
-
-    if (!cxl_hybrid_global_page_offset(block, guest_offset,
-                                       page_len, &global_offset)) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor range %s/0x%" PRIx64
-                   " has invalid global offset",
-                   ramblock, guest_offset);
-        return -EINVAL;
-    }
-
-    if (!cxl_hybrid_range_is_remapped(block, guest_offset, page_len) &&
-        !cxl_hybrid_get_published_page_state(ramblock, guest_offset,
-                                             &publish_state)) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor range %s/0x%" PRIx64
-                   " is neither source-remapped nor published-to-CXL",
-                   ramblock, guest_offset);
-        return -EINVAL;
-    }
-
-    range->ramblock = g_strdup(ramblock);
-    range->guest_offset = guest_offset;
-    range->page_len = page_len;
-    range->flags = CXL_HYBRID_WARM_DESC_F_SHARED_CXL;
-    if (cxl_hybrid_range_is_remapped(block, guest_offset, page_len)) {
-        range->flags |= CXL_HYBRID_WARM_DESC_F_SOURCE_REMAPPED;
-    }
-
-    return 0;
-}
-
-static int cxl_hybrid_warm_desc_batch_builder_flush(
-    CXLHybridWarmDescBatchBuilder *builder,
-    Error **errp);
-
-static int cxl_hybrid_warm_desc_batch_builder_append_entry(
-    CXLHybridWarmDescBatchBuilder *builder,
-    const CXLHybridWarmDescRange *range,
-    Error **errp)
-{
-    CXLHybridWarmDescRange *entry;
-    size_t next_len;
-
-    next_len = builder->encoded_len +
-               cxl_hybrid_warm_desc_batch_entry_len(range);
-    if (next_len > UINT16_MAX && builder->batch.nr_entries > 0) {
-        int ret = cxl_hybrid_warm_desc_batch_builder_flush(builder, errp);
-
-        if (ret) {
-            return ret;
-        }
-        next_len = builder->encoded_len +
-                   cxl_hybrid_warm_desc_batch_entry_len(range);
-    }
-
-    if (next_len > UINT16_MAX) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch command too large: %zu",
-                   next_len);
-        return -E2BIG;
-    }
-
-    builder->batch.entries = g_renew(CXLHybridWarmDescRange,
-                                     builder->batch.entries,
-                                     builder->batch.nr_entries + 1);
-    entry = &builder->batch.entries[builder->batch.nr_entries++];
-    *entry = (CXLHybridWarmDescRange) {
-        .ramblock = g_strdup(range->ramblock),
-        .guest_offset = range->guest_offset,
-        .cxl_offset = range->cxl_offset,
-        .page_len = range->page_len,
-        .flags = range->flags,
-    };
-    builder->encoded_len = next_len;
-    builder->pages += range->page_len / TARGET_PAGE_SIZE;
-    return 0;
-}
-
-static int cxl_hybrid_warm_desc_batch_builder_append(
-    CXLHybridWarmDescBatchBuilder *builder,
-    const CXLHybridWarmDescRange *range,
-    Error **errp)
-{
-    CXLHybridWarmDescRange *open_range;
-
-    if (!builder || !range) {
-        error_setg(errp, "CXL hybrid warm descriptor batch append missing arguments");
-        return -EINVAL;
-    }
-
-    if (!builder->have_open_range) {
-        builder->open_range = (CXLHybridWarmDescRange) {
-            .ramblock = g_strdup(range->ramblock),
-            .guest_offset = range->guest_offset,
-            .cxl_offset = range->cxl_offset,
-            .page_len = range->page_len,
-            .flags = range->flags,
-        };
-        builder->have_open_range = true;
-        return 0;
-    }
-
-    open_range = &builder->open_range;
-    if (!strcmp(open_range->ramblock, range->ramblock) &&
-        open_range->flags == range->flags &&
-        open_range->guest_offset + open_range->page_len == range->guest_offset &&
-        open_range->cxl_offset + open_range->page_len == range->cxl_offset) {
-        open_range->page_len += range->page_len;
-        return 0;
-    }
-
-    {
-        int ret = cxl_hybrid_warm_desc_batch_builder_flush(builder, errp);
-
-        if (ret) {
-            return ret;
-        }
-    }
-
-    builder->open_range = (CXLHybridWarmDescRange) {
-        .ramblock = g_strdup(range->ramblock),
-        .guest_offset = range->guest_offset,
-        .cxl_offset = range->cxl_offset,
-        .page_len = range->page_len,
-        .flags = range->flags,
-    };
-    builder->have_open_range = true;
-    return 0;
-}
-
-static int cxl_hybrid_warm_desc_batch_builder_flush(
-    CXLHybridWarmDescBatchBuilder *builder,
-    Error **errp)
-{
-    g_autofree uint8_t *buf = NULL;
-    size_t encoded_len;
-    uint32_t generation;
-    uint32_t i;
-    int ret;
-
-    if (!builder) {
-        error_setg(errp, "CXL hybrid warm descriptor batch flush missing builder");
-        return -EINVAL;
-    }
-
-    if (builder->have_open_range) {
-        ret = cxl_hybrid_warm_desc_batch_builder_append_entry(
-            builder, &builder->open_range, errp);
-        if (ret) {
-            return ret;
-        }
-        g_clear_pointer(&builder->open_range.ramblock, g_free);
-        builder->have_open_range = false;
-    }
-
-    if (!builder->batch.nr_entries) {
-        return 0;
-    }
-
-    ret = cxl_hybrid_warm_desc_batch_encoded_len(&builder->batch, &encoded_len,
-                                                 errp);
-    if (ret) {
-        return ret;
-    }
-
-    buf = g_malloc(encoded_len);
-    ret = cxl_hybrid_warm_desc_batch_encode(&builder->batch, buf, encoded_len,
-                                            errp);
-    if (ret) {
-        return ret;
-    }
-
-    for (i = 0; i < builder->batch.nr_entries; i++) {
-        CXLHybridWarmDescRange *range = &builder->batch.entries[i];
-
-        trace_cxl_hybrid_warm_desc_send(range->ramblock, range->guest_offset,
-                                        range->cxl_offset, range->page_len);
-    }
-
-    trace_cxl_hybrid_warm_desc_batch_send(builder->batch.generation,
-                                          builder->batch.nr_entries,
-                                          builder->pages, encoded_len);
-    qemu_savevm_send_cxl_hybrid_warm_desc_batch(builder->s->to_dst_file,
-                                                builder->batch.generation,
-                                                builder->batch.nr_entries,
-                                                buf, encoded_len);
-    ret = qemu_file_get_error(builder->s->to_dst_file);
-    if (ret) {
-        error_setg(errp,
-                   "Failed to send CXL hybrid warm descriptor batch command");
-        return ret < 0 ? ret : -EIO;
-    }
-
-    for (i = 0; i < builder->batch.nr_entries; i++) {
-        CXLHybridWarmDescRange *range = &builder->batch.entries[i];
-
-        cxl_hybrid_account_dst_page_sent(range->ramblock, range->guest_offset,
-                                         range->page_len);
-        qatomic_add(&cxl_state.source_warm_desc_sent_pages,
-                    range->page_len / TARGET_PAGE_SIZE);
-        qatomic_add(&cxl_state.source_warm_desc_sent_bytes, range->page_len);
-        qatomic_add(&cxl_state.source_warm_sent_pages,
-                    range->page_len / TARGET_PAGE_SIZE);
-        qatomic_add(&cxl_state.source_warm_sent_bytes, range->page_len);
-    }
-
-    generation = builder->batch.generation;
-    cxl_hybrid_warm_desc_batch_cleanup(&builder->batch);
-    builder->batch.generation = generation;
-    builder->encoded_len = CXL_HYBRID_WARM_DESC_BATCH_HEADER_LEN;
-    builder->pages = 0;
-    return 0;
-}
-
 static int cxl_hybrid_completion_publish_remaining_page(
     MigrationState *s,
     size_t page_idx,
-    CXLHybridWarmDescBatchBuilder *builder,
     Error **errp)
 {
     RAMBlock *block;
     ram_addr_t block_offset;
-    CXLHybridWarmDescRange range = { 0 };
     uint32_t generation;
     int ret;
 
-    if (!s || !builder) {
-        error_setg(errp, "CXL hybrid completion missing warm descriptor batch builder");
+    if (!s) {
+        error_setg(errp, "CXL hybrid completion missing migration state");
         return -EINVAL;
     }
 
@@ -1961,7 +1676,7 @@ static int cxl_hybrid_completion_publish_remaining_page(
         return 0;
     }
 
-    generation = builder->batch.generation;
+    generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions);
     ret = cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,
                                          TARGET_PAGE_SIZE, generation,
                                          CXL_HYBRID_PUBLISH_SOURCE_COMPLETION,
@@ -1970,18 +1685,8 @@ static int cxl_hybrid_completion_publish_remaining_page(
         return ret;
     }
 
-    ret = cxl_hybrid_build_warm_desc_range(block->idstr, block_offset,
-                                           TARGET_PAGE_SIZE, &range, errp);
-    if (ret) {
-        return ret;
-    }
-
-    ret = cxl_hybrid_warm_desc_batch_builder_append(builder, &range, errp);
-    g_free(range.ramblock);
-    if (ret) {
-        return ret;
-    }
-
+    qatomic_inc(&cxl_state.source_warm_sent_pages);
+    qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
     return 1;
 }
 
@@ -3336,11 +3041,6 @@ int cxl_hybrid_warm_push_iteration(MigrationState *s, Error **errp)
 int cxl_hybrid_completion_publish_remaining_pages(MigrationState *s,
                                                   Error **errp)
 {
-    CXLHybridWarmDescBatchBuilder builder = {
-        .s = s,
-        .batch.generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions),
-        .encoded_len = CXL_HYBRID_WARM_DESC_BATCH_HEADER_LEN,
-    };
     size_t page_idx;
     int sent = 0;
     int ret;
@@ -3353,10 +3053,8 @@ int cxl_hybrid_completion_publish_remaining_pages(MigrationState *s,
 
     page_idx = find_next_bit(cxl_state.remaining_bmap, cxl_state.total_pages, 0);
     while (page_idx < cxl_state.total_pages) {
-        ret = cxl_hybrid_completion_publish_remaining_page(s, page_idx,
-                                                           &builder, errp);
+        ret = cxl_hybrid_completion_publish_remaining_page(s, page_idx, errp);
         if (ret < 0) {
-            cxl_hybrid_warm_desc_batch_builder_cleanup(&builder);
             return ret;
         }
         sent += ret;
@@ -3364,14 +3062,6 @@ int cxl_hybrid_completion_publish_remaining_pages(MigrationState *s,
                                  cxl_state.total_pages,
                                  page_idx + 1);
     }
-
-    ret = cxl_hybrid_warm_desc_batch_builder_flush(&builder, errp);
-    if (ret) {
-        cxl_hybrid_warm_desc_batch_builder_cleanup(&builder);
-        return ret;
-    }
-
-    cxl_hybrid_warm_desc_batch_builder_cleanup(&builder);
     return sent;
 }
 
