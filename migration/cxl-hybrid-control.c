@@ -689,10 +689,11 @@ void cxl_hybrid_ctrl_set_page_visible(uint64_t page_index,
 {
     CXLHybridControlState *state = &cxl_hybrid_control_source;
 
-    if (!state->hdr || state->hdr->generation != generation) {
+    if (!state->hdr || !state->visible_bitmap) {
         return;
     }
 
+    (void)generation;
     cxl_hybrid_control_mark_page_visible(state->hdr, state->visible_bitmap,
                                          page_index);
 }
