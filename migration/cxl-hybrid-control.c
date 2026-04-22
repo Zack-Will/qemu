@@ -703,8 +703,6 @@ int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
                                       uint32_t generation,
                                       Error **errp)
 {
-    int retries = 0;
-
     while (!cxl_hybrid_ctrl_page_visible(page_index, generation)) {
         if (!cxl_hybrid_control_destination.hdr ||
             cxl_hybrid_control_destination.hdr->generation != generation) {
@@ -715,13 +713,6 @@ int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
                        cxl_hybrid_control_destination.hdr->generation : 0,
                        generation);
             return -EINVAL;
-        }
-
-        if (++retries > 20000) {
-            error_setg(errp,
-                       "Timed out waiting for CXL hybrid visible page %" PRIu64,
-                       page_index);
-            return -ETIMEDOUT;
         }
 
         g_usleep(50);

@@ -914,6 +914,7 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
     const char *ramblock;
     void *aligned;
     bool publish_req_sent = false;
+    bool cxl_ctrl_fault_path;
     size_t page_index;
     size_t pagesize;
     uint32_t generation;
@@ -961,7 +962,8 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
 
     generation = cxl_hybrid_fault_publish_generation();
     wait_start_ns = cxl_now_ns();
-    if (cxl_state.publish_mutex_ready) {
+    cxl_ctrl_fault_path = migrate_cxl_fault_control_plane_cxl();
+    if (!cxl_ctrl_fault_path && cxl_state.publish_mutex_ready) {
         CXLHybridFaultWaitRecord *wait_record;
 
         qemu_mutex_lock(&cxl_state.publish_mutex);
@@ -972,7 +974,7 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
         }
         qemu_mutex_unlock(&cxl_state.publish_mutex);
     }
-    if (migrate_cxl_fault_control_plane_cxl()) {
+    if (cxl_ctrl_fault_path) {
         page_index = cxl_global_page_index(rb, offset);
         if (!cxl_hybrid_ctrl_page_visible(page_index, generation)) {
             ret = cxl_hybrid_ctrl_enqueue_fault_request(page_index, generation,
@@ -1016,7 +1018,7 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
         qemu_mutex_unlock(&cxl_state.publish_mutex);
     }
     trace_cxl_hybrid_publish_wait_begin(ramblock, offset, generation);
-    if (migrate_cxl_fault_control_plane_cxl()) {
+    if (cxl_ctrl_fault_path) {
         ret = cxl_hybrid_ctrl_wait_page_visible(page_index, generation, errp);
         if (!ret &&
             !cxl_hybrid_source_page_cxl_offset(ramblock, offset, &cxl_offset)) {
@@ -1046,13 +1048,13 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
             cxl_state.last_publish_wait_complete.count + 1,
             true, wait_time_ns,
             true, ret);
-        if (!migrate_cxl_fault_control_plane_cxl()) {
+        if (!cxl_ctrl_fault_path) {
             ready_recv_ns = cxl_hybrid_take_fault_wait_ready_recv_ns_locked(
                 ramblock, offset, generation);
         }
         qemu_mutex_unlock(&cxl_state.publish_mutex);
     }
-    if (!migrate_cxl_fault_control_plane_cxl() && ready_recv_ns) {
+    if (!cxl_ctrl_fault_path && ready_recv_ns) {
         if (ready_recv_ns > wait_start_ns) {
             wait_ready_recv_time_ns = ready_recv_ns - wait_start_ns;
             if (wait_ready_recv_time_ns > wait_time_ns) {
