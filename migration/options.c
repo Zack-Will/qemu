@@ -1076,6 +1076,12 @@ bool migrate_cxl_fault_control_plane_cxl(void)
            CXL_HYBRID_FAULT_CONTROL_PLANE_CXL;
 }
 
+bool migrate_cxl_shared_bitmap(void)
+{
+    return migrate_cxl_fault_control_plane_cxl() &&
+           migrate_cxl_shared_backing();
+}
+
 CXLHybridWarmTransport migrate_cxl_warm_transport(void)
 {
     MigrationState *s = migrate_get_current();

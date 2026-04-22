@@ -104,6 +104,7 @@ uint64_t migrate_cxl_dst_cache_size(void);
 bool migrate_cxl_shared_backing(void);
 CXLHybridFaultControlPlane migrate_cxl_fault_control_plane(void);
 bool migrate_cxl_fault_control_plane_cxl(void);
+bool migrate_cxl_shared_bitmap(void);
 CXLHybridWarmTransport migrate_cxl_warm_transport(void);
 CXLHybridDstInstallPolicy migrate_cxl_dst_install_policy(void);
 

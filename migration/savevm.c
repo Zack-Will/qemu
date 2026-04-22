@@ -2706,7 +2706,7 @@ static int loadvm_process_command(QEMUFile *f, Error **errp)
         g_autofree uint8_t *buf = g_malloc(len);
         CXLHybridWarmDescriptor desc = { 0 };
 
-        if (migrate_cxl_fault_control_plane_cxl()) {
+        if (migrate_cxl_shared_bitmap()) {
             error_setg(errp,
                        "CXL shared-bitmap mode rejects legacy warm descriptor transport");
             return -EINVAL;
@@ -2741,7 +2741,7 @@ static int loadvm_process_command(QEMUFile *f, Error **errp)
         g_autofree uint8_t *buf = g_malloc(len);
         CXLHybridWarmDescBatch batch = { 0 };
 
-        if (migrate_cxl_fault_control_plane_cxl()) {
+        if (migrate_cxl_shared_bitmap()) {
             error_setg(errp,
                        "CXL shared-bitmap mode rejects legacy warm descriptor batch transport");
             return -EINVAL;
@@ -2782,7 +2782,7 @@ static int loadvm_process_command(QEMUFile *f, Error **errp)
         uint64_t publish_ready_recv_ns;
         uint64_t publish_ready_sent_at_ns;
 
-        if (migrate_cxl_fault_control_plane_cxl()) {
+        if (migrate_cxl_shared_bitmap()) {
             error_setg(errp,
                        "CXL shared-bitmap mode rejects legacy publish-ready transport");
             return -EINVAL;

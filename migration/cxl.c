@@ -1614,6 +1614,10 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
                                              TARGET_PAGE_SIZE, generation,
                                              CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH,
                                              &cxl_offset, errp);
+        if (!ret && !migrate_cxl_shared_bitmap()) {
+            ret = cxl_hybrid_send_warm_descriptor(s->to_dst_file, block->idstr,
+                                                  offset, errp);
+        }
         break;
     case CXL_HYBRID_WARM_TRANSPORT_PAYLOAD:
         error_setg(errp, "CXL-only hybrid warm push does not support payload transport");
@@ -1632,8 +1636,10 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
     set_bit_atomic(page_idx, cxl_state.warm_sent_bmap);
     clear_bit_atomic(page_idx, cxl_state.warm_dirty_bmap);
     qatomic_inc(&cxl_state.source_warm_queue_pages);
-    qatomic_inc(&cxl_state.source_warm_sent_pages);
-    qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
+    if (migrate_cxl_shared_bitmap()) {
+        qatomic_inc(&cxl_state.source_warm_sent_pages);
+        qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
+    }
     trace_cxl_hybrid_warm_page_queued(block->idstr, block_offset);
     return 1;
 }
@@ -1685,8 +1691,16 @@ static int cxl_hybrid_completion_publish_remaining_page(
         return ret;
     }
 
-    qatomic_inc(&cxl_state.source_warm_sent_pages);
-    qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
+    if (migrate_cxl_shared_bitmap()) {
+        qatomic_inc(&cxl_state.source_warm_sent_pages);
+        qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
+    } else {
+        ret = cxl_hybrid_send_warm_descriptor(s->to_dst_file, block->idstr,
+                                              block_offset, errp);
+        if (ret) {
+            return ret;
+        }
+    }
     return 1;
 }
 
