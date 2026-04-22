@@ -2304,6 +2304,7 @@ static void cxl_hybrid_invalidate_published_page(const char *ramblock,
         if (cxl_state.cxl_visible_bmap) {
             clear_bit_atomic(page_idx, cxl_state.cxl_visible_bmap);
         }
+        cxl_hybrid_ctrl_clear_page_visible(page_idx);
         if (cxl_state.migrated_bmap &&
             test_bit(page_idx, cxl_state.migrated_bmap) &&
             cxl_state.remaining_bmap) {
@@ -2692,6 +2693,7 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
     entry->ready = true;
     entry->source_remapped = source_remapped;
     cxl_hybrid_mark_page_cxl_visible(page_idx);
+    cxl_hybrid_ctrl_set_page_visible(page_idx, generation);
     cxl_hybrid_record_publish_source(source, page_len >> TARGET_PAGE_BITS);
     if (cxl_state.publish_mutex_ready) {
         qemu_mutex_unlock(&cxl_state.publish_mutex);
@@ -3499,26 +3501,31 @@ static bool cxl_region_all_pages_migrated(size_t first_page, size_t npages)
 static void cxl_mark_pages_remapped(size_t first_page, size_t npages)
 {
     size_t page;
+    uint32_t generation;
 
     if (cxl_state.publish_mutex_ready) {
         qemu_mutex_lock(&cxl_state.publish_mutex);
     }
+    generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions);
     for (page = 0; page < npages; page++) {
+        size_t page_idx = first_page + page;
         CXLHybridPublishedPageEntry *entry =
-            cxl_hybrid_lookup_published_page_by_index(first_page + page);
+            cxl_hybrid_lookup_published_page_by_index(page_idx);
 
-        set_bit_atomic(first_page + page, cxl_state.remapped_pages_bmap);
+        set_bit_atomic(page_idx, cxl_state.remapped_pages_bmap);
         if (cxl_state.cxl_visible_bmap) {
-            set_bit_atomic(first_page + page, cxl_state.cxl_visible_bmap);
+            set_bit_atomic(page_idx, cxl_state.cxl_visible_bmap);
         }
         if (cxl_state.remaining_bmap) {
-            clear_bit_atomic(first_page + page, cxl_state.remaining_bmap);
+            clear_bit_atomic(page_idx, cxl_state.remaining_bmap);
         }
         if (entry) {
+            entry->generation = generation;
             entry->valid = true;
             entry->ready = true;
             entry->source_remapped = true;
         }
+        cxl_hybrid_ctrl_set_page_visible(page_idx, generation);
     }
     if (cxl_state.publish_mutex_ready) {
         qemu_mutex_unlock(&cxl_state.publish_mutex);
