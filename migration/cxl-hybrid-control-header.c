@@ -62,7 +62,9 @@ void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
         return;
     }
 
-    set_bit(page_index, visible_bitmap);
+    /* Publish page data before making the visibility bit observable. */
+    smp_mb_release();
+    set_bit_atomic(page_index, visible_bitmap);
 }
 
 void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
@@ -74,7 +76,7 @@ void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
         return;
     }
 
-    clear_bit(page_index, visible_bitmap);
+    clear_bit_atomic(page_index, visible_bitmap);
 }
 
 void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
