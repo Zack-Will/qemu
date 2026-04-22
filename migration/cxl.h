@@ -90,7 +90,7 @@ typedef struct CXLHybridControlHeader {
     uint32_t request_ring_order;
     uint32_t ready_ring_order;
     uint32_t generation;
-    uint32_t reserved0;
+    uint32_t visible_page_words;
     uint64_t request_prod;
     uint64_t request_cons;
     uint64_t ready_prod;
@@ -369,6 +369,22 @@ int cxl_hybrid_control_activate_destination(Error **errp);
 void cxl_hybrid_control_cleanup_source(void);
 void cxl_hybrid_control_cleanup_destination(void);
 uint64_t cxl_hybrid_fault_control_region_bytes(void);
+size_t cxl_hybrid_control_visible_bitmap_words(uint64_t pages);
+size_t cxl_hybrid_control_visible_bitmap_bytes(uint64_t pages);
+bool cxl_hybrid_control_page_visible(const CXLHybridControlHeader *hdr,
+                                     const unsigned long *visible_bitmap,
+                                     uint64_t page_index,
+                                     uint32_t generation);
+void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
+                                          unsigned long *visible_bitmap,
+                                          uint64_t page_index);
+void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
+                                           unsigned long *visible_bitmap,
+                                           uint64_t page_index);
+void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
+                                        unsigned long *visible_bitmap,
+                                        uint32_t generation,
+                                        uint32_t visible_page_words);
 void cxl_hybrid_control_reset_header_for_run(CXLHybridControlHeader *hdr,
                                              uint32_t generation);
 int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
