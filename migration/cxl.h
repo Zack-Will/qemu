@@ -387,6 +387,13 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
                                         uint32_t visible_page_words);
 void cxl_hybrid_control_reset_header_for_run(CXLHybridControlHeader *hdr,
                                              uint32_t generation);
+bool cxl_hybrid_ctrl_page_visible(uint64_t page_index, uint32_t generation);
+void cxl_hybrid_ctrl_set_page_visible(uint64_t page_index,
+                                      uint32_t generation);
+void cxl_hybrid_ctrl_clear_page_visible(uint64_t page_index);
+int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
+                                      uint32_t generation,
+                                      Error **errp);
 int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
                                           uint32_t generation,
                                           uint64_t request_ts_ns,
