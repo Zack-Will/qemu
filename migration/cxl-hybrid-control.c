@@ -102,9 +102,17 @@ uint64_t cxl_hybrid_fault_control_region_bytes(void)
                     (size_t)qemu_real_host_page_size());
 }
 
+uint64_t cxl_hybrid_fault_control_region_allocation_bytes(uint64_t align)
+{
+    uint64_t raw = cxl_hybrid_fault_control_region_bytes();
+    uint64_t granule = MAX(align, (uint64_t)qemu_real_host_page_size());
+
+    return ROUND_UP(raw, granule);
+}
+
 static off_t cxl_hybrid_ctrl_region_offset(uint64_t align)
 {
-    return cxl_hybrid_mapped_ram_required_bytes(align);
+    return cxl_hybrid_reserved_region_bytes(align, false);
 }
 
 static void cxl_hybrid_ctrl_ensure_locks(void)
@@ -189,7 +197,7 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
         return -errno;
     }
 
-    map_len = cxl_hybrid_fault_control_region_bytes();
+    map_len = cxl_hybrid_fault_control_region_allocation_bytes(cioc->align);
     total_pages = cxl_hybrid_ctrl_total_pages();
     visible_page_words = cxl_hybrid_ctrl_visible_page_words(total_pages);
     visible_bitmap_bytes =

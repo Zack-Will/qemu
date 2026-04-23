@@ -7,8 +7,138 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
+#include "qapi/error.h"
 #include "migration/cxl.h"
 #include "qemu/bitmap.h"
+#include "glib/gstdio.h"
+
+#define TEST_ALIGN_2M (2 * MiB)
+
+static void test_align_mapping_bytes_rounds_up_to_device_align(void)
+{
+    uint64_t raw = 3 * MiB + 4096;
+    uint64_t alloc = cxl_hybrid_align_mapping_bytes(raw, TEST_ALIGN_2M);
+
+    g_assert_cmpuint(alloc, >=, raw);
+    g_assert_cmpuint(alloc % TEST_ALIGN_2M, ==, 0);
+    g_assert_cmpuint(alloc, ==, 4 * MiB);
+}
+
+static void test_staging_shared_map_supports_fixed_extent_io(void)
+{
+    g_autofree char *path = NULL;
+    CXLHybridMetadataEntry entry = {
+        .ramblock = (char *)"rb0",
+        .offset = 0,
+        .length = 4096,
+    };
+    CXLHybridMetadata meta = {
+        .version = CXL_HYBRID_METADATA_VERSION,
+        .generation = 1,
+        .nr_entries = 1,
+        .entries = &entry,
+    };
+    struct stat st;
+    Error *err = NULL;
+    int fd;
+    int ret;
+    uint8_t in[4096];
+    uint8_t out[4096];
+
+    fd = g_file_open_tmp("test-cxl-hybrid-staging-XXXXXX", &path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 8 * MiB), ==, 0);
+
+    ret = cxl_hybrid_dst_staging_init_fixed_fd(fd, 2 * MiB, 2 * MiB,
+                                               8 * MiB, true, &err);
+    if (err) {
+        error_free_or_abort(&err);
+    }
+    g_assert_cmpint(ret, ==, 0);
+
+    ret = cxl_hybrid_dst_staging_apply_metadata(&meta, &err);
+    if (err) {
+        error_free_or_abort(&err);
+    }
+    g_assert_cmpint(ret, ==, 0);
+
+    memset(in, 0x5a, sizeof(in));
+    memset(out, 0, sizeof(out));
+
+    ret = cxl_hybrid_dst_staging_store_page("rb0", 0, in, sizeof(in), &err);
+    if (err) {
+        error_free_or_abort(&err);
+    }
+    g_assert_cmpint(ret, ==, 0);
+
+    ret = cxl_hybrid_dst_staging_read_page("rb0", 0, out, sizeof(out), &err);
+    if (err) {
+        error_free_or_abort(&err);
+    }
+    g_assert_cmpint(ret, ==, 0);
+    g_assert_cmpmem(in, sizeof(in), out, sizeof(out));
+
+    g_assert_cmpint(fstat(fd, &st), ==, 0);
+    g_assert_cmpuint(st.st_size, ==, 8 * MiB);
+
+    cxl_hybrid_dst_staging_cleanup();
+    close(fd);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+}
+
+static void test_staging_shared_map_rejects_extent_overflow_without_growing(void)
+{
+    g_autofree char *path = NULL;
+    struct stat st;
+    Error *err = NULL;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("test-cxl-hybrid-staging-overflow-XXXXXX",
+                         &path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 2 * MiB), ==, 0);
+
+    ret = cxl_hybrid_dst_staging_init_fixed_fd(fd, 2 * MiB, 1 * MiB,
+                                               2 * MiB, true, &err);
+    g_assert_cmpint(ret, <, 0);
+    g_assert_nonnull(err);
+    error_free(err);
+
+    g_assert_cmpint(fstat(fd, &st), ==, 0);
+    g_assert_cmpuint(st.st_size, ==, 2 * MiB);
+
+    close(fd);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+}
+
+static void test_staging_shared_map_rejects_base_beyond_extent(void)
+{
+    g_autofree char *path = NULL;
+    struct stat st;
+    Error *err = NULL;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("test-cxl-hybrid-staging-base-overflow-XXXXXX",
+                         &path, NULL);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 2 * MiB), ==, 0);
+
+    errno = 0;
+    ret = cxl_hybrid_dst_staging_init_fixed_fd(fd, 4096, 3 * MiB,
+                                               2 * MiB, true, &err);
+    g_assert_cmpint(ret, ==, -EOVERFLOW);
+    g_assert_nonnull(err);
+    error_free(err);
+
+    g_assert_cmpint(fstat(fd, &st), ==, 0);
+    g_assert_cmpuint(st.st_size, ==, 2 * MiB);
+
+    close(fd);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+}
 
 static void test_header_reset_clears_visible_bitmap(void)
 {
@@ -98,8 +228,16 @@ static void test_visible_bitmap_respects_generation(void)
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/cxl-hybrid-control/align-mapping-bytes-rounds-up-to-device-align",
+                    test_align_mapping_bytes_rounds_up_to_device_align);
     g_test_add_func("/cxl-hybrid-control/header-reset-clears-visible-bitmap",
                     test_header_reset_clears_visible_bitmap);
+    g_test_add_func("/cxl-hybrid-control/staging-shared-map-supports-fixed-extent-io",
+                    test_staging_shared_map_supports_fixed_extent_io);
+    g_test_add_func("/cxl-hybrid-control/staging-shared-map-rejects-extent-overflow-without-growing",
+                    test_staging_shared_map_rejects_extent_overflow_without_growing);
+    g_test_add_func("/cxl-hybrid-control/staging-shared-map-rejects-base-beyond-extent",
+                    test_staging_shared_map_rejects_base_beyond_extent);
     g_test_add_func("/cxl-hybrid-control/visible-bitmap-bytes-round-up-by-ulong",
                     test_visible_bitmap_bytes_round_up_by_ulong);
     g_test_add_func("/cxl-hybrid-control/visible-bitmap-respects-generation",

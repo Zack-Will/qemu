@@ -1112,10 +1112,8 @@ static int cxl_destination_staging_init(Error **errp)
     }
 
     total_capacity = cioc->map_size;
-    base_offset = cxl_hybrid_mapped_ram_required_bytes(cioc->align);
-    if (migrate_cxl_fault_control_plane_cxl()) {
-        base_offset += cxl_hybrid_fault_control_region_bytes();
-    }
+    base_offset = cxl_hybrid_reserved_region_bytes(
+        cioc->align, migrate_cxl_fault_control_plane_cxl());
     if (base_offset >= total_capacity) {
         error_setg(errp,
                    "CXL hybrid destination staging has no free space after mapped-ram backing: "
@@ -1125,8 +1123,12 @@ static int cxl_destination_staging_init(Error **errp)
         return -ENOSPC;
     }
 
-    ret = cxl_hybrid_dst_staging_init_path_at(path, total_capacity - base_offset,
-                                              base_offset, errp);
+    ret = cxl_hybrid_dst_staging_init_fixed_fd(cioc->fd,
+                                               total_capacity - base_offset,
+                                               base_offset,
+                                               total_capacity,
+                                               cioc->dev_size > 0,
+                                               errp);
     object_unref(OBJECT(cioc));
     if (ret) {
         return ret;
@@ -1271,13 +1273,28 @@ uint64_t cxl_hybrid_mapped_ram_required_bytes(uint64_t align)
         offset += block->used_length;
     }
 
-    /* Always map whole host pages. */
-    return ROUND_UP(offset, (uint64_t)qemu_real_host_page_size());
+    /*
+     * Real devdax mappings require offset/length alignment at the device
+     * granule, not just host page size.
+     */
+    return ROUND_UP(offset,
+                    MAX((uint64_t)qemu_real_host_page_size(), align));
 }
 
 uint64_t cxl_mapped_ram_alignment(void)
 {
     return cxl_state.align ? cxl_state.align : CXL_BACKING_ALIGN_FALLBACK;
+}
+
+uint64_t cxl_hybrid_reserved_region_bytes(uint64_t align,
+                                          bool use_fault_control)
+{
+    uint64_t bytes = cxl_hybrid_mapped_ram_required_bytes(align);
+
+    if (use_fault_control) {
+        bytes += cxl_hybrid_fault_control_region_allocation_bytes(align);
+    }
+    return bytes;
 }
 
 void cxl_populate_migration_info(MigrationInfo *info)
@@ -3093,11 +3110,8 @@ static bool cxl_check_dev_size(QIOChannelCXL *cioc, const char *path,
                                Error **errp)
 {
     if (cioc->dev_size > 0) {
-        uint64_t required = cxl_hybrid_mapped_ram_required_bytes(cioc->align);
-
-        if (migrate_cxl_fault_control_plane_cxl()) {
-            required += cxl_hybrid_fault_control_region_bytes();
-        }
+        uint64_t required = cxl_hybrid_reserved_region_bytes(
+            cioc->align, migrate_cxl_fault_control_plane_cxl());
 
         if ((uint64_t)cioc->dev_size < required) {
             error_setg(errp, "CXL device %s too small: %" PRId64

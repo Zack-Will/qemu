@@ -40,6 +40,9 @@ typedef struct CXLHybridDstStagingState {
     uint64_t file_limit;
     uint64_t base_offset;
     uint64_t next_offset;
+    void *map_base;
+    size_t map_len;
+    bool shared_map;
     GHashTable *slots;
     QemuMutex lock;
     QemuCond cond;
@@ -58,6 +61,13 @@ typedef struct CXLHybridDstStagingState {
 static CXLHybridDstStagingState cxl_dst_staging = {
     .fd = -1,
 };
+
+uint64_t cxl_hybrid_align_mapping_bytes(uint64_t bytes, uint64_t align)
+{
+    uint64_t granule = MAX((uint64_t)qemu_real_host_page_size(), align);
+
+    return ROUND_UP(bytes, granule);
+}
 
 static void cxl_hybrid_dst_staging_reset_counters(void)
 {
@@ -304,6 +314,11 @@ void cxl_hybrid_dst_staging_cleanup(void)
     if (cxl_dst_staging.sync_ready) {
         qemu_mutex_lock(&cxl_dst_staging.lock);
         cxl_dst_staging.stopping = true;
+        if (cxl_dst_staging.map_base) {
+            munmap(cxl_dst_staging.map_base, cxl_dst_staging.map_len);
+            cxl_dst_staging.map_base = NULL;
+            cxl_dst_staging.map_len = 0;
+        }
         if (cxl_dst_staging.fd >= 0) {
             close(cxl_dst_staging.fd);
             cxl_dst_staging.fd = -1;
@@ -317,11 +332,17 @@ void cxl_hybrid_dst_staging_cleanup(void)
         cxl_dst_staging.file_limit = 0;
         cxl_dst_staging.base_offset = 0;
         cxl_dst_staging.next_offset = 0;
+        cxl_dst_staging.shared_map = false;
         cxl_dst_staging.waiters = 0;
         cxl_dst_staging.stopping = false;
         cxl_hybrid_dst_staging_reset_counters();
         qemu_mutex_unlock(&cxl_dst_staging.lock);
     } else {
+        if (cxl_dst_staging.map_base) {
+            munmap(cxl_dst_staging.map_base, cxl_dst_staging.map_len);
+            cxl_dst_staging.map_base = NULL;
+            cxl_dst_staging.map_len = 0;
+        }
         if (cxl_dst_staging.fd >= 0) {
             close(cxl_dst_staging.fd);
             cxl_dst_staging.fd = -1;
@@ -331,10 +352,92 @@ void cxl_hybrid_dst_staging_cleanup(void)
         cxl_dst_staging.file_limit = 0;
         cxl_dst_staging.base_offset = 0;
         cxl_dst_staging.next_offset = 0;
+        cxl_dst_staging.shared_map = false;
         cxl_dst_staging.waiters = 0;
         cxl_dst_staging.stopping = false;
         cxl_hybrid_dst_staging_reset_counters();
     }
+}
+
+int cxl_hybrid_dst_staging_init_fixed_fd(int fd, size_t capacity,
+                                         uint64_t base_offset,
+                                         uint64_t file_limit,
+                                         bool shared_map,
+                                         Error **errp)
+{
+    int owned_fd = -1;
+    void *map_base = NULL;
+
+    if (fd < 0) {
+        error_setg(errp, "CXL hybrid destination staging missing fd");
+        return -EINVAL;
+    }
+
+    if (!capacity) {
+        error_setg(errp, "CXL hybrid destination staging capacity is zero");
+        return -EINVAL;
+    }
+
+    if (file_limit < base_offset) {
+        error_setg(errp,
+                   "CXL hybrid destination staging size overflows: "
+                   "base=%" PRIu64 " file_limit=%" PRIu64,
+                   base_offset, file_limit);
+        return -EOVERFLOW;
+    }
+
+    if (file_limit - base_offset < capacity) {
+        error_setg(errp,
+                   "CXL hybrid destination staging capacity exceeds extent: "
+                   "base=%" PRIu64 " capacity=%zu file_limit=%" PRIu64,
+                   base_offset, capacity, file_limit);
+        return -ENOSPC;
+    }
+
+    owned_fd = dup(fd);
+    if (owned_fd < 0) {
+        error_setg_errno(errp, errno,
+                         "Failed to dup CXL hybrid destination staging fd");
+        return -errno;
+    }
+
+    if (shared_map) {
+        map_base = mmap(NULL, file_limit, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, owned_fd, 0);
+        if (map_base == MAP_FAILED) {
+            int saved_errno = errno;
+
+            close(owned_fd);
+            error_setg_errno(errp, saved_errno,
+                             "Failed to mmap CXL hybrid destination staging");
+            return -saved_errno;
+        }
+    }
+
+    cxl_hybrid_dst_staging_cleanup();
+    if (!cxl_dst_staging.sync_ready) {
+        qemu_mutex_init(&cxl_dst_staging.lock);
+        qemu_cond_init(&cxl_dst_staging.cond);
+        cxl_dst_staging.sync_ready = true;
+    }
+
+    qemu_mutex_lock(&cxl_dst_staging.lock);
+    cxl_dst_staging.fd = owned_fd;
+    cxl_dst_staging.capacity = capacity;
+    cxl_dst_staging.file_limit = file_limit;
+    cxl_dst_staging.base_offset = base_offset;
+    cxl_dst_staging.next_offset = base_offset;
+    cxl_dst_staging.map_base = map_base;
+    cxl_dst_staging.map_len = file_limit;
+    cxl_dst_staging.shared_map = shared_map;
+    cxl_dst_staging.stopping = false;
+    cxl_dst_staging.waiters = 0;
+    cxl_hybrid_dst_staging_reset_counters();
+    cxl_dst_staging.slots =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                              cxl_hybrid_dst_staging_slot_free);
+    qemu_mutex_unlock(&cxl_dst_staging.lock);
+    return 0;
 }
 
 int cxl_hybrid_dst_staging_init_path_at(const char *path, size_t capacity,
@@ -342,14 +445,10 @@ int cxl_hybrid_dst_staging_init_path_at(const char *path, size_t capacity,
 {
     int fd;
     uint64_t required_size;
+    int ret;
 
     if (!path || !path[0]) {
         error_setg(errp, "CXL hybrid destination staging missing path");
-        return -EINVAL;
-    }
-
-    if (!capacity) {
-        error_setg(errp, "CXL hybrid destination staging capacity is zero");
         return -EINVAL;
     }
 
@@ -380,27 +479,10 @@ int cxl_hybrid_dst_staging_init_path_at(const char *path, size_t capacity,
         return -saved_errno;
     }
 
-    cxl_hybrid_dst_staging_cleanup();
-    if (!cxl_dst_staging.sync_ready) {
-        qemu_mutex_init(&cxl_dst_staging.lock);
-        qemu_cond_init(&cxl_dst_staging.cond);
-        cxl_dst_staging.sync_ready = true;
-    }
-
-    qemu_mutex_lock(&cxl_dst_staging.lock);
-    cxl_dst_staging.fd = fd;
-    cxl_dst_staging.capacity = capacity;
-    cxl_dst_staging.file_limit = required_size;
-    cxl_dst_staging.base_offset = base_offset;
-    cxl_dst_staging.next_offset = base_offset;
-    cxl_dst_staging.stopping = false;
-    cxl_dst_staging.waiters = 0;
-    cxl_hybrid_dst_staging_reset_counters();
-    cxl_dst_staging.slots =
-        g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                              cxl_hybrid_dst_staging_slot_free);
-    qemu_mutex_unlock(&cxl_dst_staging.lock);
-    return 0;
+    ret = cxl_hybrid_dst_staging_init_fixed_fd(fd, capacity, base_offset,
+                                               required_size, false, errp);
+    close(fd);
+    return ret;
 }
 
 int cxl_hybrid_dst_staging_init_path(const char *path, size_t capacity,
@@ -693,7 +775,12 @@ int cxl_hybrid_dst_staging_store_page(const char *ramblock, uint64_t offset,
         goto out;
     }
 
-    ret = pwrite(cxl_dst_staging.fd, buf, len, file_offset);
+    if (cxl_dst_staging.shared_map) {
+        memcpy((uint8_t *)cxl_dst_staging.map_base + file_offset, buf, len);
+        ret = len;
+    } else {
+        ret = pwrite(cxl_dst_staging.fd, buf, len, file_offset);
+    }
     if (ret < 0) {
         error_setg_errno(errp, errno,
                          "Failed to write CXL hybrid destination staging slot");
@@ -1130,8 +1217,14 @@ int cxl_hybrid_dst_staging_read_page(const char *ramblock, uint64_t offset,
             return ret;
         }
 
-        ret = pread(cxl_dst_staging.fd, page_buf, slot->page_size,
-                    file_offset);
+        if (cxl_dst_staging.shared_map) {
+            memcpy(page_buf, (uint8_t *)cxl_dst_staging.map_base + file_offset,
+                   slot->page_size);
+            ret = slot->page_size;
+        } else {
+            ret = pread(cxl_dst_staging.fd, page_buf, slot->page_size,
+                        file_offset);
+        }
         if (ret < 0) {
             int saved_errno = errno;
 

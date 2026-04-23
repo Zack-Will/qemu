@@ -315,6 +315,16 @@ QIOChannel *cxl_open_mapped_ram_incoming(Error **errp);
 bool cxl_create_incoming_mapped_ram_channels(Error **errp);
 uint64_t cxl_mapped_ram_alignment(void);
 void cxl_populate_migration_info(MigrationInfo *info);
+uint64_t cxl_hybrid_align_mapping_bytes(uint64_t bytes, uint64_t align);
+uint64_t cxl_hybrid_fault_control_region_allocation_bytes(uint64_t align);
+uint64_t cxl_hybrid_reserved_region_bytes(uint64_t align,
+                                          bool use_fault_control);
+int cxl_hybrid_dst_staging_init_fixed_fd(int fd,
+                                         size_t capacity,
+                                         uint64_t base_offset,
+                                         uint64_t file_limit,
+                                         bool shared_map,
+                                         Error **errp);
 
 /* Write-redirect support */
 bool cxl_page_is_remapped(ram_addr_t offset);
