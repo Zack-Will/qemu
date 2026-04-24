@@ -1012,6 +1012,12 @@
 #     downtime in milliseconds for the guest in last walk of the dirty
 #     bitmap.  (since 1.3)
 #
+# @stop-to-start-time: only present after the source observes the
+#     destination VM-start acknowledgement on the return path.
+#     This is the elapsed milliseconds from source stop until that
+#     acknowledgement is received, and is a tighter handoff metric
+#     than legacy @downtime for postcopy.  (since 11.0)
+#
 # @setup-time: amount of setup time in milliseconds *before* the
 #     iterations begin but *after* the QMP command is issued.  This is
 #     designed to provide an accounting of any activities (such as
@@ -1105,6 +1111,7 @@
            '*total-time': 'int',
            '*expected-downtime': 'int',
            '*downtime': 'int',
+           '*stop-to-start-time': 'int',
            '*setup-time': 'int',
            '*cpu-throttle-percentage': 'int',
            '*error-desc': 'str',

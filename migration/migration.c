@@ -82,6 +82,7 @@ enum mig_rp_message_type {
     MIG_RP_MSG_REQ_PAGES,    /* data (start: be64, len: be32) */
     MIG_RP_MSG_RECV_BITMAP,  /* send recved_bitmap back to source */
     MIG_RP_MSG_RESUME_ACK,   /* tell source that we are ready to resume */
+    MIG_RP_MSG_DST_STARTED,  /* tell source that destination vm_start() ran */
     MIG_RP_MSG_SWITCHOVER_ACK, /* Tell source it's OK to do switchover */
     MIG_RP_MSG_CXL_HYBRID_PUBLISH_REQ, /* start: be64, len/gen: be32, id */
     MIG_RP_MSG_CXL_HYBRID_PUBLISH_QUIESCE_ACK, /* dst won't send new reqs */
@@ -436,6 +437,7 @@ static int migration_stop_vm(MigrationState *s, RunState state)
     int ret;
 
     migration_downtime_reset(s);
+    migration_stop_to_start_reset(s);
     migration_downtime_start(s);
 
     s->vm_old_state = runstate_get();
@@ -900,6 +902,7 @@ static void qemu_setup_incoming_migration(const char *uri, bool has_channels,
 static void process_incoming_migration_bh(void *opaque)
 {
     MigrationIncomingState *mis = opaque;
+    bool vm_started = false;
 
     trace_vmstate_downtime_checkpoint("dst-precopy-bh-enter");
 
@@ -931,16 +934,21 @@ static void process_incoming_migration_bh(void *opaque)
              */
             if (migration_block_activate(NULL)) {
                 vm_start();
+                vm_started = true;
             }
         } else {
             runstate_set(RUN_STATE_PAUSED);
         }
     } else if (migrate_colo()) {
         vm_start();
+        vm_started = true;
     } else {
         runstate_set(global_state_get_runstate());
     }
     trace_vmstate_downtime_checkpoint("dst-precopy-bh-vm-started");
+    if (vm_started) {
+        migrate_send_rp_dst_started(mis);
+    }
     /*
      * This must happen after any state changes since as soon as an external
      * observer sees this event they might start to prod at the VM assuming
@@ -1211,6 +1219,11 @@ void migrate_send_rp_resume_ack(MigrationIncomingState *mis, uint32_t value)
     migrate_send_rp_message(mis, MIG_RP_MSG_RESUME_ACK, sizeof(buf), &buf);
 }
 
+void migrate_send_rp_dst_started(MigrationIncomingState *mis)
+{
+    migrate_send_rp_message(mis, MIG_RP_MSG_DST_STARTED, 0, NULL);
+}
+
 bool migration_is_running(void)
 {
     MigrationState *s = current_migration;
@@ -1274,6 +1287,11 @@ static void populate_time_info(MigrationInfo *info, MigrationState *s)
     } else {
         info->has_expected_downtime = true;
         info->expected_downtime = s->expected_downtime;
+    }
+
+    if (s->stop_to_start_time_set) {
+        info->has_stop_to_start_time = true;
+        info->stop_to_start_time = s->stop_to_start_time;
     }
 }
 
@@ -1871,6 +1889,7 @@ int migrate_init(MigrationState *s, Error **errp)
     s->mbps = 0.0;
     s->pages_per_second = 0.0;
     s->downtime = 0;
+    s->stop_to_start_time = 0;
     s->expected_downtime = 0;
     s->setup_time = 0;
     s->start_postcopy = false;
@@ -1904,6 +1923,8 @@ int migrate_init(MigrationState *s, Error **errp)
 
     s->postcopy_package_loaded = false;
     qemu_event_reset(&s->postcopy_package_loaded_event);
+    migration_downtime_reset(s);
+    migration_stop_to_start_reset(s);
 
     return 0;
 }
@@ -2380,6 +2401,7 @@ static struct rp_cmd_args {
     [MIG_RP_MSG_REQ_PAGES_ID]   = { .len = -1, .name = "REQ_PAGES_ID" },
     [MIG_RP_MSG_RECV_BITMAP]    = { .len = -1, .name = "RECV_BITMAP" },
     [MIG_RP_MSG_RESUME_ACK]     = { .len =  4, .name = "RESUME_ACK" },
+    [MIG_RP_MSG_DST_STARTED]    = { .len =  0, .name = "DST_STARTED" },
     [MIG_RP_MSG_SWITCHOVER_ACK] = { .len =  0, .name = "SWITCHOVER_ACK" },
     [MIG_RP_MSG_CXL_HYBRID_PUBLISH_REQ] = {
         .len = -1, .name = "CXL_HYBRID_PUBLISH_REQ" },
@@ -2452,6 +2474,14 @@ static bool migrate_handle_rp_resume_ack(MigrationState *s,
     migration_rp_kick(s);
 
     return true;
+}
+
+static void migrate_handle_rp_dst_started(MigrationState *s)
+{
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    migration_record_stop_to_start(s, now - s->downtime_start);
+    trace_vmstate_downtime_checkpoint("src-dst-start-ack");
 }
 
 /*
@@ -2658,6 +2688,10 @@ static void *source_return_path_thread(void *opaque)
             if (!migrate_handle_rp_resume_ack(ms, tmp32, &err)) {
                 goto out;
             }
+            break;
+
+        case MIG_RP_MSG_DST_STARTED:
+            migrate_handle_rp_dst_started(ms);
             break;
 
         case MIG_RP_MSG_SWITCHOVER_ACK:

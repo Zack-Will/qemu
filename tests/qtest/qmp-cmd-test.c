@@ -433,6 +433,26 @@ static void test_query_migrate_cxl_schema_loop_stats(void)
     qmp_schema_cleanup(&schema);
 }
 
+static void test_query_migrate_stop_to_start_schema(void)
+{
+    QmpSchema schema;
+    SchemaInfo *cmd;
+    SchemaInfo *ret_type;
+    SchemaInfoObjectMember *member;
+
+    qmp_schema_init(&schema);
+
+    cmd = qmp_schema_lookup(&schema, "query-migrate");
+    g_assert_nonnull(cmd);
+    g_assert_cmpint(cmd->meta_type, ==, SCHEMA_META_TYPE_COMMAND);
+
+    ret_type = qmp_schema_lookup(&schema, cmd->u.command.ret_type);
+    member = schema_object_member(ret_type, "stop-to-start-time");
+    g_assert_nonnull(member);
+
+    qmp_schema_cleanup(&schema);
+}
+
 int main(int argc, char *argv[])
 {
     QmpSchema schema;
@@ -449,6 +469,8 @@ int main(int argc, char *argv[])
                    test_migrate_set_parameters_cxl_switch_max_precopy_ms);
     qtest_add_func("qmp/query-migrate/cxl-schema-loop-stats",
                    test_query_migrate_cxl_schema_loop_stats);
+    qtest_add_func("qmp/query-migrate/stop-to-start-schema",
+                   test_query_migrate_stop_to_start_schema);
 
     ret = g_test_run();
 

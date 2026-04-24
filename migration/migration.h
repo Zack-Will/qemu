@@ -374,6 +374,8 @@ struct MigrationState {
     int64_t downtime_start;
     int64_t downtime;
     bool downtime_set;
+    int64_t stop_to_start_time;
+    bool stop_to_start_time_set;
     int64_t expected_downtime;
     bool capabilities[MIGRATION_CAPABILITY__MAX];
     int64_t setup_time;
@@ -590,6 +592,7 @@ int migrate_send_rp_message_req_pages(MigrationIncomingState *mis,
 void migrate_send_rp_recv_bitmap(MigrationIncomingState *mis,
                                  char *block_name);
 void migrate_send_rp_resume_ack(MigrationIncomingState *mis, uint32_t value);
+void migrate_send_rp_dst_started(MigrationIncomingState *mis);
 int migrate_send_rp_switchover_ack(MigrationIncomingState *mis);
 
 void dirty_bitmap_mig_before_vm_start(void);
@@ -611,6 +614,9 @@ bool migration_cxl_hybrid_ready_urgent(void);
 void migration_clear_cxl_hybrid_ready_urgent(void);
 void migration_downtime_reset(MigrationState *s);
 void migration_record_downtime(MigrationState *s, int64_t downtime_ms);
+void migration_stop_to_start_reset(MigrationState *s);
+void migration_record_stop_to_start(MigrationState *s,
+                                    int64_t stop_to_start_ms);
 bool migration_rate_limit(void);
 void migration_bh_schedule(QEMUBHFunc *cb, void *opaque);
 void migration_cancel(void);

@@ -2240,6 +2240,7 @@ static int loadvm_postcopy_handle_listen(MigrationIncomingState *mis,
 static void loadvm_postcopy_handle_run_bh(void *opaque)
 {
     MigrationIncomingState *mis = opaque;
+    bool vm_started = false;
 
     trace_vmstate_downtime_checkpoint("dst-postcopy-bh-enter");
 
@@ -2267,6 +2268,7 @@ static void loadvm_postcopy_handle_run_bh(void *opaque)
 
         if (success) {
             vm_start();
+            vm_started = true;
         }
     } else {
         /* leave it paused and let management decide when to start the CPU */
@@ -2274,6 +2276,9 @@ static void loadvm_postcopy_handle_run_bh(void *opaque)
     }
 
     trace_vmstate_downtime_checkpoint("dst-postcopy-bh-vm-started");
+    if (vm_started) {
+        migrate_send_rp_dst_started(mis);
+    }
 }
 
 /* After all discards we can start running and asking for pages */

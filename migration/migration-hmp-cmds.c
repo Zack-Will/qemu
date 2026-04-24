@@ -174,6 +174,10 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
                 monitor_printf(mon, ", down=%" PRIu64,
                                info->downtime);
             }
+            if (info->has_stop_to_start_time) {
+                monitor_printf(mon, ", stop_to_start=%" PRIu64,
+                               info->stop_to_start_time);
+            }
             monitor_printf(mon, "\n");
         }
     }
