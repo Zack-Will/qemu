@@ -25,6 +25,7 @@ int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
     uint64_t region_global;
     uint64_t region_block_offset;
     uint64_t cxl_offset;
+    uint64_t nr_pages;
 
     if (!out || !granule || !target_page_size ||
         !is_power_of_2(granule) ||
@@ -62,10 +63,21 @@ int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
         return -EINVAL;
     }
 
+    if (block_cxl_pages_offset > UINT64_MAX - region_block_offset) {
+        error_setg(errp, "CXL hybrid fault region CXL offset overflows");
+        return -EOVERFLOW;
+    }
+
     cxl_offset = block_cxl_pages_offset + region_block_offset;
     if (!QEMU_IS_ALIGNED(cxl_offset, granule)) {
         error_setg(errp, "CXL hybrid fault region CXL offset is not aligned");
         return -EINVAL;
+    }
+
+    nr_pages = granule / target_page_size;
+    if (nr_pages > UINT32_MAX) {
+        error_setg(errp, "CXL hybrid fault region page count overflows");
+        return -EOVERFLOW;
     }
 
     *out = (CXLHybridFaultRegionGeometry) {
@@ -74,7 +86,7 @@ int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
         .cxl_offset = cxl_offset,
         .region_len = granule,
         .first_page_index = region_global / target_page_size,
-        .nr_pages = granule / target_page_size,
+        .nr_pages = (uint32_t)nr_pages,
         .region_index = region_global / granule,
     };
     return 0;
