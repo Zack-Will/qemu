@@ -1,6 +1,7 @@
 # Files needed by unit tests
 migration_files = files(
   'cxl-hybrid-control-header.c',
+  'cxl-region.c',
   'downtime.c',
   'cxl-hybrid-metadata.c',
   'migration-stats.c',

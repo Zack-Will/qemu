@@ -114,6 +114,16 @@ typedef struct CXLHybridFaultReadyRecord {
     uint64_t ready_ts_ns;
 } CXLHybridFaultReadyRecord;
 
+typedef struct CXLHybridFaultRegionGeometry {
+    uint64_t global_offset;
+    uint64_t block_offset;
+    uint64_t cxl_offset;
+    uint64_t region_len;
+    uint64_t first_page_index;
+    uint32_t nr_pages;
+    uint64_t region_index;
+} CXLHybridFaultRegionGeometry;
+
 typedef int (*CXLHybridFaultReadyConsumer)(
     const CXLHybridFaultReadyRecord *record, Error **errp);
 
@@ -296,6 +306,14 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
                                                         RAMBlock *rb),
                                       Error **errp);
 uint32_t cxl_hybrid_fault_publish_generation(void);
+int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
+                                    uint64_t block_used_len,
+                                    uint64_t block_cxl_pages_offset,
+                                    uint64_t fault_block_offset,
+                                    uint64_t granule,
+                                    uint64_t target_page_size,
+                                    CXLHybridFaultRegionGeometry *out,
+                                    Error **errp);
 
 void cxl_cleanup_outgoing_migration(void);
 
