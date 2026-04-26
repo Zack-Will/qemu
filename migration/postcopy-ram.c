@@ -1705,7 +1705,9 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
 
     pagesize = qemu_ram_pagesize(rb);
     if (!QEMU_PTR_IS_ALIGNED(host_addr, pagesize) ||
-        !QEMU_IS_ALIGNED(len, pagesize)) {
+        !QEMU_IS_ALIGNED(len, pagesize) ||
+        (fault_host_addr &&
+         !QEMU_PTR_IS_ALIGNED(fault_host_addr, pagesize))) {
         return -EINVAL;
     }
 
@@ -1723,6 +1725,30 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
     if (start < rb_start || end > rb_end ||
         !postcopy_host_addr_in_range(notify_host_addr, rb_start, rb_end)) {
         return -ERANGE;
+    }
+    if (fault_host_addr &&
+        !postcopy_host_addr_in_range(fault_host_addr, start, end)) {
+        return -ERANGE;
+    }
+
+    /*
+     * This helper is only for a range that was already replaced with
+     * MAP_FIXED.  After validating the range above, -EINVAL from UFFDIO_WAKE
+     * is the observed kernel behavior when the remap invalidated the UFFD
+     * registration; UFFDIO_UNREGISTER is the fallback wake path for that case.
+     */
+    ret = uffd_wakeup(mis->userfault_fd, host_addr, len);
+    if (ret == -EINVAL) {
+        ret = uffd_unregister_memory(mis->userfault_fd, host_addr, len);
+    }
+    if (ret) {
+        return ret;
+    }
+
+    ret = postcopy_notify_shared_wake(rb,
+        qemu_ram_block_host_offset(rb, notify_host_addr));
+    if (ret) {
+        return ret;
     }
 
     qemu_mutex_lock(&mis->page_request_mutex);
@@ -1742,16 +1768,7 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
     }
     qemu_mutex_unlock(&mis->page_request_mutex);
 
-    ret = uffd_wakeup(mis->userfault_fd, host_addr, len);
-    if (ret == -EINVAL) {
-        ret = uffd_unregister_memory(mis->userfault_fd, host_addr, len);
-    }
-    if (ret) {
-        return ret;
-    }
-
-    return postcopy_notify_shared_wake(rb,
-        qemu_ram_block_host_offset(rb, notify_host_addr));
+    return 0;
 }
 
 int postcopy_notify_shared_wake(RAMBlock *rb, uint64_t offset)

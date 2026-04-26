@@ -122,7 +122,6 @@ static void test_map_fixed_then_uffd_wake(void)
         qemu_thread_join(&thread);
         thread_joined = true;
         g_assert_cmphex(c.value, ==, expected);
-        g_test_skip("UFFDIO_WAKE after MAP_FIXED returned EINVAL");
         goto out;
     }
     g_assert_cmpint(ret, ==, 0);
