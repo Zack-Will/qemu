@@ -29,6 +29,7 @@
 #include "qemu-file.h"
 #include "ram.h"
 #include "options.h"
+#include "hw/core/qdev-prop-internal.h"
 #include "system/kvm.h"
 
 /* Maximum migrate downtime set to 2000 seconds */
@@ -84,6 +85,8 @@
 #define DEFAULT_MIGRATE_X_CXL_SHARED_BACKING false
 #define DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE \
     CXL_HYBRID_FAULT_CONTROL_PLANE_STREAM
+#define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
+    CXL_HYBRID_FAULT_RESOLVE_MODE_COPY
 #define DEFAULT_MIGRATE_X_CXL_WARM_TRANSPORT CXL_HYBRID_WARM_TRANSPORT_AUTO
 #define DEFAULT_MIGRATE_X_CXL_DST_INSTALL_POLICY \
     CXL_HYBRID_DST_INSTALL_POLICY_ON_DEMAND
@@ -107,6 +110,23 @@ const PropertyInfo qdev_prop_StrOrNull;
 
 #define DEFAULT_MIGRATE_VCPU_DIRTY_LIMIT_PERIOD     1000    /* milliseconds */
 #define DEFAULT_MIGRATE_VCPU_DIRTY_LIMIT            1       /* MB/s */
+
+QEMU_BUILD_BUG_ON(sizeof(CXLHybridFaultResolveMode) != sizeof(int));
+
+static const PropertyInfo qdev_prop_cxl_hybrid_fault_resolve_mode = {
+    .type = "CXLHybridFaultResolveMode",
+    .description = "CXL hybrid fault resolve mode"
+                   " (copy/region-remap/region-remap-fallback-copy)",
+    .enum_table = &CXLHybridFaultResolveMode_lookup,
+    .get = qdev_propinfo_get_enum,
+    .set = qdev_propinfo_set_enum,
+    .set_default_value = qdev_propinfo_set_default_value_enum,
+};
+
+#define DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE(_n, _s, _f, _d) \
+    DEFINE_PROP_SIGNED(_n, _s, _f, _d, \
+                       qdev_prop_cxl_hybrid_fault_resolve_mode, \
+                       CXLHybridFaultResolveMode)
 
 const Property migration_properties[] = {
     DEFINE_PROP_BOOL("store-global-state", MigrationState,
@@ -240,6 +260,10 @@ const Property migration_properties[] = {
                       MigrationState,
                       parameters.x_cxl_fault_control_plane,
                       DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE),
+    DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE("x-cxl-fault-resolve-mode",
+                      MigrationState,
+                      parameters.x_cxl_fault_resolve_mode,
+                      DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE),
     DEFINE_PROP_CXL_HYBRID_WARM_TRANSPORT("x-cxl-warm-transport",
                       MigrationState,
                       parameters.x_cxl_warm_transport,
@@ -1082,6 +1106,37 @@ bool migrate_cxl_shared_bitmap(void)
            migrate_cxl_shared_backing();
 }
 
+CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_fault_resolve_mode;
+}
+
+bool migrate_cxl_fault_resolve_copy(void)
+{
+    return migrate_cxl_fault_resolve_mode() ==
+           CXL_HYBRID_FAULT_RESOLVE_MODE_COPY;
+}
+
+bool migrate_cxl_fault_resolve_region_remap(void)
+{
+    return migrate_cxl_fault_resolve_mode() ==
+           CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP;
+}
+
+bool migrate_cxl_fault_resolve_region_remap_fallback_copy(void)
+{
+    return migrate_cxl_fault_resolve_mode() ==
+           CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP_FALLBACK_COPY;
+}
+
+bool migrate_cxl_fault_resolve_uses_region(void)
+{
+    return migrate_cxl_fault_resolve_region_remap() ||
+           migrate_cxl_fault_resolve_region_remap_fallback_copy();
+}
+
 CXLHybridWarmTransport migrate_cxl_warm_transport(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1301,6 +1356,7 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_dst_cache_size,
         &p->has_x_cxl_shared_backing,
         &p->has_x_cxl_fault_control_plane,
+        &p->has_x_cxl_fault_resolve_mode,
         &p->has_x_cxl_warm_transport,
         &p->has_x_cxl_dst_install_policy,
         &p->has_cpr_exec_command,
@@ -1338,6 +1394,8 @@ void migrate_params_init(MigrationParameters *params)
 {
     params->x_cxl_fault_control_plane =
         DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE;
+    params->x_cxl_fault_resolve_mode =
+        DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
     params->x_cxl_dst_install_policy =
         DEFAULT_MIGRATE_X_CXL_DST_INSTALL_POLICY;
     migrate_mark_all_params_present(params);
@@ -1532,6 +1590,13 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->x_cxl_fault_resolve_mode >=
+        CXL_HYBRID_FAULT_RESOLVE_MODE__MAX) {
+        error_setg(errp, "Invalid x-cxl-fault-resolve-mode value %d",
+                   params->x_cxl_fault_resolve_mode);
+        return false;
+    }
+
     if (params->x_cxl_warm_transport >= CXL_HYBRID_WARM_TRANSPORT__MAX) {
         error_setg(errp, "Invalid x-cxl-warm-transport value %d",
                    params->x_cxl_warm_transport);
@@ -1557,6 +1622,27 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         !params->x_cxl_shared_backing) {
         error_setg(errp,
                    "x-cxl-fault-control-plane=cxl requires x-cxl-shared-backing=true");
+        return false;
+    }
+
+    if (params->x_cxl_fault_resolve_mode !=
+            CXL_HYBRID_FAULT_RESOLVE_MODE_COPY &&
+        params->x_cxl_fault_control_plane !=
+            CXL_HYBRID_FAULT_CONTROL_PLANE_CXL) {
+        error_setg(errp,
+                   "x-cxl-fault-resolve-mode=%s requires x-cxl-fault-control-plane=cxl",
+                   CXLHybridFaultResolveMode_str(
+                       params->x_cxl_fault_resolve_mode));
+        return false;
+    }
+
+    if (params->x_cxl_fault_resolve_mode !=
+            CXL_HYBRID_FAULT_RESOLVE_MODE_COPY &&
+        !params->x_cxl_shared_backing) {
+        error_setg(errp,
+                   "x-cxl-fault-resolve-mode=%s requires x-cxl-shared-backing=true",
+                   CXLHybridFaultResolveMode_str(
+                       params->x_cxl_fault_resolve_mode));
         return false;
     }
 
@@ -1735,6 +1821,9 @@ static void migrate_params_test_apply(MigrationParameters *params,
     }
     if (params->has_x_cxl_fault_control_plane) {
         dest->x_cxl_fault_control_plane = params->x_cxl_fault_control_plane;
+    }
+    if (params->has_x_cxl_fault_resolve_mode) {
+        dest->x_cxl_fault_resolve_mode = params->x_cxl_fault_resolve_mode;
     }
     if (params->has_x_cxl_warm_transport) {
         dest->x_cxl_warm_transport = params->x_cxl_warm_transport;
@@ -1920,6 +2009,10 @@ static void migrate_params_apply(MigrationParameters *params)
     if (params->has_x_cxl_fault_control_plane) {
         s->parameters.x_cxl_fault_control_plane =
             params->x_cxl_fault_control_plane;
+    }
+    if (params->has_x_cxl_fault_resolve_mode) {
+        s->parameters.x_cxl_fault_resolve_mode =
+            params->x_cxl_fault_resolve_mode;
     }
     if (params->has_x_cxl_warm_transport) {
         s->parameters.x_cxl_warm_transport = params->x_cxl_warm_transport;

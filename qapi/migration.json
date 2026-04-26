@@ -322,6 +322,34 @@
             { 'name': 'cxl', 'features': [ 'unstable' ] } ] }
 
 ##
+# @CXLHybridFaultResolveMode:
+#
+# Experimental destination fault resolution policy for CXL hybrid
+# postcopy.
+#
+# @copy: resolve each CXL hybrid fault by reading one CXL page and
+#     placing it with UFFDIO_COPY
+#
+# @region-remap: wait for the full DAX-aligned region and resolve by
+#     MAP_FIXED|MAP_SHARED remap
+#
+# @region-remap-fallback-copy: remap only if the full region is
+#     already visible; otherwise resolve the current fault with the
+#     copy path and keep the region copy-owned for the rest of the run
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLHybridFaultResolveMode',
+  'data': [ { 'name': 'copy', 'features': [ 'unstable' ] },
+            { 'name': 'region-remap', 'features': [ 'unstable' ] },
+            { 'name': 'region-remap-fallback-copy',
+              'features': [ 'unstable' ] } ] }
+
+##
 # @VfioStats:
 #
 # Detailed VFIO devices migration statistics
@@ -1619,8 +1647,8 @@
 #     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
 #     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
 #     @x-cxl-shared-backing, @x-cxl-warm-transport,
-#     @x-cxl-dst-install-policy, and @x-cxl-fault-control-plane are
-#     experimental.
+#     @x-cxl-dst-install-policy, @x-cxl-fault-control-plane, and
+#     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
 ##
@@ -1674,6 +1702,8 @@
            { 'name': 'x-cxl-dst-install-policy',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-fault-control-plane',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-fault-resolve-mode',
              'features': [ 'unstable' ] },
            'cpr-exec-command'] }
 
@@ -1912,6 +1942,9 @@
 # @x-cxl-fault-control-plane: Experimental fault control-plane
 #     transport for CXL hybrid postcopy.  (Since 11.0)
 #
+# @x-cxl-fault-resolve-mode: Experimental destination fault
+#     resolution policy for CXL hybrid postcopy.  (Since 11.0)
+#
 # @cpr-exec-command: Command to start the new QEMU process when @mode
 #     is @cpr-exec.  The first list element is the program's filename,
 #     the remainder its arguments.  (Since 10.2)
@@ -1926,8 +1959,8 @@
 #     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
 #     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
 #     @x-cxl-shared-backing, @x-cxl-warm-transport,
-#     @x-cxl-dst-install-policy, and @x-cxl-fault-control-plane are
-#     experimental.
+#     @x-cxl-dst-install-policy, @x-cxl-fault-control-plane, and
+#     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
 ##
@@ -1996,6 +2029,9 @@
                 'features': [ 'unstable' ] },
             '*x-cxl-fault-control-plane': {
                 'type': 'CXLHybridFaultControlPlane',
+                'features': [ 'unstable' ] },
+            '*x-cxl-fault-resolve-mode': {
+                'type': 'CXLHybridFaultResolveMode',
                 'features': [ 'unstable' ] },
             '*cpr-exec-command': [ 'str' ]} }
 

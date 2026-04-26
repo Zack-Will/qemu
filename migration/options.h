@@ -105,6 +105,11 @@ bool migrate_cxl_shared_backing(void);
 CXLHybridFaultControlPlane migrate_cxl_fault_control_plane(void);
 bool migrate_cxl_fault_control_plane_cxl(void);
 bool migrate_cxl_shared_bitmap(void);
+CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void);
+bool migrate_cxl_fault_resolve_copy(void);
+bool migrate_cxl_fault_resolve_region_remap(void);
+bool migrate_cxl_fault_resolve_region_remap_fallback_copy(void);
+bool migrate_cxl_fault_resolve_uses_region(void);
 CXLHybridWarmTransport migrate_cxl_warm_transport(void);
 CXLHybridDstInstallPolicy migrate_cxl_dst_install_policy(void);
 
