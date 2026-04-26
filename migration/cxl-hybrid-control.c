@@ -5,6 +5,7 @@
 #include "migration/ram.h"
 #include "io/channel-cxl.h"
 #include "qemu/atomic.h"
+#include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "qemu/thread.h"
 #include "system/ramblock.h"
@@ -17,10 +18,15 @@ typedef struct CXLHybridControlRegion {
     int fd;
     CXLHybridControlHeader *hdr;
     unsigned long *visible_bitmap;
+    unsigned long *owned_region_bitmap;
     CXLHybridFaultRequestRecord *request_ring;
     CXLHybridFaultReadyRecord *ready_ring;
     uint64_t total_pages;
+    uint64_t total_regions;
+    uint64_t region_granule;
     uint32_t visible_page_words;
+    uint32_t owned_region_words;
+    uint32_t region_granule_shift;
     uint32_t request_ring_entries;
     uint32_t ready_ring_entries;
     uint32_t users;
@@ -31,6 +37,7 @@ typedef struct CXLHybridControlState {
     void *map_base;
     size_t map_len;
     unsigned long *visible_bitmap;
+    unsigned long *owned_region_bitmap;
     CXLHybridFaultRequestRecord *request_ring;
     CXLHybridFaultReadyRecord *ready_ring;
     QemuThread request_worker;
@@ -80,6 +87,63 @@ static uint32_t cxl_hybrid_ctrl_visible_page_words(uint64_t total_pages)
     return words;
 }
 
+static uint64_t cxl_hybrid_ctrl_region_granule(uint64_t align,
+                                               uint64_t total_ram)
+{
+    const char *value = g_getenv(CXL_REMAP_GRANULE_ENV);
+    uint64_t configured = migrate_cxl_brake_remap_granule();
+    uint64_t granule = MAX(align, (uint64_t)CXL_REMAP_GRANULE_DEFAULT);
+
+    if (configured) {
+        granule = MAX(align, configured);
+    }
+
+    if (value && *value) {
+        char *endptr = NULL;
+        uint64_t requested = g_ascii_strtoull(value, &endptr, 0);
+
+        if (endptr && *endptr == '\0' && requested > 0) {
+            granule = MAX(align, requested);
+        } else {
+            warn_report("CXL write-redirect: ignoring invalid %s=%s",
+                        CXL_REMAP_GRANULE_ENV, value);
+        }
+    }
+
+    granule = ROUND_UP(granule, align);
+    if (total_ram > 0) {
+        granule = MIN(granule, ROUND_UP(total_ram, align));
+    }
+
+    return granule;
+}
+
+static uint64_t cxl_hybrid_ctrl_total_regions(uint64_t total_pages,
+                                              uint64_t region_granule)
+{
+    uint64_t pages_per_region;
+
+    if (!region_granule) {
+        return total_pages;
+    }
+
+    pages_per_region = DIV_ROUND_UP(region_granule, TARGET_PAGE_SIZE);
+    pages_per_region = MAX(pages_per_region, 1);
+    return DIV_ROUND_UP(total_pages, pages_per_region);
+}
+
+static uint32_t cxl_hybrid_ctrl_owned_region_words(uint64_t total_regions)
+{
+    size_t words =
+        cxl_hybrid_control_owned_region_bitmap_words(total_regions);
+
+    if (words > UINT32_MAX) {
+        return UINT32_MAX;
+    }
+
+    return words;
+}
+
 static uint32_t cxl_hybrid_ctrl_ring_entries(uint32_t order)
 {
     return 1U << order;
@@ -88,8 +152,12 @@ static uint32_t cxl_hybrid_ctrl_ring_entries(uint32_t order)
 uint64_t cxl_hybrid_fault_control_region_bytes(void)
 {
     uint64_t total_pages = cxl_hybrid_ctrl_total_pages();
+    uint64_t total_regions =
+        cxl_hybrid_ctrl_total_regions(total_pages, TARGET_PAGE_SIZE);
     size_t visible_bitmap_bytes =
         cxl_hybrid_control_visible_bitmap_bytes(total_pages);
+    size_t owned_region_bitmap_bytes =
+        cxl_hybrid_control_owned_region_bitmap_bytes(total_regions);
     size_t request_bytes =
         (size_t)cxl_hybrid_ctrl_ring_entries(CXL_HYBRID_CTRL_REQUEST_ORDER) *
         sizeof(CXLHybridFaultRequestRecord);
@@ -98,8 +166,80 @@ uint64_t cxl_hybrid_fault_control_region_bytes(void)
         sizeof(CXLHybridFaultReadyRecord);
 
     return ROUND_UP(sizeof(CXLHybridControlHeader) + visible_bitmap_bytes +
-                    request_bytes + ready_bytes,
+                    owned_region_bitmap_bytes + request_bytes + ready_bytes,
                     (size_t)qemu_real_host_page_size());
+}
+
+static bool cxl_hybrid_ctrl_region_range_valid(
+    const CXLHybridControlHeader *hdr,
+    uint64_t first_page,
+    uint32_t nr_pages)
+{
+    if (!hdr || !nr_pages || first_page >= hdr->total_pages) {
+        return false;
+    }
+
+    return nr_pages <= hdr->total_pages - first_page;
+}
+
+static bool cxl_hybrid_ctrl_lookup_page_resolved(uint64_t page_index,
+                                                 void *opaque)
+{
+    RAMBlock *block;
+    ram_addr_t block_offset;
+
+    (void)opaque;
+    return cxl_hybrid_lookup_global_page(page_index, &block, &block_offset);
+}
+
+static int cxl_hybrid_ctrl_validate_region_pages_resolved(uint64_t first_page,
+                                                          uint32_t nr_pages,
+                                                          Error **errp)
+{
+    uint64_t unresolved_page = 0;
+
+    RCU_READ_LOCK_GUARD();
+    if (cxl_hybrid_control_page_range_resolved(
+            first_page, nr_pages, cxl_hybrid_ctrl_lookup_page_resolved,
+            NULL, &unresolved_page)) {
+        return 0;
+    }
+
+    error_setg(errp,
+               "CXL hybrid fault region page is unresolved "
+               "(page=%" PRIu64 ")",
+               unresolved_page);
+    return -ENOENT;
+}
+
+static int cxl_hybrid_ctrl_validate_region_range(
+    const CXLHybridControlHeader *hdr,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    Error **errp)
+{
+    if (!hdr) {
+        error_setg(errp, "CXL hybrid fault control header is not initialized");
+        return -EINVAL;
+    }
+
+    if (!nr_pages) {
+        error_setg(errp, "CXL hybrid fault region request has zero pages");
+        return -EINVAL;
+    }
+
+    if (first_page >= hdr->total_pages ||
+        nr_pages > hdr->total_pages - first_page) {
+        error_setg(errp,
+                   "CXL hybrid fault region request out of range "
+                   "(first-page=%" PRIu64 " pages=%u "
+                   "total-pages=%" PRIu64 ")",
+                   first_page, nr_pages, hdr->total_pages);
+        return -ERANGE;
+    }
+
+    return cxl_hybrid_ctrl_validate_region_pages_resolved(first_page,
+                                                         nr_pages, errp);
 }
 
 uint64_t cxl_hybrid_fault_control_region_allocation_bytes(uint64_t align)
@@ -132,6 +272,8 @@ static void cxl_hybrid_ctrl_bind_state(CXLHybridControlState *state)
     state->map_base = cxl_hybrid_control_region.map_base;
     state->map_len = cxl_hybrid_control_region.map_len;
     state->visible_bitmap = cxl_hybrid_control_region.visible_bitmap;
+    state->owned_region_bitmap =
+        cxl_hybrid_control_region.owned_region_bitmap;
     state->request_ring = cxl_hybrid_control_region.request_ring;
     state->ready_ring = cxl_hybrid_control_region.ready_ring;
     state->shutdown = false;
@@ -171,8 +313,13 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
     size_t map_len;
     off_t map_offset;
     uint64_t total_pages;
+    uint64_t total_ram;
+    uint64_t total_regions;
+    uint64_t region_granule;
     uint32_t visible_page_words;
+    uint32_t owned_region_words;
     size_t visible_bitmap_bytes;
+    size_t owned_region_bitmap_bytes;
     int fd;
     int prot;
     const char *path = migrate_cxl_path();
@@ -199,9 +346,16 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
 
     map_len = cxl_hybrid_fault_control_region_allocation_bytes(cioc->align);
     total_pages = cxl_hybrid_ctrl_total_pages();
+    total_ram = ram_bytes_total();
+    region_granule = cxl_hybrid_ctrl_region_granule(cioc->align, total_ram);
+    total_regions = cxl_hybrid_ctrl_total_regions(total_pages,
+                                                  region_granule);
     visible_page_words = cxl_hybrid_ctrl_visible_page_words(total_pages);
+    owned_region_words = cxl_hybrid_ctrl_owned_region_words(total_regions);
     visible_bitmap_bytes =
         cxl_hybrid_control_visible_bitmap_bytes(total_pages);
+    owned_region_bitmap_bytes =
+        cxl_hybrid_control_owned_region_bitmap_bytes(total_regions);
     map_offset = cxl_hybrid_ctrl_region_offset(cioc->align);
     if (cioc->map_size < (uint64_t)map_offset ||
         cioc->map_size - (uint64_t)map_offset < map_len) {
@@ -238,15 +392,24 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
     cxl_hybrid_control_region.fd = fd;
     cxl_hybrid_control_region.hdr = hdr;
     cxl_hybrid_control_region.total_pages = total_pages;
+    cxl_hybrid_control_region.total_regions = total_regions;
+    cxl_hybrid_control_region.region_granule = region_granule;
     cxl_hybrid_control_region.visible_page_words = visible_page_words;
+    cxl_hybrid_control_region.owned_region_words = owned_region_words;
+    cxl_hybrid_control_region.region_granule_shift =
+        cxl_hybrid_control_region_granule_shift(region_granule);
     cxl_hybrid_control_region.request_ring_entries =
         cxl_hybrid_ctrl_ring_entries(CXL_HYBRID_CTRL_REQUEST_ORDER);
     cxl_hybrid_control_region.ready_ring_entries =
         cxl_hybrid_ctrl_ring_entries(CXL_HYBRID_CTRL_READY_ORDER);
     cxl_hybrid_control_region.visible_bitmap = (unsigned long *)(hdr + 1);
+    cxl_hybrid_control_region.owned_region_bitmap =
+        (unsigned long *)((char *)cxl_hybrid_control_region.visible_bitmap +
+                         visible_bitmap_bytes);
     cxl_hybrid_control_region.request_ring =
-        (CXLHybridFaultRequestRecord *)((char *)cxl_hybrid_control_region.visible_bitmap +
-                                        visible_bitmap_bytes);
+        (CXLHybridFaultRequestRecord *)
+        ((char *)cxl_hybrid_control_region.owned_region_bitmap +
+         owned_region_bitmap_bytes);
     cxl_hybrid_control_region.ready_ring =
         (CXLHybridFaultReadyRecord *)(
             cxl_hybrid_control_region.request_ring +
@@ -277,12 +440,56 @@ static int cxl_hybrid_ctrl_state_init(CXLHybridControlState *state,
 
 static bool cxl_hybrid_ctrl_state_ready(const CXLHybridControlState *state)
 {
-    return state->hdr && state->visible_bitmap && state->request_ring &&
+    return state->hdr && state->visible_bitmap &&
+           state->owned_region_bitmap && state->request_ring &&
            state->ready_ring &&
            state->hdr->magic == CXL_HYBRID_CTRL_MAGIC &&
            state->hdr->version == CXL_HYBRID_CTRL_VERSION &&
            state->hdr->request_ring_order == CXL_HYBRID_CTRL_REQUEST_ORDER &&
            state->hdr->ready_ring_order == CXL_HYBRID_CTRL_READY_ORDER;
+}
+
+static int cxl_hybrid_publish_fault_region_request_bridge(uint64_t first_page,
+                                                          uint32_t nr_pages,
+                                                          uint32_t generation,
+                                                          uint64_t request_ts_ns,
+                                                          Error **errp)
+{
+    uint32_t page;
+
+    for (page = 0; page < nr_pages; page++) {
+        RAMBlock *block;
+        ram_addr_t block_offset;
+        uint64_t page_index = first_page + page;
+        CXLHybridFaultReadyRecord ready = { 0 };
+        int ret;
+
+        if (!cxl_hybrid_lookup_global_page(page_index, &block,
+                                           &block_offset)) {
+            error_setg(errp,
+                       "CXL hybrid fault region page is unresolved "
+                       "(page=%" PRIu64 ")",
+                       page_index);
+            return -ENOENT;
+        }
+
+        cxl_hybrid_note_publish_request_received(qemu_ram_get_idstr(block),
+                                                 block_offset, generation,
+                                                 request_ts_ns);
+        ret = cxl_hybrid_publish_fault_request_core(qemu_ram_get_idstr(block),
+                                                    block_offset,
+                                                    TARGET_PAGE_SIZE,
+                                                    generation,
+                                                    false,
+                                                    &ready,
+                                                    NULL,
+                                                    errp);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    return 0;
 }
 
 static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
@@ -300,6 +507,29 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
             if (record.generation != state->hdr->generation) {
                 continue;
             }
+            if (record.flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
+                trace_cxl_hybrid_region_request_dequeue(record.page_index,
+                                                        record.nr_pages,
+                                                        record.generation);
+                if (!cxl_hybrid_ctrl_region_range_valid(
+                        state->hdr, record.page_index, record.nr_pages)) {
+                    error_setg(&local_err,
+                               "CXL hybrid fault region request out of range "
+                               "(first-page=%" PRIu64 " pages=%u "
+                               "total-pages=%" PRIu64 ")",
+                               record.page_index, record.nr_pages,
+                               state->hdr->total_pages);
+                    error_free(local_err);
+                    continue;
+                }
+                if (cxl_hybrid_publish_fault_region_request_bridge(
+                        record.page_index, record.nr_pages,
+                        record.generation, record.request_ts_ns,
+                        &local_err)) {
+                    error_free(local_err);
+                }
+                continue;
+            }
             if (!cxl_hybrid_lookup_global_page(record.page_index, &block,
                                                &block_offset)) {
                 continue;
@@ -309,14 +539,15 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                                                      block_offset,
                                                      record.generation,
                                                      record.request_ts_ns);
-            if (cxl_hybrid_publish_fault_request_core(qemu_ram_get_idstr(block),
-                                                      block_offset,
-                                                      TARGET_PAGE_SIZE,
-                                                      record.generation,
-                                                      true,
-                                                      &(CXLHybridFaultReadyRecord){ 0 },
-                                                      NULL,
-                                                      &local_err)) {
+            if (cxl_hybrid_publish_fault_request_core(
+                    qemu_ram_get_idstr(block),
+                    block_offset,
+                    TARGET_PAGE_SIZE,
+                    record.generation,
+                    !migrate_cxl_fault_resolve_uses_region(),
+                    &(CXLHybridFaultReadyRecord){ 0 },
+                    NULL,
+                    &local_err)) {
                 error_free(local_err);
             }
             continue;
@@ -597,6 +828,7 @@ int cxl_hybrid_control_init_destination(Error **errp)
 
 int cxl_hybrid_control_begin_source_run(Error **errp)
 {
+    unsigned long *owned_region_bitmap;
     int ret;
     uint32_t generation;
 
@@ -610,10 +842,14 @@ int cxl_hybrid_control_begin_source_run(Error **errp)
     }
 
     generation = cxl_hybrid_fault_publish_generation();
+    owned_region_bitmap = cxl_hybrid_control_source.owned_region_bitmap;
     cxl_hybrid_control_reset_run_state(cxl_hybrid_control_source.hdr,
                                        cxl_hybrid_control_source.visible_bitmap,
-                                       generation,
-                                       cxl_hybrid_control_region.visible_page_words);
+                                       cxl_hybrid_control_region.total_pages,
+                                       owned_region_bitmap,
+                                       cxl_hybrid_control_region.total_regions,
+                                       cxl_hybrid_control_region.region_granule,
+                                       generation);
     cxl_hybrid_ctrl_start_request_worker(&cxl_hybrid_control_source);
     return 0;
 }
@@ -622,8 +858,11 @@ int cxl_hybrid_control_activate_destination(Error **errp)
 {
     int ret;
     CXLHybridControlHeader *hdr;
+    uint64_t region_granule;
     uint32_t generation;
     size_t expected_visible_page_words;
+    size_t expected_owned_region_words;
+    uint32_t expected_region_granule_shift;
 
     if (!migrate_cxl_fault_control_plane_cxl()) {
         return 0;
@@ -635,11 +874,13 @@ int cxl_hybrid_control_activate_destination(Error **errp)
     }
 
     if (!cxl_hybrid_ctrl_state_ready(&cxl_hybrid_control_destination)) {
-        error_setg(errp, "CXL hybrid fault control header is not initialized");
+        error_setg(errp,
+                   "CXL hybrid fault control header is not initialized");
         return -EINVAL;
     }
 
     hdr = cxl_hybrid_control_destination.hdr;
+    region_granule = cxl_hybrid_control_region.region_granule;
     expected_visible_page_words =
         cxl_hybrid_control_visible_bitmap_words(cxl_hybrid_ctrl_total_pages());
     if (hdr->visible_page_words != expected_visible_page_words) {
@@ -648,6 +889,51 @@ int cxl_hybrid_control_activate_destination(Error **errp)
                    "(header=%u expected=%zu)",
                    hdr->visible_page_words,
                    expected_visible_page_words);
+        return -EINVAL;
+    }
+    if (hdr->total_pages != cxl_hybrid_control_region.total_pages) {
+        error_setg(errp,
+                   "CXL hybrid fault control total pages mismatch "
+                   "(header=%" PRIu64 " expected=%" PRIu64 ")",
+                   hdr->total_pages,
+                   cxl_hybrid_control_region.total_pages);
+        return -EINVAL;
+    }
+    expected_owned_region_words =
+        cxl_hybrid_control_owned_region_bitmap_words(
+            cxl_hybrid_ctrl_total_regions(cxl_hybrid_ctrl_total_pages(),
+                                          region_granule));
+    if (hdr->owned_region_words != expected_owned_region_words) {
+        error_setg(errp,
+                   "CXL hybrid fault control owned region bitmap mismatch "
+                   "(header=%u expected=%zu)",
+                   hdr->owned_region_words,
+                   expected_owned_region_words);
+        return -EINVAL;
+    }
+    if (hdr->total_regions != cxl_hybrid_control_region.total_regions) {
+        error_setg(errp,
+                   "CXL hybrid fault control total regions mismatch "
+                   "(header=%" PRIu64 " expected=%" PRIu64 ")",
+                   hdr->total_regions,
+                   cxl_hybrid_control_region.total_regions);
+        return -EINVAL;
+    }
+    if (hdr->region_granule != region_granule) {
+        error_setg(errp,
+                   "CXL hybrid fault control region granule mismatch "
+                   "(header=%" PRIu64 " expected=%" PRIu64 ")",
+                   hdr->region_granule, region_granule);
+        return -EINVAL;
+    }
+    expected_region_granule_shift =
+        cxl_hybrid_control_region_granule_shift(region_granule);
+    if (hdr->region_granule_shift != expected_region_granule_shift) {
+        error_setg(errp,
+                   "CXL hybrid fault control region granule shift mismatch "
+                   "(header=%u expected=%u)",
+                   hdr->region_granule_shift,
+                   expected_region_granule_shift);
         return -EINVAL;
     }
 
@@ -729,6 +1015,55 @@ int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
     return 0;
 }
 
+bool cxl_hybrid_ctrl_region_visible(uint64_t first_page,
+                                    uint32_t nr_pages,
+                                    uint32_t generation)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_destination;
+
+    return cxl_hybrid_control_region_visible(state->hdr,
+                                             state->visible_bitmap,
+                                             first_page, nr_pages,
+                                             generation);
+}
+
+int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
+                                        uint32_t nr_pages,
+                                        uint32_t generation,
+                                        Error **errp)
+{
+    int ret = 0;
+
+    trace_cxl_hybrid_region_wait_begin(first_page, nr_pages, generation);
+    ret = cxl_hybrid_ctrl_validate_region_range(
+        cxl_hybrid_control_destination.hdr, first_page, nr_pages, errp);
+    if (ret) {
+        trace_cxl_hybrid_region_wait_complete(first_page, nr_pages,
+                                              generation, ret);
+        return ret;
+    }
+
+    while (!cxl_hybrid_ctrl_region_visible(first_page, nr_pages, generation)) {
+        if (!cxl_hybrid_control_destination.hdr ||
+            cxl_hybrid_control_destination.hdr->generation != generation) {
+            error_setg(errp,
+                       "CXL hybrid visible region generation mismatch "
+                       "(header=%u expected=%u)",
+                       cxl_hybrid_control_destination.hdr ?
+                       cxl_hybrid_control_destination.hdr->generation : 0,
+                       generation);
+            ret = -EINVAL;
+            break;
+        }
+
+        cpu_relax();
+    }
+    trace_cxl_hybrid_region_wait_complete(first_page, nr_pages, generation,
+                                          ret);
+
+    return ret;
+}
+
 int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
                                           uint32_t generation,
                                           uint64_t request_ts_ns,
@@ -742,6 +1077,58 @@ int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
 
     return cxl_hybrid_ctrl_try_enqueue_request(
         &cxl_hybrid_control_destination, &record, errp);
+}
+
+int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
+                                                 uint32_t nr_pages,
+                                                 uint32_t generation,
+                                                 uint64_t request_ts_ns,
+                                                 Error **errp)
+{
+    CXLHybridFaultRequestRecord record = {
+        .page_index = first_page,
+        .generation = generation,
+        .flags = CXL_HYBRID_FAULT_REQUEST_F_REGION,
+        .nr_pages = nr_pages,
+        .request_ts_ns = request_ts_ns,
+    };
+    int ret;
+
+    trace_cxl_hybrid_region_request_enqueue(first_page, nr_pages, generation);
+    ret = cxl_hybrid_ctrl_validate_region_range(
+        cxl_hybrid_control_destination.hdr, first_page, nr_pages, errp);
+    if (ret) {
+        return ret;
+    }
+
+    return cxl_hybrid_ctrl_try_enqueue_request(
+        &cxl_hybrid_control_destination, &record, errp);
+}
+
+bool cxl_hybrid_ctrl_region_owned(uint64_t region_index, uint32_t generation)
+{
+    CXLHybridControlState *state = cxl_hybrid_control_source.hdr ?
+        &cxl_hybrid_control_source : &cxl_hybrid_control_destination;
+
+    return cxl_hybrid_control_region_owned(state->hdr,
+                                           state->owned_region_bitmap,
+                                           region_index, generation);
+}
+
+void cxl_hybrid_ctrl_mark_region_owned(uint64_t region_index,
+                                       uint32_t generation)
+{
+    CXLHybridControlState *state = cxl_hybrid_control_destination.hdr ?
+        &cxl_hybrid_control_destination : &cxl_hybrid_control_source;
+
+    if (!state->hdr || state->hdr->generation != generation) {
+        return;
+    }
+
+    cxl_hybrid_control_mark_region_owned(state->hdr,
+                                         state->owned_region_bitmap,
+                                         region_index);
+    trace_cxl_hybrid_region_owned_set(region_index, generation);
 }
 
 bool cxl_hybrid_ctrl_dequeue_fault_request(CXLHybridFaultRequestRecord *record)

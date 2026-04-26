@@ -150,15 +150,27 @@ static void test_header_reset_clears_visible_bitmap(void)
         .ready_ring_order = 88,
         .generation = 99,
         .visible_page_words = 1234,
+        .owned_region_words = 5678,
+        .region_granule_shift = 12,
+        .total_pages = 999,
+        .total_regions = 888,
+        .region_granule = 4096,
         .request_prod = 10,
         .request_cons = 9,
         .ready_prod = 20,
         .ready_cons = 19,
     };
     unsigned long visible_bitmap[2] = { ~0UL, ~0UL };
+    unsigned long owned_bitmap[1] = { ~0UL };
 
-    cxl_hybrid_control_reset_run_state(&hdr, visible_bitmap, 2,
-                                       G_N_ELEMENTS(visible_bitmap));
+    cxl_hybrid_control_reset_run_state(&hdr, visible_bitmap,
+                                       G_N_ELEMENTS(visible_bitmap) *
+                                       BITS_PER_LONG,
+                                       owned_bitmap,
+                                       G_N_ELEMENTS(owned_bitmap) *
+                                       BITS_PER_LONG,
+                                       64 * 1024,
+                                       2);
 
     g_assert_cmphex(hdr.magic, ==, CXL_HYBRID_CTRL_MAGIC);
     g_assert_cmpuint(hdr.version, ==, CXL_HYBRID_CTRL_VERSION);
@@ -167,12 +179,20 @@ static void test_header_reset_clears_visible_bitmap(void)
     g_assert_cmpuint(hdr.ready_ring_order, ==, CXL_HYBRID_CTRL_READY_ORDER);
     g_assert_cmpuint(hdr.generation, ==, 2);
     g_assert_cmpuint(hdr.visible_page_words, ==, G_N_ELEMENTS(visible_bitmap));
+    g_assert_cmpuint(hdr.owned_region_words, ==, G_N_ELEMENTS(owned_bitmap));
+    g_assert_cmpuint(hdr.region_granule_shift, ==, 16);
+    g_assert_cmpuint(hdr.total_pages, ==,
+                     G_N_ELEMENTS(visible_bitmap) * BITS_PER_LONG);
+    g_assert_cmpuint(hdr.total_regions, ==,
+                     G_N_ELEMENTS(owned_bitmap) * BITS_PER_LONG);
+    g_assert_cmpuint(hdr.region_granule, ==, 64 * 1024);
     g_assert_cmpuint(hdr.request_prod, ==, 0);
     g_assert_cmpuint(hdr.request_cons, ==, 0);
     g_assert_cmpuint(hdr.ready_prod, ==, 0);
     g_assert_cmpuint(hdr.ready_cons, ==, 0);
     g_assert_cmphex(visible_bitmap[0], ==, 0);
     g_assert_cmphex(visible_bitmap[1], ==, 0);
+    g_assert_cmphex(owned_bitmap[0], ==, 0);
 }
 
 static void test_visible_bitmap_bytes_round_up_by_ulong(void)
@@ -195,11 +215,35 @@ static void test_visible_bitmap_bytes_round_up_by_ulong(void)
                      ==, 2 * sizeof(unsigned long));
 }
 
+static void test_owned_region_bitmap_bytes_round_up_by_ulong(void)
+{
+    g_assert_cmpuint(cxl_hybrid_control_owned_region_bitmap_words(0), ==, 0);
+    g_assert_cmpuint(cxl_hybrid_control_owned_region_bitmap_bytes(0), ==, 0);
+
+    g_assert_cmpuint(cxl_hybrid_control_owned_region_bitmap_words(1), ==, 1);
+    g_assert_cmpuint(cxl_hybrid_control_owned_region_bitmap_bytes(1), ==,
+                     sizeof(unsigned long));
+
+    g_assert_cmpuint(
+        cxl_hybrid_control_owned_region_bitmap_words(BITS_PER_LONG), ==, 1);
+    g_assert_cmpuint(
+        cxl_hybrid_control_owned_region_bitmap_bytes(BITS_PER_LONG),
+        ==, sizeof(unsigned long));
+
+    g_assert_cmpuint(
+        cxl_hybrid_control_owned_region_bitmap_words(BITS_PER_LONG + 1),
+        ==, 2);
+    g_assert_cmpuint(
+        cxl_hybrid_control_owned_region_bitmap_bytes(BITS_PER_LONG + 1),
+        ==, 2 * sizeof(unsigned long));
+}
+
 static void test_visible_bitmap_respects_generation(void)
 {
     CXLHybridControlHeader hdr = {
         .generation = 7,
         .visible_page_words = 2,
+        .total_pages = 2 * BITS_PER_LONG,
     };
     unsigned long visible_bitmap[2] = { 0 };
     const uint64_t page_index = BITS_PER_LONG + 5;
@@ -225,6 +269,92 @@ static void test_visible_bitmap_respects_generation(void)
     g_assert_cmphex(visible_bitmap[1], ==, 0);
 }
 
+static void test_visible_bitmap_rejects_padded_tail(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[BITS_TO_LONGS(BITS_PER_LONG + 1)] = { 0 };
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible, BITS_PER_LONG + 1,
+                                       NULL, 0, 0, 8);
+
+    g_assert_false(cxl_hybrid_control_region_visible(&hdr, visible, 0, 0,
+                                                     8));
+    g_assert_false(cxl_hybrid_control_region_visible(&hdr, visible,
+                                                     UINT64_MAX, 2, 8));
+    cxl_hybrid_control_mark_page_visible(&hdr, visible, BITS_PER_LONG + 1);
+    g_assert_false(cxl_hybrid_control_page_visible(&hdr, visible,
+                                                   BITS_PER_LONG + 1, 8));
+    g_assert_false(cxl_hybrid_control_region_visible(&hdr, visible,
+                                                     BITS_PER_LONG, 2, 8));
+}
+
+static void test_region_owned_bitmap_respects_generation(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[BITS_TO_LONGS(1024)] = { 0 };
+    unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible, 1024, owned, 8,
+                                       64 * 1024, 11);
+
+    g_assert_false(cxl_hybrid_control_region_owned(&hdr, owned, 3, 10));
+    g_assert_false(cxl_hybrid_control_region_owned(&hdr, owned, 3, 11));
+    cxl_hybrid_control_mark_region_owned(&hdr, owned, 3);
+    g_assert_true(cxl_hybrid_control_region_owned(&hdr, owned, 3, 11));
+    g_assert_false(cxl_hybrid_control_region_owned(&hdr, owned, 3, 12));
+}
+
+static void test_region_owned_bitmap_rejects_padded_tail(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long owned[BITS_TO_LONGS(BITS_PER_LONG + 1)] = { 0 };
+
+    cxl_hybrid_control_reset_run_state(&hdr, NULL, 0, owned,
+                                       BITS_PER_LONG + 1, 64 * 1024, 9);
+
+    cxl_hybrid_control_mark_region_owned(&hdr, owned, BITS_PER_LONG + 1);
+    g_assert_false(cxl_hybrid_control_region_owned(&hdr, owned,
+                                                   BITS_PER_LONG + 1, 9));
+}
+
+static void test_region_visibility_requires_all_pages(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[BITS_TO_LONGS(1024)] = { 0 };
+    unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible, 1024, owned, 8,
+                                       64 * 1024, 4);
+
+    cxl_hybrid_control_mark_page_visible(&hdr, visible, 10);
+    cxl_hybrid_control_mark_page_visible(&hdr, visible, 11);
+    g_assert_false(cxl_hybrid_control_region_visible(&hdr, visible, 10, 3,
+                                                     4));
+    cxl_hybrid_control_mark_page_visible(&hdr, visible, 12);
+    g_assert_true(cxl_hybrid_control_region_visible(&hdr, visible, 10, 3,
+                                                    4));
+}
+
+static bool test_resolve_page_bitmap(uint64_t page_index, void *opaque)
+{
+    const unsigned long *resolved = opaque;
+
+    return test_bit(page_index, resolved);
+}
+
+static void test_region_resolution_rejects_hole(void)
+{
+    unsigned long resolved[BITS_TO_LONGS(64)] = { 0 };
+    uint64_t unresolved_page = UINT64_MAX;
+
+    bitmap_set(resolved, 10, 2);
+    bitmap_set(resolved, 13, 1);
+
+    g_assert_false(cxl_hybrid_control_page_range_resolved(
+        10, 4, test_resolve_page_bitmap, resolved, &unresolved_page));
+    g_assert_cmpuint(unresolved_page, ==, 12);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -240,7 +370,19 @@ int main(int argc, char **argv)
                     test_staging_shared_map_rejects_base_beyond_extent);
     g_test_add_func("/cxl-hybrid-control/visible-bitmap-bytes-round-up-by-ulong",
                     test_visible_bitmap_bytes_round_up_by_ulong);
+    g_test_add_func("/cxl-hybrid-control/owned-region-bitmap-bytes-round-up-by-ulong",
+                    test_owned_region_bitmap_bytes_round_up_by_ulong);
     g_test_add_func("/cxl-hybrid-control/visible-bitmap-respects-generation",
                     test_visible_bitmap_respects_generation);
+    g_test_add_func("/cxl-hybrid-control/visible-bitmap-rejects-padded-tail",
+                    test_visible_bitmap_rejects_padded_tail);
+    g_test_add_func("/cxl-hybrid-control/region-owned-bitmap-respects-generation",
+                    test_region_owned_bitmap_respects_generation);
+    g_test_add_func("/cxl-hybrid-control/region-owned-bitmap-rejects-padded-tail",
+                    test_region_owned_bitmap_rejects_padded_tail);
+    g_test_add_func("/cxl-hybrid-control/region-visibility-requires-all-pages",
+                    test_region_visibility_requires_all_pages);
+    g_test_add_func("/cxl-hybrid-control/region-resolution-rejects-hole",
+                    test_region_resolution_rejects_hole);
     return g_test_run();
 }
