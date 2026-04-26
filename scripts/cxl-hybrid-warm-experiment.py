@@ -503,10 +503,14 @@ def set_caps(f, mode: str):
     })
 
 
-def set_params(f, cxl_path: str, mode: str, pressure: str,
-               shared_backing: bool = False, thresholds=None,
-               prefetch_rate=None, dst_install_policy=None,
-               fault_control_plane=None, fault_resolve_mode=None):
+def build_migration_parameters(args, mode: str, cxl_path=None,
+                               shared_backing: bool = True,
+                               thresholds=None):
+    pressure = getattr(args, "pressure", "light")
+    if isinstance(pressure, str):
+        pressure = next(
+            item.strip() for item in pressure.split(",") if item.strip()
+        )
     hybrid_mode = mode_uses_cxl_hybrid(mode)
     params = {
         "max-bandwidth": 8 * 1024 * 1024,
@@ -518,7 +522,13 @@ def set_params(f, cxl_path: str, mode: str, pressure: str,
     if hybrid_mode:
         if mode == "hybrid_postcopy_payload":
             raise ValueError("payload hybrid mode is disabled for CXL-only postcopy")
-        profile = thresholds or resolve_threshold_profile("balanced")
+        profile = thresholds or resolve_threshold_profile(
+            getattr(args, "threshold_profile", "balanced"),
+            dirty_threshold=getattr(args, "x_cxl_switch_dirty_threshold", None),
+            max_iters=getattr(args, "x_cxl_switch_max_iters", None),
+            max_precopy_ms=getattr(args, "x_cxl_switch_max_precopy_ms", None),
+            min_remaining=getattr(args, "x_cxl_switch_min_remaining", None),
+        )
         warm_transport = {
             "hybrid_postcopy_auto": "cxl-offset",
             "hybrid_postcopy_cxl_offset": "cxl-offset",
@@ -528,6 +538,10 @@ def set_params(f, cxl_path: str, mode: str, pressure: str,
             raise ValueError(
                 f"{mode} requires explicit shared_backing confirmation"
             )
+        prefetch_rate = getattr(args, "x_cxl_prefetch_rate", None)
+        dst_install_policy = getattr(args, "x_cxl_dst_install_policy", None)
+        fault_control_plane = getattr(args, "x_cxl_fault_control_plane", None)
+        fault_resolve_mode = getattr(args, "x_cxl_fault_resolve_mode", None)
         params.update({
             "x-cxl-switch-dirty-threshold":
                 profile["x-cxl-switch-dirty-threshold"],
@@ -555,6 +569,29 @@ def set_params(f, cxl_path: str, mode: str, pressure: str,
             params["x-cxl-fault-control-plane"] = fault_control_plane
         if fault_resolve_mode is not None:
             params["x-cxl-fault-resolve-mode"] = fault_resolve_mode
+    return params
+
+
+def set_params(f, cxl_path: str, mode: str, pressure: str,
+               shared_backing: bool = False, thresholds=None,
+               prefetch_rate=None, dst_install_policy=None,
+               fault_control_plane=None, fault_resolve_mode=None):
+    args = argparse.Namespace(
+        pressure=pressure,
+        threshold_profile="balanced",
+        x_cxl_switch_dirty_threshold=None,
+        x_cxl_switch_max_iters=None,
+        x_cxl_switch_max_precopy_ms=None,
+        x_cxl_switch_min_remaining=None,
+        x_cxl_prefetch_rate=prefetch_rate,
+        x_cxl_dst_install_policy=dst_install_policy,
+        x_cxl_fault_control_plane=fault_control_plane,
+        x_cxl_fault_resolve_mode=fault_resolve_mode,
+    )
+    params = build_migration_parameters(
+        args, mode, cxl_path=cxl_path, shared_backing=shared_backing,
+        thresholds=thresholds,
+    )
     qmp_ok(f, "migrate-set-parameters", params)
 
 
@@ -2255,9 +2292,7 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
     }
 
 
-def main():
-    maybe_reexec_with_sudo()
-
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep-dir", action="store_true")
     parser.add_argument("--pressure", default="light,medium,heavy")
@@ -2281,7 +2316,13 @@ def main():
                                  "region-remap-fallback-copy"),
                         default=None)
     parser.add_argument("--cxl-path")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main():
+    maybe_reexec_with_sudo()
+
+    args = parse_args()
 
     if not QEMU.exists():
         raise SystemExit(f"missing qemu binary: {QEMU}")

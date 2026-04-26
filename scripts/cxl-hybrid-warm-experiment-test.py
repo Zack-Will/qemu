@@ -357,21 +357,15 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(args["x-cxl-fault-control-plane"], "cxl")
 
     def test_fault_resolve_mode_arg_sets_qmp_parameter(self):
-        calls = []
-
-        def fake_qmp_ok(_f, cmd, args=None):
-            calls.append((cmd, args))
-            return {}
-
-        self.mod.qmp_ok = fake_qmp_ok
-        self.mod.set_params(
-            object(), "/tmp/cxl.img", "hybrid_postcopy_manual",
-            "remap_heavy", shared_backing=True,
-            fault_resolve_mode="region-remap",
-        )
-
-        _cmd, args = calls[0]
-        self.assertEqual(args["x-cxl-fault-resolve-mode"], "region-remap")
+        chw = self.mod
+        args = chw.parse_args([
+            "--pressure", "remap_heavy",
+            "--mode", "hybrid_postcopy_manual",
+            "--x-cxl-fault-resolve-mode", "region-remap",
+        ])
+        params = chw.build_migration_parameters(args,
+                                                "hybrid_postcopy_manual")
+        self.assertEqual(params["x-cxl-fault-resolve-mode"], "region-remap")
 
     def test_fault_resolve_mode_qapi_and_qom_property_exist(self):
         qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
