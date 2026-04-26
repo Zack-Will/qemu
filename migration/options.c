@@ -29,7 +29,6 @@
 #include "qemu-file.h"
 #include "ram.h"
 #include "options.h"
-#include "hw/core/qdev-prop-internal.h"
 #include "system/kvm.h"
 
 /* Maximum migrate downtime set to 2000 seconds */
@@ -110,23 +109,6 @@ const PropertyInfo qdev_prop_StrOrNull;
 
 #define DEFAULT_MIGRATE_VCPU_DIRTY_LIMIT_PERIOD     1000    /* milliseconds */
 #define DEFAULT_MIGRATE_VCPU_DIRTY_LIMIT            1       /* MB/s */
-
-QEMU_BUILD_BUG_ON(sizeof(CXLHybridFaultResolveMode) != sizeof(int));
-
-static const PropertyInfo qdev_prop_cxl_hybrid_fault_resolve_mode = {
-    .type = "CXLHybridFaultResolveMode",
-    .description = "CXL hybrid fault resolve mode"
-                   " (copy/region-remap/region-remap-fallback-copy)",
-    .enum_table = &CXLHybridFaultResolveMode_lookup,
-    .get = qdev_propinfo_get_enum,
-    .set = qdev_propinfo_set_enum,
-    .set_default_value = qdev_propinfo_set_default_value_enum,
-};
-
-#define DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE(_n, _s, _f, _d) \
-    DEFINE_PROP_SIGNED(_n, _s, _f, _d, \
-                       qdev_prop_cxl_hybrid_fault_resolve_mode, \
-                       CXLHybridFaultResolveMode)
 
 const Property migration_properties[] = {
     DEFINE_PROP_BOOL("store-global-state", MigrationState,
@@ -1590,7 +1572,8 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
-    if (params->x_cxl_fault_resolve_mode >=
+    if (params->x_cxl_fault_resolve_mode < 0 ||
+        params->x_cxl_fault_resolve_mode >=
         CXL_HYBRID_FAULT_RESOLVE_MODE__MAX) {
         error_setg(errp, "Invalid x-cxl-fault-resolve-mode value %d",
                    params->x_cxl_fault_resolve_mode);

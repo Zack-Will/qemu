@@ -15,6 +15,7 @@ extern const PropertyInfo qdev_prop_mig_mode;
 extern const PropertyInfo qdev_prop_cxl_hybrid_warm_transport;
 extern const PropertyInfo qdev_prop_cxl_hybrid_dst_install_policy;
 extern const PropertyInfo qdev_prop_cxl_hybrid_fault_control_plane;
+extern const PropertyInfo qdev_prop_cxl_hybrid_fault_resolve_mode;
 extern const PropertyInfo qdev_prop_granule_mode;
 extern const PropertyInfo qdev_prop_zero_page_detection;
 extern const PropertyInfo qdev_prop_ssidsize_mode;
@@ -72,6 +73,10 @@ extern const PropertyInfo qdev_prop_virtio_gpu_output_list;
     DEFINE_PROP_SIGNED(_n, _s, _f, _d, \
                        qdev_prop_cxl_hybrid_fault_control_plane, \
                        CXLHybridFaultControlPlane)
+#define DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE(_n, _s, _f, _d) \
+    DEFINE_PROP_SIGNED(_n, _s, _f, _d, \
+                       qdev_prop_cxl_hybrid_fault_resolve_mode, \
+                       CXLHybridFaultResolveMode)
 #define DEFINE_PROP_GRANULE_MODE(_n, _s, _f, _d) \
     DEFINE_PROP_SIGNED(_n, _s, _f, _d, qdev_prop_granule_mode, GranuleMode)
 #define DEFINE_PROP_ZERO_PAGE_DETECTION(_n, _s, _f, _d) \
