@@ -1718,10 +1718,10 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
     end = start + len;
 
     rb_start = (uintptr_t)rb->host;
-    if (rb->max_length > UINTPTR_MAX - rb_start) {
+    if (rb->postcopy_length > UINTPTR_MAX - rb_start) {
         return -EOVERFLOW;
     }
-    rb_end = rb_start + rb->max_length;
+    rb_end = rb_start + rb->postcopy_length;
     if (start < rb_start || end > rb_end ||
         !postcopy_host_addr_in_range(notify_host_addr, rb_start, rb_end)) {
         return -ERANGE;
@@ -1732,21 +1732,19 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
     }
 
     /*
+     * Local wake comes before QEMU state so wake failure leaves no false
+     * received state.  After it succeeds, commit state before shared wake to
+     * match postcopy_place_page*() ordering.
+     *
      * This helper is only for a range that was already replaced with
      * MAP_FIXED.  After validating the range above, -EINVAL from UFFDIO_WAKE
-     * is the observed kernel behavior when the remap invalidated the UFFD
+     * is the documented kernel behavior when the remap invalidated the UFFD
      * registration; UFFDIO_UNREGISTER is the fallback wake path for that case.
      */
     ret = uffd_wakeup(mis->userfault_fd, host_addr, len);
     if (ret == -EINVAL) {
         ret = uffd_unregister_memory(mis->userfault_fd, host_addr, len);
     }
-    if (ret) {
-        return ret;
-    }
-
-    ret = postcopy_notify_shared_wake(rb,
-        qemu_ram_block_host_offset(rb, notify_host_addr));
     if (ret) {
         return ret;
     }
@@ -1768,7 +1766,8 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
     }
     qemu_mutex_unlock(&mis->page_request_mutex);
 
-    return 0;
+    return postcopy_notify_shared_wake(rb,
+        qemu_ram_block_host_offset(rb, notify_host_addr));
 }
 
 int postcopy_notify_shared_wake(RAMBlock *rb, uint64_t offset)
