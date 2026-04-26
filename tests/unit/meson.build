@@ -162,6 +162,12 @@ if have_system
   tests += {'test-qdev': [qom, hwcore]}
 endif
 
+if host_os == 'linux'
+  tests += {
+    'test-cxl-region-remap-uffd': [migration, io, qom, util],
+  }
+endif
+
 if have_ga and host_os == 'linux'
   tests += {'test-qga': ['../qtest/libqmp.c']}
   test_deps += {'test-qga': qga}
