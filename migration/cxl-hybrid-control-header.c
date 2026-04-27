@@ -42,6 +42,43 @@ uint32_t cxl_hybrid_control_region_granule_shift(uint64_t region_granule)
     return ctz64(region_granule);
 }
 
+uint32_t cxl_hybrid_control_generation(const CXLHybridControlHeader *hdr)
+{
+    return hdr ? qatomic_load_acquire(&hdr->generation) : 0;
+}
+
+bool cxl_hybrid_control_generation_matches(const CXLHybridControlHeader *hdr,
+                                           uint32_t generation)
+{
+    return hdr && cxl_hybrid_control_generation(hdr) == generation;
+}
+
+bool cxl_hybrid_control_abort_generation(CXLHybridControlHeader *hdr,
+                                         uint32_t generation)
+{
+    uint32_t next_generation = generation == UINT32_MAX ? 0 : generation + 1;
+
+    return hdr &&
+           qatomic_cmpxchg(&hdr->generation, generation, next_generation) ==
+           generation;
+}
+
+uint64_t cxl_hybrid_control_source_write_count(
+    const CXLHybridControlHeader *hdr)
+{
+    return hdr ? qatomic_load_acquire(&hdr->source_write_count) : 0;
+}
+
+uint64_t cxl_hybrid_control_source_write_begin(CXLHybridControlHeader *hdr)
+{
+    return hdr ? qatomic_inc_fetch(&hdr->source_write_count) : 0;
+}
+
+uint64_t cxl_hybrid_control_source_write_end(CXLHybridControlHeader *hdr)
+{
+    return hdr ? qatomic_dec_fetch(&hdr->source_write_count) : 0;
+}
+
 bool cxl_hybrid_control_page_range_resolved(uint64_t first_page,
                                             uint32_t nr_pages,
                                             CXLHybridPageResolveFunc resolve,
@@ -108,7 +145,8 @@ bool cxl_hybrid_control_page_visible(const CXLHybridControlHeader *hdr,
                                      uint64_t page_index,
                                      uint32_t generation)
 {
-    if (!hdr || !visible_bitmap || generation != hdr->generation ||
+    if (!hdr || !visible_bitmap ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
         !cxl_hybrid_control_page_in_range(hdr, page_index)) {
         return false;
     }
@@ -130,7 +168,7 @@ bool cxl_hybrid_control_region_visible(const CXLHybridControlHeader *hdr,
     uint64_t page;
 
     if (!hdr || !visible_bitmap || !nr_pages ||
-        generation != hdr->generation ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
         !cxl_hybrid_control_page_range_in_range(hdr, first_page, nr_pages)) {
         return false;
     }
@@ -218,7 +256,8 @@ bool cxl_hybrid_control_region_owned(const CXLHybridControlHeader *hdr,
                                      uint64_t region_index,
                                      uint32_t generation)
 {
-    if (!hdr || !owned_bitmap || generation != hdr->generation ||
+    if (!hdr || !owned_bitmap ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
         !cxl_hybrid_control_region_in_range(hdr, region_index)) {
         return false;
     }

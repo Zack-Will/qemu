@@ -159,6 +159,7 @@ static void test_header_reset_clears_visible_bitmap(void)
         .request_cons = 9,
         .ready_prod = 20,
         .ready_cons = 19,
+        .source_write_count = 33,
     };
     unsigned long visible_bitmap[2] = { ~0UL, ~0UL };
     unsigned long owned_bitmap[1] = { ~0UL };
@@ -190,9 +191,47 @@ static void test_header_reset_clears_visible_bitmap(void)
     g_assert_cmpuint(hdr.request_cons, ==, 0);
     g_assert_cmpuint(hdr.ready_prod, ==, 0);
     g_assert_cmpuint(hdr.ready_cons, ==, 0);
+    g_assert_cmpuint(hdr.source_write_count, ==, 0);
     g_assert_cmphex(visible_bitmap[0], ==, 0);
     g_assert_cmphex(visible_bitmap[1], ==, 0);
     g_assert_cmphex(owned_bitmap[0], ==, 0);
+}
+
+static void test_header_abort_generation_only_matches_expected(void)
+{
+    CXLHybridControlHeader hdr = {
+        .generation = 7,
+    };
+
+    g_assert_false(cxl_hybrid_control_abort_generation(&hdr, 6));
+    g_assert_cmpuint(cxl_hybrid_control_generation(&hdr), ==, 7);
+
+    g_assert_true(cxl_hybrid_control_abort_generation(&hdr, 7));
+    g_assert_cmpuint(cxl_hybrid_control_generation(&hdr), ==, 8);
+    g_assert_false(cxl_hybrid_control_generation_matches(&hdr, 7));
+    g_assert_true(cxl_hybrid_control_generation_matches(&hdr, 8));
+}
+
+static void test_header_abort_generation_wraps(void)
+{
+    CXLHybridControlHeader hdr = {
+        .generation = UINT32_MAX,
+    };
+
+    g_assert_true(cxl_hybrid_control_abort_generation(&hdr, UINT32_MAX));
+    g_assert_cmpuint(cxl_hybrid_control_generation(&hdr), ==, 0);
+}
+
+static void test_header_source_write_count_balances(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+
+    g_assert_cmpuint(cxl_hybrid_control_source_write_count(&hdr), ==, 0);
+    g_assert_cmpuint(cxl_hybrid_control_source_write_begin(&hdr), ==, 1);
+    g_assert_cmpuint(cxl_hybrid_control_source_write_begin(&hdr), ==, 2);
+    g_assert_cmpuint(cxl_hybrid_control_source_write_count(&hdr), ==, 2);
+    g_assert_cmpuint(cxl_hybrid_control_source_write_end(&hdr), ==, 1);
+    g_assert_cmpuint(cxl_hybrid_control_source_write_end(&hdr), ==, 0);
 }
 
 static void test_visible_bitmap_bytes_round_up_by_ulong(void)
@@ -362,6 +401,12 @@ int main(int argc, char **argv)
                     test_align_mapping_bytes_rounds_up_to_device_align);
     g_test_add_func("/cxl-hybrid-control/header-reset-clears-visible-bitmap",
                     test_header_reset_clears_visible_bitmap);
+    g_test_add_func("/cxl-hybrid-control/header-abort-generation",
+                    test_header_abort_generation_only_matches_expected);
+    g_test_add_func("/cxl-hybrid-control/header-abort-generation-wraps",
+                    test_header_abort_generation_wraps);
+    g_test_add_func("/cxl-hybrid-control/header-source-write-count-balances",
+                    test_header_source_write_count_balances);
     g_test_add_func("/cxl-hybrid-control/staging-shared-map-supports-fixed-extent-io",
                     test_staging_shared_map_supports_fixed_extent_io);
     g_test_add_func("/cxl-hybrid-control/staging-shared-map-rejects-extent-overflow-without-growing",

@@ -17,7 +17,7 @@
 
 #define CXL_HYBRID_METADATA_VERSION 1
 #define CXL_HYBRID_CTRL_MAGIC 0x43584c48U
-#define CXL_HYBRID_CTRL_VERSION 2
+#define CXL_HYBRID_CTRL_VERSION 3
 #define CXL_HYBRID_CTRL_REQUEST_ORDER 10
 #define CXL_HYBRID_CTRL_READY_ORDER 11
 #define CXL_REMAP_GRANULE_DEFAULT (64 * 1024)
@@ -102,6 +102,7 @@ typedef struct CXLHybridControlHeader {
     uint64_t request_cons;
     uint64_t ready_prod;
     uint64_t ready_cons;
+    uint64_t source_write_count;
 } CXLHybridControlHeader;
 
 typedef struct CXLHybridFaultRequestRecord {
@@ -317,6 +318,8 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
                                                         RAMBlock *rb),
                                       Error **errp);
 uint32_t cxl_hybrid_fault_publish_generation(void);
+bool cxl_hybrid_fault_resolve_mode_emits_burst(
+    CXLHybridFaultResolveMode mode);
 int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
                                     uint64_t block_used_len,
                                     uint64_t block_cxl_pages_offset,
@@ -413,6 +416,15 @@ size_t cxl_hybrid_control_visible_bitmap_bytes(uint64_t pages);
 size_t cxl_hybrid_control_owned_region_bitmap_words(uint64_t regions);
 size_t cxl_hybrid_control_owned_region_bitmap_bytes(uint64_t regions);
 uint32_t cxl_hybrid_control_region_granule_shift(uint64_t region_granule);
+uint32_t cxl_hybrid_control_generation(const CXLHybridControlHeader *hdr);
+bool cxl_hybrid_control_generation_matches(const CXLHybridControlHeader *hdr,
+                                           uint32_t generation);
+bool cxl_hybrid_control_abort_generation(CXLHybridControlHeader *hdr,
+                                         uint32_t generation);
+uint64_t cxl_hybrid_control_source_write_count(
+    const CXLHybridControlHeader *hdr);
+uint64_t cxl_hybrid_control_source_write_begin(CXLHybridControlHeader *hdr);
+uint64_t cxl_hybrid_control_source_write_end(CXLHybridControlHeader *hdr);
 bool cxl_hybrid_control_page_range_resolved(uint64_t first_page,
                                             uint32_t nr_pages,
                                             CXLHybridPageResolveFunc resolve,
@@ -476,6 +488,8 @@ bool cxl_hybrid_ctrl_region_owned(uint64_t region_index,
                                   uint32_t generation);
 void cxl_hybrid_ctrl_mark_region_owned(uint64_t region_index,
                                        uint32_t generation);
+void cxl_hybrid_ctrl_source_write_begin(void);
+void cxl_hybrid_ctrl_source_write_end(void);
 bool cxl_hybrid_ctrl_dequeue_fault_request(CXLHybridFaultRequestRecord *record);
 int cxl_hybrid_ctrl_enqueue_fault_ready(
     const CXLHybridFaultReadyRecord *record, Error **errp);
@@ -507,6 +521,17 @@ int cxl_hybrid_publish_fault_request_core(const char *ramblock,
                                           CXLHybridFaultReadyRecord *primary_ready,
                                           CXLHybridFaultReadyConsumer ready_consumer,
                                           Error **errp);
+int cxl_hybrid_publish_fault_region_request_core(uint64_t first_page,
+                                                 uint32_t nr_pages,
+                                                 uint32_t generation,
+                                                 uint64_t req_recv_ns,
+                                                 Error **errp);
+bool cxl_hybrid_source_region_owned_by_destination_generation(
+    RAMBlock *block,
+    ram_addr_t offset,
+    uint32_t generation);
+bool cxl_hybrid_source_region_owned_by_destination(RAMBlock *block,
+                                                   ram_addr_t offset);
 int cxl_hybrid_handle_publish_quiesce(MigrationIncomingState *mis,
                                       Error **errp);
 int cxl_hybrid_send_pending_publish_ready(QEMUFile *f, Error **errp);

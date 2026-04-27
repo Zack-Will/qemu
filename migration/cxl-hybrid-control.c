@@ -449,47 +449,12 @@ static bool cxl_hybrid_ctrl_state_ready(const CXLHybridControlState *state)
            state->hdr->ready_ring_order == CXL_HYBRID_CTRL_READY_ORDER;
 }
 
-static int cxl_hybrid_publish_fault_region_request_bridge(uint64_t first_page,
-                                                          uint32_t nr_pages,
-                                                          uint32_t generation,
-                                                          uint64_t request_ts_ns,
-                                                          Error **errp)
+static void cxl_hybrid_ctrl_abort_generation(CXLHybridControlState *state,
+                                             uint32_t generation)
 {
-    uint32_t page;
-
-    for (page = 0; page < nr_pages; page++) {
-        RAMBlock *block;
-        ram_addr_t block_offset;
-        uint64_t page_index = first_page + page;
-        CXLHybridFaultReadyRecord ready = { 0 };
-        int ret;
-
-        if (!cxl_hybrid_lookup_global_page(page_index, &block,
-                                           &block_offset)) {
-            error_setg(errp,
-                       "CXL hybrid fault region page is unresolved "
-                       "(page=%" PRIu64 ")",
-                       page_index);
-            return -ENOENT;
-        }
-
-        cxl_hybrid_note_publish_request_received(qemu_ram_get_idstr(block),
-                                                 block_offset, generation,
-                                                 request_ts_ns);
-        ret = cxl_hybrid_publish_fault_request_core(qemu_ram_get_idstr(block),
-                                                    block_offset,
-                                                    TARGET_PAGE_SIZE,
-                                                    generation,
-                                                    false,
-                                                    &ready,
-                                                    NULL,
-                                                    errp);
-        if (ret) {
-            return ret;
-        }
+    if (state->hdr) {
+        cxl_hybrid_control_abort_generation(state->hdr, generation);
     }
-
-    return 0;
 }
 
 static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
@@ -504,7 +469,8 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
         if (cxl_hybrid_ctrl_dequeue_fault_request(&record)) {
             Error *local_err = NULL;
 
-            if (record.generation != state->hdr->generation) {
+            if (!cxl_hybrid_control_generation_matches(state->hdr,
+                                                       record.generation)) {
                 continue;
             }
             if (record.flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
@@ -519,19 +485,26 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                                "total-pages=%" PRIu64 ")",
                                record.page_index, record.nr_pages,
                                state->hdr->total_pages);
-                    error_free(local_err);
+                    if (local_err) {
+                        error_report_err(local_err);
+                    }
+                    cxl_hybrid_ctrl_abort_generation(state, record.generation);
                     continue;
                 }
-                if (cxl_hybrid_publish_fault_region_request_bridge(
+                if (cxl_hybrid_publish_fault_region_request_core(
                         record.page_index, record.nr_pages,
                         record.generation, record.request_ts_ns,
                         &local_err)) {
-                    error_free(local_err);
+                    if (local_err) {
+                        error_report_err(local_err);
+                    }
+                    cxl_hybrid_ctrl_abort_generation(state, record.generation);
                 }
                 continue;
             }
             if (!cxl_hybrid_lookup_global_page(record.page_index, &block,
                                                &block_offset)) {
+                cxl_hybrid_ctrl_abort_generation(state, record.generation);
                 continue;
             }
 
@@ -548,7 +521,10 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                     &(CXLHybridFaultReadyRecord){ 0 },
                     NULL,
                     &local_err)) {
-                error_free(local_err);
+                if (local_err) {
+                    error_report_err(local_err);
+                }
+                cxl_hybrid_ctrl_abort_generation(state, record.generation);
             }
             continue;
         }
@@ -568,7 +544,8 @@ static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)
         if (cxl_hybrid_ctrl_dequeue_fault_ready(&record)) {
             Error *local_err = NULL;
 
-            if (record.generation != state->hdr->generation) {
+            if (!cxl_hybrid_control_generation_matches(state->hdr,
+                                                       record.generation)) {
                 continue;
             }
             cxl_hybrid_handle_fault_ready_record(&record, &local_err);
@@ -938,11 +915,11 @@ int cxl_hybrid_control_activate_destination(Error **errp)
     }
 
     generation = cxl_hybrid_fault_publish_generation();
-    if (hdr->generation != generation) {
+    if (!cxl_hybrid_control_generation_matches(hdr, generation)) {
         error_setg(errp,
                    "CXL hybrid fault control generation mismatch "
                    "(header=%u expected=%u)",
-                   hdr->generation,
+                   cxl_hybrid_control_generation(hdr),
                    generation);
         return -EINVAL;
     }
@@ -965,7 +942,8 @@ void cxl_hybrid_control_cleanup_destination(void)
 
 bool cxl_hybrid_ctrl_page_visible(uint64_t page_index, uint32_t generation)
 {
-    CXLHybridControlState *state = &cxl_hybrid_control_destination;
+    CXLHybridControlState *state = cxl_hybrid_control_destination.hdr ?
+        &cxl_hybrid_control_destination : &cxl_hybrid_control_source;
 
     return cxl_hybrid_control_page_visible(state->hdr, state->visible_bitmap,
                                            page_index, generation);
@@ -999,12 +977,14 @@ int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
 {
     while (!cxl_hybrid_ctrl_page_visible(page_index, generation)) {
         if (!cxl_hybrid_control_destination.hdr ||
-            cxl_hybrid_control_destination.hdr->generation != generation) {
+            !cxl_hybrid_control_generation_matches(
+                cxl_hybrid_control_destination.hdr, generation)) {
             error_setg(errp,
                        "CXL hybrid visible page generation mismatch "
                        "(header=%u expected=%u)",
                        cxl_hybrid_control_destination.hdr ?
-                       cxl_hybrid_control_destination.hdr->generation : 0,
+                       cxl_hybrid_control_generation(
+                           cxl_hybrid_control_destination.hdr) : 0,
                        generation);
             return -EINVAL;
         }
@@ -1045,12 +1025,14 @@ int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
 
     while (!cxl_hybrid_ctrl_region_visible(first_page, nr_pages, generation)) {
         if (!cxl_hybrid_control_destination.hdr ||
-            cxl_hybrid_control_destination.hdr->generation != generation) {
+            !cxl_hybrid_control_generation_matches(
+                cxl_hybrid_control_destination.hdr, generation)) {
             error_setg(errp,
                        "CXL hybrid visible region generation mismatch "
                        "(header=%u expected=%u)",
                        cxl_hybrid_control_destination.hdr ?
-                       cxl_hybrid_control_destination.hdr->generation : 0,
+                       cxl_hybrid_control_generation(
+                           cxl_hybrid_control_destination.hdr) : 0,
                        generation);
             ret = -EINVAL;
             break;
@@ -1121,7 +1103,7 @@ void cxl_hybrid_ctrl_mark_region_owned(uint64_t region_index,
     CXLHybridControlState *state = cxl_hybrid_control_destination.hdr ?
         &cxl_hybrid_control_destination : &cxl_hybrid_control_source;
 
-    if (!state->hdr || state->hdr->generation != generation) {
+    if (!cxl_hybrid_control_generation_matches(state->hdr, generation)) {
         return;
     }
 
@@ -1129,6 +1111,33 @@ void cxl_hybrid_ctrl_mark_region_owned(uint64_t region_index,
                                          state->owned_region_bitmap,
                                          region_index);
     trace_cxl_hybrid_region_owned_set(region_index, generation);
+    while (state == &cxl_hybrid_control_destination &&
+           cxl_hybrid_control_generation_matches(state->hdr, generation) &&
+           cxl_hybrid_control_source_write_count(state->hdr)) {
+        cpu_relax();
+    }
+}
+
+void cxl_hybrid_ctrl_source_write_begin(void)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_source;
+
+    if (!state->hdr) {
+        return;
+    }
+
+    cxl_hybrid_control_source_write_begin(state->hdr);
+}
+
+void cxl_hybrid_ctrl_source_write_end(void)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_source;
+
+    if (!state->hdr) {
+        return;
+    }
+
+    cxl_hybrid_control_source_write_end(state->hdr);
 }
 
 bool cxl_hybrid_ctrl_dequeue_fault_request(CXLHybridFaultRequestRecord *record)

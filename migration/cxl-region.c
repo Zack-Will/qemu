@@ -12,6 +12,12 @@
 #include "qapi/error.h"
 #include "migration/cxl.h"
 
+bool cxl_hybrid_fault_resolve_mode_emits_burst(
+    CXLHybridFaultResolveMode mode)
+{
+    return mode == CXL_HYBRID_FAULT_RESOLVE_MODE_COPY;
+}
+
 int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
                                     uint64_t block_used_len,
                                     uint64_t block_cxl_pages_offset,

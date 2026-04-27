@@ -39,6 +39,7 @@
 #include "migration/register.h"
 #include "migration/misc.h"
 #include "qemu-file.h"
+#include "postcopy.h"
 #include "postcopy-ram.h"
 #include "page_cache.h"
 #include "qemu/error-report.h"
@@ -57,6 +58,7 @@
 #include "system/ramblock.h"
 #include "savevm.h"
 #include "qemu/iov.h"
+#include "qemu/memalign.h"
 #include "multifd.h"
 #include "system/runstate.h"
 #include "rdma.h"
@@ -420,6 +422,7 @@ struct RAMState {
     /* Queue of outstanding page requests from the destination */
     QemuMutex src_page_req_mutex;
     QSIMPLEQ_HEAD(, RAMSrcPageRequest) src_page_requests;
+    uint8_t *mapped_ram_zero_page;
 
     /*
      * This is only used when postcopy is in recovery phase, to communicate
@@ -1231,6 +1234,112 @@ void ram_release_page(const char *rbname, uint64_t offset)
     ram_discard_range(rbname, offset, TARGET_PAGE_SIZE);
 }
 
+static bool ram_cxl_hybrid_should_publish_saved_page(QEMUFile *file)
+{
+    bool data_saved = true;
+
+    if (migrate_mapped_ram()) {
+        data_saved = !qemu_file_get_error(mapped_ram_save_file(file));
+    }
+
+    return migration_postcopy_ram_stream_should_publish_cxl_visible(
+        migration_in_postcopy(),
+        migrate_cxl_hybrid(),
+        migrate_mapped_ram(),
+        cxl_use_mapped_ram_backing(),
+        data_saved);
+}
+
+static void ram_cxl_hybrid_publish_saved_page(RAMBlock *block,
+                                              ram_addr_t offset,
+                                              QEMUFile *file)
+{
+    if (!ram_cxl_hybrid_should_publish_saved_page(file)) {
+        return;
+    }
+
+    cxl_hybrid_account_dst_page_sent(block->idstr, offset, TARGET_PAGE_SIZE);
+}
+
+typedef enum RAMCXLHybridRegionWriteStatus {
+    RAM_CXL_HYBRID_REGION_WRITE_ALLOW,
+    RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED,
+    RAM_CXL_HYBRID_REGION_WRITE_ERROR,
+} RAMCXLHybridRegionWriteStatus;
+
+static bool ram_cxl_hybrid_page_visible(RAMBlock *block, ram_addr_t offset,
+                                        uint32_t generation)
+{
+    ram_addr_t global_offset;
+
+    if (!cxl_hybrid_global_page_offset(block, offset, TARGET_PAGE_SIZE,
+                                       &global_offset)) {
+        return false;
+    }
+
+    return cxl_hybrid_ctrl_page_visible(global_offset >> TARGET_PAGE_BITS,
+                                        generation);
+}
+
+static void ram_cxl_hybrid_set_owned_invisible_error(QEMUFile *file,
+                                                     RAMBlock *block,
+                                                     ram_addr_t offset)
+{
+    QEMUFile *mapped_file = mapped_ram_save_file(file);
+    Error *err = NULL;
+
+    error_setg(&err,
+               "CXL hybrid mapped-RAM source write refused for "
+               "destination-owned invisible page %s/0x%" PRIx64,
+               block->idstr, offset);
+    qemu_file_set_error_obj(mapped_file, -EACCES, err);
+    if (mapped_file != file) {
+        qemu_file_set_error(file, -EACCES);
+    }
+}
+
+static RAMCXLHybridRegionWriteStatus
+ram_cxl_hybrid_begin_region_write(RAMBlock *block,
+                                  ram_addr_t offset,
+                                  bool *started)
+{
+    uint32_t generation;
+
+    *started = false;
+    if (!migrate_cxl_fault_resolve_uses_region()) {
+        return RAM_CXL_HYBRID_REGION_WRITE_ALLOW;
+    }
+
+    generation = cxl_hybrid_fault_publish_generation();
+    if (cxl_hybrid_source_region_owned_by_destination_generation(
+            block, offset, generation)) {
+        return ram_cxl_hybrid_page_visible(block, offset, generation) ?
+            RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED :
+            RAM_CXL_HYBRID_REGION_WRITE_ERROR;
+    }
+
+    cxl_hybrid_ctrl_source_write_begin();
+    *started = true;
+
+    if (cxl_hybrid_source_region_owned_by_destination_generation(
+            block, offset, generation)) {
+        cxl_hybrid_ctrl_source_write_end();
+        *started = false;
+        return ram_cxl_hybrid_page_visible(block, offset, generation) ?
+            RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED :
+            RAM_CXL_HYBRID_REGION_WRITE_ERROR;
+    }
+
+    return RAM_CXL_HYBRID_REGION_WRITE_ALLOW;
+}
+
+static void ram_cxl_hybrid_end_region_write(bool started)
+{
+    if (started) {
+        cxl_hybrid_ctrl_source_write_end();
+    }
+}
+
 int ram_cxl_hybrid_walk_unsent(MigrationState *s,
                                int (*cb)(MigrationState *s,
                                          RAMBlock *block,
@@ -1300,16 +1409,48 @@ static int save_zero_page(RAMState *rs, PageSearchStatus *pss,
         return 0;
     }
 
-    if (migration_in_postcopy()) {
-        cxl_hybrid_account_dst_page_sent(pss->block->idstr, offset,
-                                         TARGET_PAGE_SIZE);
-    }
-
     qatomic_add(&mig_stats.zero_pages, 1);
 
     if (migrate_mapped_ram()) {
-        /* zero pages are not transferred with mapped-ram */
-        clear_bit_atomic(offset >> TARGET_PAGE_BITS, pss->block->file_bmap);
+        QEMUFile *mapped_file;
+        bool cxl_region_write_started = false;
+        RAMCXLHybridRegionWriteStatus cxl_region_write_status;
+
+        cxl_region_write_status = ram_cxl_hybrid_begin_region_write(
+            pss->block, offset, &cxl_region_write_started);
+        if (cxl_region_write_status ==
+            RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED) {
+            trace_cxl_hybrid_ram_stream_skip_dst_owned(pss->block->idstr,
+                                                       offset);
+            ram_cxl_hybrid_publish_saved_page(pss->block, offset, file);
+            return 1;
+        } else if (cxl_region_write_status ==
+                   RAM_CXL_HYBRID_REGION_WRITE_ERROR) {
+            ram_cxl_hybrid_set_owned_invisible_error(file, pss->block, offset);
+            return -EACCES;
+        }
+
+        mapped_file = mapped_ram_save_file(file);
+
+        if (ram_cxl_hybrid_should_publish_saved_page(file)) {
+            /*
+             * Hybrid skips destination-side load_all_mapped_ram(), so a CXL
+             * visible zero page must be materialized in the shared backing.
+             */
+            qemu_put_buffer_at(mapped_file, rs->mapped_ram_zero_page,
+                               TARGET_PAGE_SIZE,
+                               pss->block->pages_offset + offset);
+            ram_cxl_hybrid_end_region_write(cxl_region_write_started);
+            if (!qemu_file_get_error(mapped_file)) {
+                set_bit(offset >> TARGET_PAGE_BITS, pss->block->file_bmap);
+                ram_transferred_add(TARGET_PAGE_SIZE);
+                ram_cxl_hybrid_publish_saved_page(pss->block, offset, file);
+            }
+        } else {
+            ram_cxl_hybrid_end_region_write(cxl_region_write_started);
+            /* zero pages are not transferred with mapped-ram */
+            clear_bit_atomic(offset >> TARGET_PAGE_BITS, pss->block->file_bmap);
+        }
         return 1;
     }
 
@@ -1348,15 +1489,32 @@ static int save_normal_page(PageSearchStatus *pss, RAMBlock *block,
 {
     QEMUFile *file = pss->pss_channel;
 
-    if (migration_in_postcopy()) {
-        cxl_hybrid_account_dst_page_sent(block->idstr, offset,
-                                         TARGET_PAGE_SIZE);
-    }
-
     if (migrate_mapped_ram()) {
-        qemu_put_buffer_at(mapped_ram_save_file(file), buf, TARGET_PAGE_SIZE,
+        QEMUFile *mapped_file;
+        bool cxl_region_write_started = false;
+        RAMCXLHybridRegionWriteStatus cxl_region_write_status;
+
+        cxl_region_write_status = ram_cxl_hybrid_begin_region_write(
+            block, offset, &cxl_region_write_started);
+        if (cxl_region_write_status ==
+            RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED) {
+            trace_cxl_hybrid_ram_stream_skip_dst_owned(block->idstr, offset);
+            ram_cxl_hybrid_publish_saved_page(block, offset, file);
+            return 1;
+        } else if (cxl_region_write_status ==
+                   RAM_CXL_HYBRID_REGION_WRITE_ERROR) {
+            ram_cxl_hybrid_set_owned_invisible_error(file, block, offset);
+            return -EACCES;
+        }
+
+        mapped_file = mapped_ram_save_file(file);
+
+        qemu_put_buffer_at(mapped_file, buf, TARGET_PAGE_SIZE,
                            block->pages_offset + offset);
-        set_bit(offset >> TARGET_PAGE_BITS, block->file_bmap);
+        ram_cxl_hybrid_end_region_write(cxl_region_write_started);
+        if (!qemu_file_get_error(mapped_file)) {
+            set_bit(offset >> TARGET_PAGE_BITS, block->file_bmap);
+        }
     } else {
         ram_transferred_add(save_page_header(pss, pss->pss_channel, block,
                                              offset | RAM_SAVE_FLAG_PAGE));
@@ -1368,6 +1526,7 @@ static int save_normal_page(PageSearchStatus *pss, RAMBlock *block,
             qemu_put_buffer(file, buf, TARGET_PAGE_SIZE);
         }
     }
+    ram_cxl_hybrid_publish_saved_page(block, offset, file);
     ram_transferred_add(TARGET_PAGE_SIZE);
     qatomic_add(&mig_stats.normal_pages, 1);
     return 1;
@@ -2145,8 +2304,9 @@ static int ram_save_target_page(RAMState *rs, PageSearchStatus *pss)
 
     if (!migrate_multifd()
         || migrate_zero_page_detection() == ZERO_PAGE_DETECTION_LEGACY) {
-        if (save_zero_page(rs, pss, offset)) {
-            return 1;
+        res = save_zero_page(rs, pss, offset);
+        if (res) {
+            return res > 0 ? 1 : res;
         }
     }
 
@@ -2502,6 +2662,7 @@ static void ram_state_cleanup(RAMState **rsp)
         migration_page_queue_free(*rsp);
         qemu_mutex_destroy(&(*rsp)->bitmap_mutex);
         qemu_mutex_destroy(&(*rsp)->src_page_req_mutex);
+        qemu_vfree((*rsp)->mapped_ram_zero_page);
         g_free(*rsp);
         *rsp = NULL;
     }
@@ -2881,6 +3042,17 @@ static bool ram_state_init(RAMState **rsp, Error **errp)
     qemu_mutex_init(&(*rsp)->bitmap_mutex);
     qemu_mutex_init(&(*rsp)->src_page_req_mutex);
     QSIMPLEQ_INIT(&(*rsp)->src_page_requests);
+    if (migrate_mapped_ram() && cxl_use_mapped_ram_backing()) {
+        (*rsp)->mapped_ram_zero_page =
+            qemu_try_memalign(qemu_real_host_page_size(), TARGET_PAGE_SIZE);
+        if (!(*rsp)->mapped_ram_zero_page) {
+            error_setg(errp, "%s: Error allocating mapped-ram zero page",
+                       __func__);
+            ram_state_cleanup(rsp);
+            return false;
+        }
+        memset((*rsp)->mapped_ram_zero_page, 0, TARGET_PAGE_SIZE);
+    }
     (*rsp)->ram_bytes_total = ram_bytes_total();
 
     /*

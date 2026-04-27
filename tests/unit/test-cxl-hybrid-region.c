@@ -167,6 +167,16 @@ static void test_region_geometry_rejects_misaligned_block_offset(void)
                                 "CXL hybrid fault region is not DAX-granule aligned");
 }
 
+static void test_region_mode_disables_fault_burst(void)
+{
+    g_assert_false(cxl_hybrid_fault_resolve_mode_emits_burst(
+        CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP));
+    g_assert_false(cxl_hybrid_fault_resolve_mode_emits_burst(
+        CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP_FALLBACK_COPY));
+    g_assert_true(cxl_hybrid_fault_resolve_mode_emits_burst(
+        CXL_HYBRID_FAULT_RESOLVE_MODE_COPY));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -190,5 +200,7 @@ int main(int argc, char **argv)
                     test_region_geometry_rejects_page_count_overflow);
     g_test_add_func("/cxl/region/reject-misaligned-block-offset",
                     test_region_geometry_rejects_misaligned_block_offset);
+    g_test_add_func("/cxl/region/mode-disables-fault-burst",
+                    test_region_mode_disables_fault_burst);
     return g_test_run();
 }

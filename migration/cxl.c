@@ -210,6 +210,9 @@ static struct CXLMigrationState {
     uint64_t fault_publish_req_handle_samples;
     uint64_t fault_publish_req_handle_time_ns;
     uint64_t max_fault_publish_req_handle_time_ns;
+    uint64_t region_publish_requests;
+    uint64_t region_publish_pages;
+    uint64_t region_publish_time_ns;
     uint64_t fault_primary_ready_drain_samples;
     uint64_t fault_primary_ready_drain_time_ns;
     uint64_t max_fault_primary_ready_drain_time_ns;
@@ -1566,33 +1569,6 @@ static void cxl_hybrid_mark_page_range(unsigned long *bitmap,
     }
 }
 
-static void cxl_hybrid_clear_page_range(unsigned long *bitmap,
-                                        const char *rbname,
-                                        ram_addr_t offset,
-                                        ram_addr_t len)
-{
-    RAMBlock *block = qemu_ram_block_by_name(rbname);
-    size_t first_page;
-    size_t npages;
-    size_t page;
-
-    if (!bitmap || !block || !len || !QEMU_IS_ALIGNED(offset, TARGET_PAGE_SIZE)) {
-        return;
-    }
-    if (!offset_in_ramblock(block, offset) ||
-        offset + len > block->used_length ||
-        !QEMU_IS_ALIGNED(len, TARGET_PAGE_SIZE)) {
-        return;
-    }
-
-    first_page = cxl_global_page_index(block, offset);
-    npages = len >> TARGET_PAGE_BITS;
-    for (page = 0; page < npages && first_page + page < cxl_state.total_pages;
-         page++) {
-        clear_bit_atomic(first_page + page, bitmap);
-    }
-}
-
 static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
                                          Error **errp)
 {
@@ -1867,13 +1843,43 @@ void cxl_hybrid_account_warm_dirty(const char *rbname, ram_addr_t offset,
 void cxl_hybrid_account_dst_page_sent(const char *rbname, ram_addr_t offset,
                                       ram_addr_t len)
 {
+    RAMBlock *block;
+    size_t first_page;
+    size_t npages;
+    size_t page;
+    uint32_t generation;
+
     if (!cxl_state.hybrid_enabled || !rbname) {
         return;
     }
 
-    cxl_hybrid_mark_page_range(cxl_state.dst_sent_bmap, rbname, offset, len);
-    cxl_hybrid_mark_page_range(cxl_state.cxl_visible_bmap, rbname, offset, len);
-    cxl_hybrid_clear_page_range(cxl_state.remaining_bmap, rbname, offset, len);
+    block = qemu_ram_block_by_name(rbname);
+    if (!block || !len || !QEMU_IS_ALIGNED(offset, TARGET_PAGE_SIZE) ||
+        !QEMU_IS_ALIGNED(len, TARGET_PAGE_SIZE) ||
+        !offset_in_ramblock(block, offset) ||
+        offset + len > block->used_length) {
+        return;
+    }
+
+    first_page = cxl_global_page_index(block, offset);
+    npages = len >> TARGET_PAGE_BITS;
+    generation = cxl_hybrid_fault_publish_generation();
+
+    for (page = 0; page < npages && first_page + page < cxl_state.total_pages;
+         page++) {
+        size_t page_idx = first_page + page;
+
+        if (cxl_state.dst_sent_bmap) {
+            set_bit_atomic(page_idx, cxl_state.dst_sent_bmap);
+        }
+        if (cxl_state.cxl_visible_bmap) {
+            set_bit_atomic(page_idx, cxl_state.cxl_visible_bmap);
+        }
+        if (cxl_state.remaining_bmap) {
+            clear_bit_atomic(page_idx, cxl_state.remaining_bmap);
+        }
+        cxl_hybrid_ctrl_set_page_visible(page_idx, generation);
+    }
 }
 
 void cxl_hybrid_warm_stats(CXLHybridWarmStats *stats)
@@ -2008,6 +2014,34 @@ static void cxl_hybrid_mark_page_remaining(size_t page_idx)
     }
 }
 
+bool cxl_hybrid_source_region_owned_by_destination_generation(
+    RAMBlock *block,
+    ram_addr_t offset,
+    uint32_t generation)
+{
+    CXLHybridFaultRegionGeometry g = { 0 };
+
+    if (!migrate_cxl_fault_resolve_uses_region() || !block) {
+        return false;
+    }
+
+    if (cxl_hybrid_fault_region_compute(block->offset, block->used_length,
+                                         block->pages_offset, offset,
+                                         cxl_state.remap_granule,
+                                         TARGET_PAGE_SIZE, &g, NULL)) {
+        return false;
+    }
+
+    return cxl_hybrid_ctrl_region_owned(g.region_index, generation);
+}
+
+bool cxl_hybrid_source_region_owned_by_destination(RAMBlock *block,
+                                                   ram_addr_t offset)
+{
+    return cxl_hybrid_source_region_owned_by_destination_generation(
+        block, offset, cxl_hybrid_fault_publish_generation());
+}
+
 static bool cxl_hybrid_published_page_ready(const char *ramblock,
                                             uint64_t guest_offset,
                                             uint32_t generation,
@@ -2109,6 +2143,62 @@ static int cxl_hybrid_copy_page_to_stable_cxl(RAMBlock *block,
     dst = (uint8_t *)cxl_state.mmap_base + cxl_offset;
     memcpy(dst, src, page_len);
     return 0;
+}
+
+static int cxl_hybrid_source_backing_write_begin(RAMBlock *block,
+                                                 ram_addr_t offset,
+                                                 size_t page_idx,
+                                                 uint32_t generation,
+                                                 bool *started,
+                                                 bool *skip_visible_owned,
+                                                 Error **errp)
+{
+    *started = false;
+    *skip_visible_owned = false;
+
+    if (!migrate_cxl_fault_resolve_uses_region()) {
+        return 0;
+    }
+
+    if (cxl_hybrid_source_region_owned_by_destination_generation(
+            block, offset, generation)) {
+        if (cxl_hybrid_ctrl_page_visible(page_idx, generation)) {
+            *skip_visible_owned = true;
+            return 0;
+        }
+        error_setg(errp,
+                   "CXL hybrid source write refused for destination-owned "
+                   "invisible region page %s/0x%" PRIx64,
+                   block->idstr, offset);
+        return -EACCES;
+    }
+
+    cxl_hybrid_ctrl_source_write_begin();
+    *started = true;
+
+    if (cxl_hybrid_source_region_owned_by_destination_generation(
+            block, offset, generation)) {
+        cxl_hybrid_ctrl_source_write_end();
+        *started = false;
+        if (cxl_hybrid_ctrl_page_visible(page_idx, generation)) {
+            *skip_visible_owned = true;
+            return 0;
+        }
+        error_setg(errp,
+                   "CXL hybrid source write raced with destination-owned "
+                   "invisible region page %s/0x%" PRIx64,
+                   block->idstr, offset);
+        return -EACCES;
+    }
+
+    return 0;
+}
+
+static void cxl_hybrid_source_backing_write_end(bool started)
+{
+    if (started) {
+        cxl_hybrid_ctrl_source_write_end();
+    }
 }
 
 void cxl_hybrid_get_publish_stats(CXLHybridPublishStats *stats)
@@ -2364,6 +2454,8 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
     size_t page_idx;
     bool source_remapped;
     bool already_ready;
+    bool skip_ready;
+    bool source_write_started = false;
     int ret;
 
     qatomic_inc(&cxl_state.warm_publish_pages);
@@ -2431,9 +2523,21 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
     trace_cxl_hybrid_publish_begin(ramblock, guest_offset, *cxl_offsetp,
                                    generation, source_remapped);
 
-    if (!source_remapped && !already_ready) {
+    skip_ready = source_remapped || already_ready;
+    if (!skip_ready) {
+        ret = cxl_hybrid_source_backing_write_begin(
+            block, guest_offset, page_idx, generation, &source_write_started,
+            &skip_ready, errp);
+        if (ret) {
+            qatomic_inc(&cxl_state.publish_failures);
+            return ret;
+        }
+    }
+
+    if (!skip_ready) {
         ret = cxl_hybrid_copy_page_to_stable_cxl(block, guest_offset,
                                                  *cxl_offsetp, page_len, errp);
+        cxl_hybrid_source_backing_write_end(source_write_started);
         if (ret) {
             qatomic_inc(&cxl_state.publish_failures);
             return ret;
@@ -2442,6 +2546,7 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
                     page_len >> TARGET_PAGE_BITS);
         qatomic_add(&cxl_state.publish_copied_bytes, page_len);
     } else {
+        cxl_hybrid_source_backing_write_end(source_write_started);
         qatomic_inc(&cxl_state.publish_skip_ready);
         trace_cxl_hybrid_publish_skip_ready(ramblock, guest_offset, *cxl_offsetp,
                                             generation);
@@ -2561,6 +2666,77 @@ int cxl_hybrid_handle_publish_request(const char *ramblock,
     return 0;
 }
 
+int cxl_hybrid_publish_fault_region_request_core(uint64_t first_page,
+                                                 uint32_t nr_pages,
+                                                 uint32_t generation,
+                                                 uint64_t req_recv_ns,
+                                                 Error **errp)
+{
+    uint64_t start_ns = cxl_now_ns();
+    int published = 0;
+    uint32_t page;
+
+    (void)req_recv_ns;
+
+    if (!nr_pages || first_page >= cxl_state.total_pages ||
+        nr_pages > cxl_state.total_pages - first_page) {
+        error_setg(errp,
+                   "CXL hybrid fault region request out of range "
+                   "(first-page=%" PRIu64 " pages=%u total-pages=%zu)",
+                   first_page, nr_pages, cxl_state.total_pages);
+        return -EINVAL;
+    }
+
+    for (page = 0; page < nr_pages; page++) {
+        uint64_t page_index = first_page + page;
+        RAMBlock *block;
+        ram_addr_t block_offset;
+        uint64_t cxl_offset;
+        int ret;
+
+        if (cxl_hybrid_ctrl_page_visible(page_index, generation)) {
+            continue;
+        }
+
+        if (!cxl_hybrid_lookup_global_page(page_index, &block,
+                                           &block_offset)) {
+            error_setg(errp,
+                       "CXL hybrid fault region page is unresolved "
+                       "(page=%" PRIu64 ")",
+                       page_index);
+            return -ENOENT;
+        }
+
+        if (cxl_hybrid_source_region_owned_by_destination_generation(
+                block, block_offset, generation)) {
+            if (!cxl_hybrid_ctrl_page_visible(page_index, generation)) {
+                error_setg(errp,
+                           "CXL hybrid region request page %" PRIu64
+                           " is destination-owned before becoming visible",
+                           page_index);
+                return -EACCES;
+            }
+            continue;
+        }
+
+        ret = cxl_hybrid_publish_page_to_cxl(
+            qemu_ram_get_idstr(block), block_offset, TARGET_PAGE_SIZE,
+            generation, CXL_HYBRID_PUBLISH_SOURCE_FAULT_PRIMARY,
+            &cxl_offset, errp);
+        if (ret) {
+            return ret;
+        }
+        published++;
+    }
+
+    qatomic_inc(&cxl_state.region_publish_requests);
+    qatomic_add(&cxl_state.region_publish_pages, published);
+    qatomic_add(&cxl_state.region_publish_time_ns, cxl_now_ns() - start_ns);
+    trace_cxl_hybrid_region_publish_complete(first_page, nr_pages, published,
+                                             generation);
+    return 0;
+}
+
 int cxl_hybrid_publish_fault_request_core(const char *ramblock,
                                           uint64_t guest_offset,
                                           uint32_t page_len,
@@ -2629,7 +2805,9 @@ int cxl_hybrid_publish_fault_request_core(const char *ramblock,
                              &cxl_state.max_fault_publish_primary_time_ns,
                              primary_time_ns);
 
-    if (emit_burst) {
+    if (emit_burst &&
+        cxl_hybrid_fault_resolve_mode_emits_burst(
+            migrate_cxl_fault_resolve_mode())) {
         burst_start_ns = cxl_now_ns();
         cxl_hybrid_publish_fault_burst(ramblock, guest_offset, page_len,
                                        generation, ready_consumer, errp);
