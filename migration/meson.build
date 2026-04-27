@@ -6,6 +6,7 @@ migration_files = files(
   'cxl-hybrid-metadata.c',
   'migration-stats.c',
   'page_cache.c',
+  'postcopy.c',
   'xbzrle.c',
   'vmstate-types.c',
   'vmstate.c',

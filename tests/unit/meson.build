@@ -126,6 +126,7 @@ if have_system
   tests += {
     'test-cxl-hybrid-control': [migration],
     'test-cxl-hybrid-region': [migration],
+    'test-migration-postcopy': [migration],
     'ptimer-test': ['ptimer-test-stubs.c', meson.project_source_root() / 'hw/core/ptimer.c'],
     'test-iov': [],
     'test-migration-downtime': [migration],
