@@ -4370,6 +4370,7 @@ static bool handle_zero_mapped_ram(RAMBlock *block, unsigned long from_bit_idx,
 
 static bool read_ramblock_mapped_ram(QEMUFile *f, RAMBlock *block,
                                      long num_pages, unsigned long *bitmap,
+                                     uint64_t *loaded_bytes,
                                      Error **errp)
 {
     ERRP_GUARD();
@@ -4415,6 +4416,9 @@ static bool read_ramblock_mapped_ram(QEMUFile *f, RAMBlock *block,
             if (!read) {
                 goto err;
             }
+            if (loaded_bytes) {
+                *loaded_bytes += read;
+            }
             offset += read;
             unread -= read;
         }
@@ -4436,7 +4440,8 @@ err:
 }
 
 static bool load_ramblock_mapped_ram(QEMUFile *f, RAMBlock *block,
-                                     ram_addr_t length, Error **errp)
+                                     ram_addr_t length, uint64_t *set_pages,
+                                     uint64_t *loaded_bytes, Error **errp)
 {
     QEMUFile *mapped_file = mapped_ram_load_file(f);
     g_autofree unsigned long *bitmap = NULL;
@@ -4453,7 +4458,12 @@ static bool load_ramblock_mapped_ram(QEMUFile *f, RAMBlock *block,
         return false;
     }
 
-    return read_ramblock_mapped_ram(f, block, num_pages, bitmap, errp);
+    if (set_pages) {
+        *set_pages = bitmap_count_one(bitmap, num_pages);
+    }
+
+    return read_ramblock_mapped_ram(f, block, num_pages, bitmap, loaded_bytes,
+                                    errp);
 }
 
 static void parse_ramblock_mapped_ram(QEMUFile *f, RAMBlock *block,
@@ -4493,7 +4503,7 @@ static void parse_ramblock_mapped_ram(QEMUFile *f, RAMBlock *block,
         return;
     }
 
-    if (!load_ramblock_mapped_ram(f, block, length, errp)) {
+    if (!load_ramblock_mapped_ram(f, block, length, NULL, NULL, errp)) {
         return;
     }
 
@@ -4507,19 +4517,66 @@ static int load_all_mapped_ram(QEMUFile *f)
 {
     RAMBlock *block;
     Error *local_err = NULL;
+    uint64_t total_set_pages = 0;
+    uint64_t total_loaded_bytes = 0;
+    int64_t start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+    if (cxl_use_mapped_ram_backing()) {
+        trace_migration_postcopy_timeline("dst-load-all-mapped-begin",
+                                          start_ns, postcopy_state_get(),
+                                          0, UINT64_MAX, false);
+    }
 
     RAMBLOCK_FOREACH_MIGRATABLE(block) {
+        uint64_t set_pages = 0;
+        uint64_t loaded_bytes = 0;
+        int64_t block_start_ns;
+
         if (block->bitmap_offset == 0 && block->pages_offset == 0) {
             continue;
         }
 
+        block_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (!load_ramblock_mapped_ram(f, block, block->used_length,
+                                      &set_pages, &loaded_bytes,
                                       &local_err)) {
             error_report_err(local_err);
             return -EINVAL;
         }
+        total_set_pages += set_pages;
+        total_loaded_bytes += loaded_bytes;
+        if (cxl_use_mapped_ram_backing()) {
+            trace_migration_postcopy_timeline(
+                "dst-load-ramblock-mapped-set-pages",
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                postcopy_state_get(), 0, set_pages, false);
+            trace_migration_postcopy_timeline(
+                "dst-load-ramblock-mapped-loaded-bytes",
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                postcopy_state_get(), 0, loaded_bytes, false);
+            int64_t block_end_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+            trace_migration_postcopy_timeline(
+                "dst-load-ramblock-mapped-time-ns", block_end_ns,
+                postcopy_state_get(), 0, block_end_ns - block_start_ns, false);
+        }
     }
 
+    if (cxl_use_mapped_ram_backing()) {
+        trace_migration_postcopy_timeline("dst-load-all-mapped-set-pages",
+                                          qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                                          postcopy_state_get(), 0,
+                                          total_set_pages, false);
+        trace_migration_postcopy_timeline(
+            "dst-load-all-mapped-loaded-bytes",
+            qemu_clock_get_ns(QEMU_CLOCK_REALTIME), postcopy_state_get(), 0,
+            total_loaded_bytes, false);
+        int64_t end_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+        trace_migration_postcopy_timeline("dst-load-all-mapped-done", end_ns,
+                                          postcopy_state_get(), 0,
+                                          end_ns - start_ns, false);
+    }
     return 0;
 }
 
@@ -4758,6 +4815,13 @@ static int ram_load_precopy(QEMUFile *f)
         case RAM_SAVE_FLAG_EOS:
             /* normal exit */
             if (migrate_mapped_ram() && cxl_use_mapped_ram_backing()) {
+                if (migrate_cxl_hybrid()) {
+                    trace_migration_postcopy_timeline(
+                        "dst-load-all-mapped-skip-hybrid",
+                        qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                        postcopy_state_get(), 0, UINT64_MAX, false);
+                    break;
+                }
                 ret = load_all_mapped_ram(f);
                 break;
             }

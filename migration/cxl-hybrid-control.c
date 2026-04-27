@@ -989,7 +989,7 @@ int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
             return -EINVAL;
         }
 
-        g_usleep(50);
+        cpu_relax();
     }
 
     return 0;

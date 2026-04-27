@@ -28,6 +28,7 @@
 #include "migration/cpr.h"
 #include "migration/global_state.h"
 #include "migration/misc.h"
+#include "migration/postcopy.h"
 #include "migration.h"
 #include "migration-stats.h"
 #include "savevm.h"
@@ -69,6 +70,7 @@
     [elem] = NOTIFIER_WITH_RETURN_LIST_INITIALIZER((array)[elem])
 
 #define INMIGRATE_DEFAULT_EXIT_ON_ERROR true
+#define POSTCOPY_PACKAGE_WAIT_POLL_MS 1
 
 static GSList *migration_state_notifiers[MIG_MODE__MAX];
 
@@ -3686,6 +3688,31 @@ typedef enum {
     MIG_ITERATE_BREAK,          /* Break the loop */
 } MigIterateState;
 
+static MigIterateState migration_wait_for_postcopy_package_loaded(
+    MigrationState *s, uint64_t pending_size)
+{
+    migration_trace_postcopy_timeline(s, "device-wait-early-resume",
+                                      pending_size);
+
+    while (!s->postcopy_package_loaded && !migrate_has_error(s)) {
+        qemu_sem_timedwait(&s->rp_state.rp_sem,
+                           POSTCOPY_PACKAGE_WAIT_POLL_MS);
+    }
+
+    if (!s->postcopy_package_loaded) {
+        return MIG_ITERATE_RESUME;
+    }
+
+    qemu_event_wait(&s->postcopy_package_loaded_event);
+    migration_trace_postcopy_timeline(s, "device-wait-done",
+                                      pending_size);
+    migrate_set_state(&s->state, MIGRATION_STATUS_POSTCOPY_DEVICE,
+                      MIGRATION_STATUS_POSTCOPY_ACTIVE);
+    migration_trace_postcopy_timeline(s, "state-postcopy-active",
+                                      pending_size);
+    return MIG_ITERATE_SKIP;
+}
+
 /*
  * Return true if continue to the next iteration directly, false
  * otherwise.
@@ -3718,6 +3745,18 @@ static MigIterateState migration_iteration_run(MigrationState *s)
          * POSTCOPY_ACTIVE it means switchover already happened.
          */
         complete_ready = !pending_size;
+        if (migration_postcopy_device_should_wait_for_package_loaded(
+                s->state, migrate_cxl_hybrid(),
+                s->postcopy_package_loaded)) {
+            ret = migration_wait_for_postcopy_package_loaded(s,
+                                                             pending_size);
+            if (ret != MIG_ITERATE_RESUME) {
+                goto out;
+            }
+        }
+        if (ret == MIG_ITERATE_RESUME && migrate_has_error(s)) {
+            goto out;
+        }
         if (s->state == MIGRATION_STATUS_POSTCOPY_DEVICE &&
             (s->postcopy_package_loaded || complete_ready)) {
             /*

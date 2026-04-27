@@ -305,10 +305,8 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size);
 static void cxl_process_pending_remaps_bh(void *opaque);
 
 #define CXL_BACKING_ALIGN_FALLBACK (2 * 1024 * 1024)
-#define CXL_REMAP_GRANULE_DEFAULT (64 * 1024)
 #define CXL_ROLLBACK_COPY_CHUNK (2 * 1024 * 1024)
 #define CXL_WRITE_REDIRECT_ENV "QEMU_CXL_WRITE_REDIRECT"
-#define CXL_REMAP_GRANULE_ENV "QEMU_CXL_REMAP_GRANULE"
 #define CXL_HYBRID_WARM_DISABLE_ENV "QEMU_CXL_HYBRID_WARM_DISABLE"
 /*
  * migration/ram.c currently aligns mapped-ram page offsets to 1MiB (or higher)
@@ -850,6 +848,8 @@ int cxl_hybrid_try_resolve_fault(MigrationIncomingState *mis, RAMBlock *rb,
     size_t pagesize;
     uint64_t read_start_ns;
     uint64_t read_time_ns;
+    uint64_t place_start_ns;
+    uint64_t place_time_ns;
     int ret;
 
     if (!rb || !place_page) {
@@ -888,7 +888,10 @@ int cxl_hybrid_try_resolve_fault(MigrationIncomingState *mis, RAMBlock *rb,
     trace_cxl_hybrid_fault_hit(ramblock, offset, pagesize, read_time_ns);
 
     host = ramblock_ptr(rb, offset);
+    place_start_ns = cxl_now_ns();
     ret = place_page(mis, host, page, rb);
+    place_time_ns = cxl_now_ns() - place_start_ns;
+    trace_cxl_hybrid_fault_place(ramblock, offset, place_time_ns, ret);
     if (ret) {
         cxl_hybrid_dst_staging_account_fault_place_result(false);
         error_setg(errp, "CXL hybrid fault placement failed: %d", ret);
