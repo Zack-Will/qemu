@@ -85,7 +85,8 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
                                           RAMBlock *rb,
                                           void *host_addr,
                                           size_t len,
-                                          void *fault_host_addr);
+                                          void *fault_host_addr,
+                                          bool *receivedp);
 
 /* The current postcopy state is read/set by postcopy_state_get/set
  * which update it atomically.

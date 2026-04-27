@@ -1691,7 +1691,8 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
                                           RAMBlock *rb,
                                           void *host_addr,
                                           size_t len,
-                                          void *fault_host_addr)
+                                          void *fault_host_addr,
+                                          bool *receivedp)
 {
     size_t pagesize;
     uintptr_t start, end, rb_start, rb_end, addr;
@@ -1699,6 +1700,9 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
     bool fault_blocktime_ended = false;
     int ret;
 
+    if (receivedp) {
+        *receivedp = false;
+    }
     if (!mis || !rb || !host_addr || !len) {
         return -EINVAL;
     }
@@ -1765,6 +1769,9 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
         mark_postcopy_blocktime_end((uintptr_t)fault_host_addr);
     }
     qemu_mutex_unlock(&mis->page_request_mutex);
+    if (receivedp) {
+        *receivedp = true;
+    }
 
     return postcopy_notify_shared_wake(rb,
         qemu_ram_block_host_offset(rb, notify_host_addr));
@@ -1893,7 +1900,8 @@ int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
                                           RAMBlock *rb,
                                           void *host_addr,
                                           size_t len,
-                                          void *fault_host_addr)
+                                          void *fault_host_addr,
+                                          bool *receivedp)
 {
     g_assert_not_reached();
 }

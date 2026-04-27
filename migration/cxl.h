@@ -10,6 +10,7 @@
 
 #include "qemu/typedefs.h"
 #include "qapi/qapi-types-migration.h"
+#include "qemu/thread.h"
 #include "io/channel.h"
 #include "io/task.h"
 #include "channel.h"
@@ -196,6 +197,17 @@ typedef struct CXLHybridDstStagingStats {
     uint64_t fault_place_failures;
 } CXLHybridDstStagingStats;
 
+typedef struct CXLHybridDstRegionState {
+    unsigned long *remapped_bmap;
+    unsigned long *copy_owned_bmap;
+    unsigned long *remapping_bmap;
+    QemuMutex lock;
+    QemuCond cond;
+    uint64_t total_regions;
+    bool lock_ready;
+    bool cond_ready;
+} CXLHybridDstRegionState;
+
 void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta);
 void cxl_hybrid_warm_page_cleanup(CXLHybridWarmPage *page);
 void cxl_hybrid_warm_desc_cleanup(CXLHybridWarmDescriptor *desc);
@@ -328,6 +340,30 @@ int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
                                     uint64_t target_page_size,
                                     CXLHybridFaultRegionGeometry *out,
                                     Error **errp);
+void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,
+                                               uint64_t total_regions);
+void cxl_hybrid_dst_region_state_destroy_for_test(
+    CXLHybridDstRegionState *state);
+bool cxl_hybrid_dst_region_copy_owned(const CXLHybridDstRegionState *state,
+                                      uint64_t region_index);
+bool cxl_hybrid_dst_region_remapped(const CXLHybridDstRegionState *state,
+                                    uint64_t region_index);
+bool cxl_hybrid_dst_region_remapping(const CXLHybridDstRegionState *state,
+                                     uint64_t region_index);
+void cxl_hybrid_dst_region_wait_not_remapping(
+    CXLHybridDstRegionState *state,
+    uint64_t region_index);
+void cxl_hybrid_dst_region_mark_copy_owned(CXLHybridDstRegionState *state,
+                                           uint64_t region_index);
+bool cxl_hybrid_dst_region_try_mark_copy_owned(CXLHybridDstRegionState *state,
+                                               uint64_t region_index);
+bool cxl_hybrid_dst_region_can_remap(const CXLHybridDstRegionState *state,
+                                     uint64_t region_index);
+bool cxl_hybrid_dst_region_try_begin_remap(CXLHybridDstRegionState *state,
+                                           uint64_t region_index);
+void cxl_hybrid_dst_region_finish_remap(CXLHybridDstRegionState *state,
+                                        uint64_t region_index,
+                                        bool success);
 
 void cxl_cleanup_outgoing_migration(void);
 

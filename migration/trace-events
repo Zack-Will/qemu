@@ -88,6 +88,7 @@ cxl_hybrid_region_publish_complete(uint64_t first_page, uint32_t nr_pages, int p
 cxl_hybrid_region_wait_begin(uint64_t first_page, uint32_t nr_pages, uint32_t generation) "first-page=%" PRIu64 " pages=%u gen=%u"
 cxl_hybrid_region_wait_complete(uint64_t first_page, uint32_t nr_pages, uint32_t generation, int ret) "first-page=%" PRIu64 " pages=%u gen=%u ret=%d"
 cxl_hybrid_region_owned_set(uint64_t region_index, uint32_t generation) "region=%" PRIu64 " gen=%u"
+cxl_hybrid_dst_region_remap(const char *ramblock, uint64_t offset, uint64_t len, uint64_t cxl_offset, uint64_t region_index) "%s/0x%" PRIx64 " len=%" PRIu64 " cxl=0x%" PRIx64 " region=%" PRIu64
 cxl_hybrid_ram_stream_skip_dst_owned(const char *ramblock, uint64_t offset) "%s/0x%" PRIx64
 cxl_hybrid_iteration_profile(uint32_t phase, uint64_t ram_pages, uint64_t staged_delta, uint64_t staged_pages, uint64_t total_pages, uint64_t warm_push_pages, uint64_t fault_primary_pages, uint64_t fault_burst_pages, uint64_t publish_ready_pages) "phase=%u ram_pages=%" PRIu64 " staged_delta=%" PRIu64 " staged_pages=%" PRIu64 " total_pages=%" PRIu64 " warm_push_pages=%" PRIu64 " fault_primary_pages=%" PRIu64 " fault_burst_pages=%" PRIu64 " publish_ready_pages=%" PRIu64
 cxl_hybrid_ctrl_request_worker_start(void) ""

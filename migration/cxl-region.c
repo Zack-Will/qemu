@@ -8,6 +8,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bitmap.h"
 #include "qemu/host-utils.h"
 #include "qapi/error.h"
 #include "migration/cxl.h"
@@ -16,6 +17,212 @@ bool cxl_hybrid_fault_resolve_mode_emits_burst(
     CXLHybridFaultResolveMode mode)
 {
     return mode == CXL_HYBRID_FAULT_RESOLVE_MODE_COPY;
+}
+
+static bool cxl_hybrid_dst_region_index_valid(
+    const CXLHybridDstRegionState *state,
+    uint64_t region_index)
+{
+    return state && state->remapped_bmap && state->copy_owned_bmap &&
+           state->remapping_bmap && region_index < state->total_regions;
+}
+
+void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,
+                                               uint64_t total_regions)
+{
+    if (!state) {
+        return;
+    }
+
+    cxl_hybrid_dst_region_state_destroy_for_test(state);
+    qemu_mutex_init(&state->lock);
+    qemu_cond_init(&state->cond);
+    state->lock_ready = true;
+    state->cond_ready = true;
+    state->total_regions = total_regions;
+    if (total_regions) {
+        state->remapped_bmap = bitmap_new(total_regions);
+        state->copy_owned_bmap = bitmap_new(total_regions);
+        state->remapping_bmap = bitmap_new(total_regions);
+    }
+}
+
+void cxl_hybrid_dst_region_state_destroy_for_test(
+    CXLHybridDstRegionState *state)
+{
+    bool lock_ready;
+    bool cond_ready;
+
+    if (!state) {
+        return;
+    }
+
+    lock_ready = state->lock_ready;
+    cond_ready = state->cond_ready;
+    if (lock_ready) {
+        qemu_mutex_lock(&state->lock);
+    }
+    g_free(state->remapped_bmap);
+    g_free(state->copy_owned_bmap);
+    g_free(state->remapping_bmap);
+    state->remapped_bmap = NULL;
+    state->copy_owned_bmap = NULL;
+    state->remapping_bmap = NULL;
+    state->total_regions = 0;
+    if (lock_ready) {
+        state->lock_ready = false;
+        state->cond_ready = false;
+        qemu_mutex_unlock(&state->lock);
+        qemu_mutex_destroy(&state->lock);
+    }
+    if (cond_ready) {
+        qemu_cond_destroy(&state->cond);
+    }
+    memset(state, 0, sizeof(*state));
+}
+
+bool cxl_hybrid_dst_region_copy_owned(const CXLHybridDstRegionState *state,
+                                      uint64_t region_index)
+{
+    CXLHybridDstRegionState *mutable_state = (CXLHybridDstRegionState *)state;
+    bool owned;
+
+    if (!cxl_hybrid_dst_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    qemu_mutex_lock(&mutable_state->lock);
+    owned = test_bit(region_index, state->copy_owned_bmap);
+    qemu_mutex_unlock(&mutable_state->lock);
+    return owned;
+}
+
+bool cxl_hybrid_dst_region_remapped(const CXLHybridDstRegionState *state,
+                                    uint64_t region_index)
+{
+    CXLHybridDstRegionState *mutable_state = (CXLHybridDstRegionState *)state;
+    bool remapped;
+
+    if (!cxl_hybrid_dst_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    qemu_mutex_lock(&mutable_state->lock);
+    remapped = test_bit(region_index, state->remapped_bmap);
+    qemu_mutex_unlock(&mutable_state->lock);
+    return remapped;
+}
+
+bool cxl_hybrid_dst_region_remapping(const CXLHybridDstRegionState *state,
+                                     uint64_t region_index)
+{
+    CXLHybridDstRegionState *mutable_state = (CXLHybridDstRegionState *)state;
+    bool remapping;
+
+    if (!cxl_hybrid_dst_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    qemu_mutex_lock(&mutable_state->lock);
+    remapping = test_bit(region_index, state->remapping_bmap);
+    qemu_mutex_unlock(&mutable_state->lock);
+    return remapping;
+}
+
+void cxl_hybrid_dst_region_wait_not_remapping(
+    CXLHybridDstRegionState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_dst_region_index_valid(state, region_index)) {
+        return;
+    }
+
+    qemu_mutex_lock(&state->lock);
+    while (test_bit(region_index, state->remapping_bmap)) {
+        qemu_cond_wait(&state->cond, &state->lock);
+    }
+    qemu_mutex_unlock(&state->lock);
+}
+
+void cxl_hybrid_dst_region_mark_copy_owned(CXLHybridDstRegionState *state,
+                                           uint64_t region_index)
+{
+    cxl_hybrid_dst_region_try_mark_copy_owned(state, region_index);
+}
+
+bool cxl_hybrid_dst_region_try_mark_copy_owned(CXLHybridDstRegionState *state,
+                                               uint64_t region_index)
+{
+    bool marked = false;
+
+    if (!cxl_hybrid_dst_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    qemu_mutex_lock(&state->lock);
+    if (!test_bit(region_index, state->copy_owned_bmap) &&
+        !test_bit(region_index, state->remapped_bmap) &&
+        !test_bit(region_index, state->remapping_bmap)) {
+        set_bit(region_index, state->copy_owned_bmap);
+        marked = true;
+    }
+    qemu_mutex_unlock(&state->lock);
+    return marked;
+}
+
+bool cxl_hybrid_dst_region_can_remap(const CXLHybridDstRegionState *state,
+                                     uint64_t region_index)
+{
+    CXLHybridDstRegionState *mutable_state = (CXLHybridDstRegionState *)state;
+    bool can_remap;
+
+    if (!cxl_hybrid_dst_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    qemu_mutex_lock(&mutable_state->lock);
+    can_remap = !test_bit(region_index, state->copy_owned_bmap) &&
+                !test_bit(region_index, state->remapped_bmap) &&
+                !test_bit(region_index, state->remapping_bmap);
+    qemu_mutex_unlock(&mutable_state->lock);
+    return can_remap;
+}
+
+bool cxl_hybrid_dst_region_try_begin_remap(CXLHybridDstRegionState *state,
+                                           uint64_t region_index)
+{
+    bool reserved = false;
+
+    if (!cxl_hybrid_dst_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    qemu_mutex_lock(&state->lock);
+    if (!test_bit(region_index, state->copy_owned_bmap) &&
+        !test_bit(region_index, state->remapped_bmap) &&
+        !test_bit(region_index, state->remapping_bmap)) {
+        set_bit(region_index, state->remapping_bmap);
+        reserved = true;
+    }
+    qemu_mutex_unlock(&state->lock);
+    return reserved;
+}
+
+void cxl_hybrid_dst_region_finish_remap(CXLHybridDstRegionState *state,
+                                        uint64_t region_index,
+                                        bool success)
+{
+    if (!cxl_hybrid_dst_region_index_valid(state, region_index)) {
+        return;
+    }
+
+    qemu_mutex_lock(&state->lock);
+    clear_bit(region_index, state->remapping_bmap);
+    if (success) {
+        set_bit(region_index, state->remapped_bmap);
+    }
+    qemu_cond_broadcast(&state->cond);
+    qemu_mutex_unlock(&state->lock);
 }
 
 int cxl_hybrid_fault_region_compute(uint64_t block_global_base,

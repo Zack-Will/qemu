@@ -177,6 +177,42 @@ static void test_region_mode_disables_fault_burst(void)
         CXL_HYBRID_FAULT_RESOLVE_MODE_COPY));
 }
 
+static void test_region_fallback_copy_poisons_region(void)
+{
+    CXLHybridDstRegionState state = { 0 };
+
+    cxl_hybrid_dst_region_state_init_for_test(&state, 8);
+    g_assert_false(cxl_hybrid_dst_region_copy_owned(&state, 2));
+    cxl_hybrid_dst_region_mark_copy_owned(&state, 2);
+    g_assert_true(cxl_hybrid_dst_region_copy_owned(&state, 2));
+    g_assert_false(cxl_hybrid_dst_region_can_remap(&state, 2));
+    cxl_hybrid_dst_region_state_destroy_for_test(&state);
+}
+
+static void test_region_remap_reservation_blocks_copy_poison(void)
+{
+    CXLHybridDstRegionState state = { 0 };
+
+    cxl_hybrid_dst_region_state_init_for_test(&state, 8);
+    g_assert_true(cxl_hybrid_dst_region_try_begin_remap(&state, 2));
+    g_assert_false(cxl_hybrid_dst_region_can_remap(&state, 2));
+    g_assert_false(cxl_hybrid_dst_region_try_mark_copy_owned(&state, 2));
+    cxl_hybrid_dst_region_finish_remap(&state, 2, true);
+    g_assert_false(cxl_hybrid_dst_region_copy_owned(&state, 2));
+    g_assert_false(cxl_hybrid_dst_region_can_remap(&state, 2));
+    cxl_hybrid_dst_region_state_destroy_for_test(&state);
+}
+
+static void test_region_copy_poison_blocks_remap_reservation(void)
+{
+    CXLHybridDstRegionState state = { 0 };
+
+    cxl_hybrid_dst_region_state_init_for_test(&state, 8);
+    g_assert_true(cxl_hybrid_dst_region_try_mark_copy_owned(&state, 2));
+    g_assert_false(cxl_hybrid_dst_region_try_begin_remap(&state, 2));
+    cxl_hybrid_dst_region_state_destroy_for_test(&state);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -202,5 +238,11 @@ int main(int argc, char **argv)
                     test_region_geometry_rejects_misaligned_block_offset);
     g_test_add_func("/cxl/region/mode-disables-fault-burst",
                     test_region_mode_disables_fault_burst);
+    g_test_add_func("/cxl/region/fallback-copy-poisons-region",
+                    test_region_fallback_copy_poisons_region);
+    g_test_add_func("/cxl/region/remap-reservation-blocks-copy-poison",
+                    test_region_remap_reservation_blocks_copy_poison);
+    g_test_add_func("/cxl/region/copy-poison-blocks-remap-reservation",
+                    test_region_copy_poison_blocks_remap_reservation);
     return g_test_run();
 }
