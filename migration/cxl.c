@@ -1767,6 +1767,24 @@ void cxl_populate_migration_info(MigrationInfo *info)
     info->x_cxl->dst_fault_read_time_ns = dst_stats.fault_read_time_ns;
     info->x_cxl->dst_fault_place_successes = dst_stats.fault_place_successes;
     info->x_cxl->dst_fault_place_failures = dst_stats.fault_place_failures;
+    info->x_cxl->dst_region_map_attempts =
+        qatomic_read(&cxl_state.dst_region_map_attempts);
+    info->x_cxl->dst_region_map_successes =
+        qatomic_read(&cxl_state.dst_region_map_successes);
+    info->x_cxl->dst_region_map_failures =
+        qatomic_read(&cxl_state.dst_region_map_failures);
+    info->x_cxl->dst_region_map_time_ns =
+        qatomic_read(&cxl_state.dst_region_map_time_ns);
+    info->x_cxl->dst_region_wake_failures =
+        qatomic_read(&cxl_state.dst_region_wake_failures);
+    info->x_cxl->dst_region_wait_samples =
+        qatomic_read(&cxl_state.dst_region_wait_samples);
+    info->x_cxl->dst_region_wait_time_ns =
+        qatomic_read(&cxl_state.dst_region_wait_time_ns);
+    info->x_cxl->max_dst_region_wait_time_ns =
+        qatomic_read(&cxl_state.max_dst_region_wait_time_ns);
+    info->x_cxl->dst_region_fallback_copies =
+        qatomic_read(&cxl_state.dst_region_fallback_copies);
     info->x_cxl->staged_pages = cxl_hybrid_current_staged_pages();
     if (cxl_state.total_pages) {
         info->x_cxl->staged_pages_percent =
@@ -1803,6 +1821,12 @@ void cxl_populate_migration_info(MigrationInfo *info)
         qatomic_read(&cxl_state.fault_publish_waits);
     info->x_cxl->fault_publish_wait_time_ns =
         qatomic_read(&cxl_state.fault_publish_wait_time_ns);
+    info->x_cxl->region_publish_requests =
+        qatomic_read(&cxl_state.region_publish_requests);
+    info->x_cxl->region_publish_pages =
+        qatomic_read(&cxl_state.region_publish_pages);
+    info->x_cxl->region_publish_time_ns =
+        qatomic_read(&cxl_state.region_publish_time_ns);
     info->x_cxl->fault_publish_primary_samples =
         qatomic_read(&cxl_state.fault_publish_primary_samples);
     info->x_cxl->fault_publish_primary_time_ns =

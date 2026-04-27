@@ -70,6 +70,7 @@ cxl_hybrid_warm_page_skip_unstaged(const char *ramblock, uint64_t offset) "%s of
 cxl_hybrid_warm_page_queued(const char *ramblock, uint64_t offset) "%s offset=0x%" PRIx64
 cxl_hybrid_phase_transition(uint32_t old_phase, uint32_t new_phase, uint32_t reason, uint64_t iteration) "old=%u new=%u reason=%u iteration=%" PRIu64
 cxl_hybrid_fault_hit(const char *ramblock, uint64_t offset, size_t len, uint64_t read_time_ns) "%s offset=0x%" PRIx64 " len=%zu read_time_ns=%" PRIu64
+cxl_hybrid_fault_place(const char *ramblock, uint64_t offset, uint64_t place_time_ns, int ret) "%s offset=0x%" PRIx64 " place_time_ns=%" PRIu64 " ret=%d"
 cxl_hybrid_fault_miss(const char *ramblock, uint64_t offset) "%s offset=0x%" PRIx64
 cxl_hybrid_publish_begin(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation, bool remapped) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u remapped=%d"
 cxl_hybrid_publish_complete(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation, bool copied) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u copied=%d"

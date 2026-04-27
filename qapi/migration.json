@@ -571,6 +571,33 @@
 # @dst-fault-place-failures: number of failed guest RAM placements
 #     after reading a page from destination local CXL staging
 #
+# @dst-region-map-attempts: number of destination-side region remap
+#     attempts while resolving CXL hybrid faults
+#
+# @dst-region-map-successes: number of successful destination-side
+#     region remaps while resolving CXL hybrid faults
+#
+# @dst-region-map-failures: number of failed destination-side region
+#     remap attempts
+#
+# @dst-region-map-time-ns: cumulative nanoseconds spent in
+#     destination-side region `mmap(MAP_FIXED)` calls
+#
+# @dst-region-wake-failures: number of failures while marking a
+#     remapped destination region received and waking fault waiters
+#
+# @dst-region-wait-samples: number of destination-side region-visible
+#     waits measured while resolving CXL hybrid faults
+#
+# @dst-region-wait-time-ns: cumulative nanoseconds spent waiting for
+#     full region visibility before destination remap
+#
+# @max-dst-region-wait-time-ns: maximum nanoseconds observed in a
+#     single destination-side region-visible wait
+#
+# @dst-region-fallback-copies: number of faults that poisoned a region
+#     for copy fallback in region-remap-fallback-copy mode
+#
 # @staged-pages: number of guest pages known to be staged in the
 #     source-side CXL backing
 #
@@ -624,6 +651,15 @@
 # @fault-publish-wait-time-ns: cumulative nanoseconds spent
 #     waiting for warm-publish completion in destination
 #     fault handling
+#
+# @region-publish-requests: number of source-side full-region publish
+#     requests handled for strict region-remap faults
+#
+# @region-publish-pages: number of pages requested by source-side
+#     full-region publish handling
+#
+# @region-publish-time-ns: cumulative nanoseconds spent handling
+#     source-side full-region publish requests
 #
 # @fault-publish-primary-samples: number of source-side primary fault
 #     publish measurements recorded before any burst work
@@ -778,7 +814,12 @@
 #     @dst-fault-hits, @dst-fault-misses,
 #     @dst-fault-read-bytes, @dst-fault-read-time-ns,
 #     @dst-fault-place-successes,
-#     @dst-fault-place-failures, @staged-pages,
+#     @dst-fault-place-failures,
+#     @dst-region-map-attempts, @dst-region-map-successes,
+#     @dst-region-map-failures, @dst-region-map-time-ns,
+#     @dst-region-wake-failures, @dst-region-wait-samples,
+#     @dst-region-wait-time-ns, @max-dst-region-wait-time-ns,
+#     @dst-region-fallback-copies, @staged-pages,
 #     @staged-pages-percent,
 #     @warm-desc-sent-pages, @warm-desc-sent-bytes,
 #     @warm-payload-fallback-pages,
@@ -790,6 +831,8 @@
 #     @last-iterate-publish-ready-pages, @last-iterate-phase,
 #     @fault-publish-requests, @fault-publish-waits,
 #     @fault-publish-wait-time-ns,
+#     @region-publish-requests, @region-publish-pages,
+#     @region-publish-time-ns,
 #     @fault-publish-primary-samples,
 #     @fault-publish-primary-time-ns,
 #     @max-fault-publish-primary-time-ns,
@@ -889,6 +932,24 @@
                                            'features': [ 'unstable' ] },
             'dst-fault-place-failures': { 'type': 'uint64',
                                           'features': [ 'unstable' ] },
+            'dst-region-map-attempts': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'dst-region-map-successes': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'dst-region-map-failures': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'dst-region-map-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'dst-region-wake-failures': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'dst-region-wait-samples': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'dst-region-wait-time-ns': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'max-dst-region-wait-time-ns': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'dst-region-fallback-copies': { 'type': 'uint64',
+                                            'features': [ 'unstable' ] },
             'staged-pages': { 'type': 'uint64',
                               'features': [ 'unstable' ] },
             'staged-pages-percent': { 'type': 'number',
@@ -923,6 +984,12 @@
                                      'features': [ 'unstable' ] },
             'fault-publish-wait-time-ns': { 'type': 'uint64',
                                             'features': [ 'unstable' ] },
+            'region-publish-requests': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'region-publish-pages': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'region-publish-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
             'fault-publish-primary-samples': { 'type': 'uint64',
                                                'features': [ 'unstable' ] },
             'fault-publish-primary-time-ns': { 'type': 'uint64',
