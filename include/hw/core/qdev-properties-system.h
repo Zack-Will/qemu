@@ -12,7 +12,6 @@ extern const PropertyInfo qdev_prop_macaddr;
 extern const PropertyInfo qdev_prop_reserved_region;
 extern const PropertyInfo qdev_prop_multifd_compression;
 extern const PropertyInfo qdev_prop_mig_mode;
-extern const PropertyInfo qdev_prop_cxl_hybrid_fault_control_plane;
 extern const PropertyInfo qdev_prop_cxl_hybrid_fault_resolve_mode;
 extern const PropertyInfo qdev_prop_granule_mode;
 extern const PropertyInfo qdev_prop_zero_page_detection;
@@ -60,10 +59,6 @@ extern const PropertyInfo qdev_prop_virtio_gpu_output_list;
 #define DEFINE_PROP_MIG_MODE(_n, _s, _f, _d) \
     DEFINE_PROP_SIGNED(_n, _s, _f, _d, qdev_prop_mig_mode, \
                        MigMode)
-#define DEFINE_PROP_CXL_HYBRID_FAULT_CONTROL_PLANE(_n, _s, _f, _d) \
-    DEFINE_PROP_SIGNED(_n, _s, _f, _d, \
-                       qdev_prop_cxl_hybrid_fault_control_plane, \
-                       CXLHybridFaultControlPlane)
 #define DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE(_n, _s, _f, _d) \
     DEFINE_PROP_SIGNED(_n, _s, _f, _d, \
                        qdev_prop_cxl_hybrid_fault_resolve_mode, \

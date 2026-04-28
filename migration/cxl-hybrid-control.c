@@ -335,7 +335,7 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
     }
     if (!migrate_cxl_shared_backing()) {
         error_setg(errp,
-                   "x-cxl-fault-control-plane=cxl requires x-cxl-shared-backing=true");
+                   "CXL hybrid postcopy requires x-cxl-shared-backing=true");
         return -EINVAL;
     }
 
@@ -775,10 +775,6 @@ int cxl_hybrid_control_init_source(Error **errp)
 {
     int ret;
 
-    if (!migrate_cxl_fault_control_plane_cxl()) {
-        return 0;
-    }
-
     ret = cxl_hybrid_ctrl_state_init(&cxl_hybrid_control_source, errp);
     if (ret) {
         return ret;
@@ -790,10 +786,6 @@ int cxl_hybrid_control_init_source(Error **errp)
 int cxl_hybrid_control_init_destination(Error **errp)
 {
     int ret;
-
-    if (!migrate_cxl_fault_control_plane_cxl()) {
-        return 0;
-    }
 
     ret = cxl_hybrid_ctrl_state_init(&cxl_hybrid_control_destination, errp);
     if (ret) {
@@ -808,10 +800,6 @@ int cxl_hybrid_control_begin_source_run(Error **errp)
     unsigned long *owned_region_bitmap;
     int ret;
     uint32_t generation;
-
-    if (!migrate_cxl_fault_control_plane_cxl()) {
-        return 0;
-    }
 
     ret = cxl_hybrid_ctrl_state_init(&cxl_hybrid_control_source, errp);
     if (ret) {
@@ -840,10 +828,6 @@ int cxl_hybrid_control_activate_destination(Error **errp)
     size_t expected_visible_page_words;
     size_t expected_owned_region_words;
     uint32_t expected_region_granule_shift;
-
-    if (!migrate_cxl_fault_control_plane_cxl()) {
-        return 0;
-    }
 
     ret = cxl_hybrid_ctrl_state_init(&cxl_hybrid_control_destination, errp);
     if (ret) {

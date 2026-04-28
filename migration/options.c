@@ -82,8 +82,6 @@
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_BATCH_PAGES 0
 #define DEFAULT_MIGRATE_X_CXL_DST_CACHE_SIZE 0
 #define DEFAULT_MIGRATE_X_CXL_SHARED_BACKING false
-#define DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE \
-    CXL_HYBRID_FAULT_CONTROL_PLANE_STREAM
 #define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
     CXL_HYBRID_FAULT_RESOLVE_MODE_COPY
 
@@ -235,10 +233,6 @@ const Property migration_properties[] = {
     DEFINE_PROP_BOOL("x-cxl-shared-backing", MigrationState,
                       parameters.x_cxl_shared_backing,
                       DEFAULT_MIGRATE_X_CXL_SHARED_BACKING),
-    DEFINE_PROP_CXL_HYBRID_FAULT_CONTROL_PLANE("x-cxl-fault-control-plane",
-                      MigrationState,
-                      parameters.x_cxl_fault_control_plane,
-                      DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE),
     DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE("x-cxl-fault-resolve-mode",
                       MigrationState,
                       parameters.x_cxl_fault_resolve_mode,
@@ -1057,23 +1051,9 @@ bool migrate_cxl_shared_backing(void)
     return s->parameters.x_cxl_shared_backing;
 }
 
-CXLHybridFaultControlPlane migrate_cxl_fault_control_plane(void)
-{
-    MigrationState *s = migrate_get_current();
-
-    return s->parameters.x_cxl_fault_control_plane;
-}
-
-bool migrate_cxl_fault_control_plane_cxl(void)
-{
-    return migrate_cxl_fault_control_plane() ==
-           CXL_HYBRID_FAULT_CONTROL_PLANE_CXL;
-}
-
 bool migrate_cxl_shared_bitmap(void)
 {
-    return migrate_cxl_fault_control_plane_cxl() &&
-           migrate_cxl_shared_backing();
+    return migrate_cxl_shared_backing();
 }
 
 CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void)
@@ -1311,7 +1291,6 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_prefetch_batch_pages,
         &p->has_x_cxl_dst_cache_size,
         &p->has_x_cxl_shared_backing,
-        &p->has_x_cxl_fault_control_plane,
         &p->has_x_cxl_fault_resolve_mode,
         &p->has_cpr_exec_command,
     };
@@ -1346,8 +1325,6 @@ MigrationParameters *qmp_query_migrate_parameters(Error **errp)
 
 void migrate_params_init(MigrationParameters *params)
 {
-    params->x_cxl_fault_control_plane =
-        DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE;
     params->x_cxl_fault_resolve_mode =
         DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
     migrate_mark_all_params_present(params);
@@ -1535,37 +1512,11 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
-    if (params->x_cxl_fault_control_plane >=
-        CXL_HYBRID_FAULT_CONTROL_PLANE__MAX) {
-        error_setg(errp, "Invalid x-cxl-fault-control-plane value %d",
-                   params->x_cxl_fault_control_plane);
-        return false;
-    }
-
     if (params->x_cxl_fault_resolve_mode < 0 ||
         params->x_cxl_fault_resolve_mode >=
         CXL_HYBRID_FAULT_RESOLVE_MODE__MAX) {
         error_setg(errp, "Invalid x-cxl-fault-resolve-mode value %d",
                    params->x_cxl_fault_resolve_mode);
-        return false;
-    }
-
-    if (params->x_cxl_fault_control_plane ==
-            CXL_HYBRID_FAULT_CONTROL_PLANE_CXL &&
-        !params->x_cxl_shared_backing) {
-        error_setg(errp,
-                   "x-cxl-fault-control-plane=cxl requires x-cxl-shared-backing=true");
-        return false;
-    }
-
-    if (params->x_cxl_fault_resolve_mode !=
-            CXL_HYBRID_FAULT_RESOLVE_MODE_COPY &&
-        params->x_cxl_fault_control_plane !=
-            CXL_HYBRID_FAULT_CONTROL_PLANE_CXL) {
-        error_setg(errp,
-                   "x-cxl-fault-resolve-mode=%s requires x-cxl-fault-control-plane=cxl",
-                   CXLHybridFaultResolveMode_str(
-                       params->x_cxl_fault_resolve_mode));
         return false;
     }
 
@@ -1752,9 +1703,6 @@ static void migrate_params_test_apply(MigrationParameters *params,
     if (params->has_x_cxl_shared_backing) {
         dest->x_cxl_shared_backing = params->x_cxl_shared_backing;
     }
-    if (params->has_x_cxl_fault_control_plane) {
-        dest->x_cxl_fault_control_plane = params->x_cxl_fault_control_plane;
-    }
     if (params->has_x_cxl_fault_resolve_mode) {
         dest->x_cxl_fault_resolve_mode = params->x_cxl_fault_resolve_mode;
     }
@@ -1932,10 +1880,6 @@ static void migrate_params_apply(MigrationParameters *params)
     }
     if (params->has_x_cxl_shared_backing) {
         s->parameters.x_cxl_shared_backing = params->x_cxl_shared_backing;
-    }
-    if (params->has_x_cxl_fault_control_plane) {
-        s->parameters.x_cxl_fault_control_plane =
-            params->x_cxl_fault_control_plane;
     }
     if (params->has_x_cxl_fault_resolve_mode) {
         s->parameters.x_cxl_fault_resolve_mode =

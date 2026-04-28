@@ -702,19 +702,6 @@ const PropertyInfo qdev_prop_mig_mode = {
     .set_default_value = qdev_propinfo_set_default_value_enum,
 };
 
-/* --- CXLHybridFaultControlPlane --- */
-
-QEMU_BUILD_BUG_ON(sizeof(CXLHybridFaultControlPlane) != sizeof(int));
-
-const PropertyInfo qdev_prop_cxl_hybrid_fault_control_plane = {
-    .type = "CXLHybridFaultControlPlane",
-    .description = "CXL hybrid fault control plane (stream/cxl)",
-    .enum_table = &CXLHybridFaultControlPlane_lookup,
-    .get = qdev_propinfo_get_enum,
-    .set = qdev_propinfo_set_enum,
-    .set_default_value = qdev_propinfo_set_default_value_enum,
-};
-
 /* --- CXLHybridFaultResolveMode --- */
 
 QEMU_BUILD_BUG_ON(sizeof(CXLHybridFaultResolveMode) != sizeof(int));
