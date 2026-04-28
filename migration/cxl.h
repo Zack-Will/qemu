@@ -187,13 +187,6 @@ bool cxl_hybrid_dst_staging_page_present(const char *ramblock,
 bool cxl_hybrid_dst_staging_range_present(const char *ramblock,
                                           uint64_t offset,
                                           size_t len);
-int cxl_hybrid_dst_staging_wait_page_present(const char *ramblock,
-                                             uint64_t offset,
-                                             Error **errp);
-int cxl_hybrid_dst_staging_wait_range_present(const char *ramblock,
-                                              uint64_t offset,
-                                              size_t len,
-                                              Error **errp);
 bool cxl_hybrid_dst_staging_is_active(void);
 void cxl_hybrid_dst_staging_get_stats(CXLHybridDstStagingStats *stats);
 void cxl_hybrid_dst_staging_account_fault_miss(void);

@@ -41,7 +41,6 @@ typedef struct CXLHybridDstStagingState {
     bool shared_map;
     GHashTable *slots;
     QemuMutex lock;
-    QemuCond cond;
     uint64_t present_slots;
     uint64_t fault_hits;
     uint64_t fault_misses;
@@ -49,9 +48,7 @@ typedef struct CXLHybridDstStagingState {
     uint64_t fault_read_time_ns;
     uint64_t fault_place_successes;
     uint64_t fault_place_failures;
-    uint32_t waiters;
     bool sync_ready;
-    bool stopping;
 } CXLHybridDstStagingState;
 
 static CXLHybridDstStagingState cxl_dst_staging = {
@@ -172,7 +169,6 @@ void cxl_hybrid_dst_staging_cleanup(void)
 {
     if (cxl_dst_staging.sync_ready) {
         qemu_mutex_lock(&cxl_dst_staging.lock);
-        cxl_dst_staging.stopping = true;
         if (cxl_dst_staging.map_base) {
             munmap(cxl_dst_staging.map_base, cxl_dst_staging.map_len);
             cxl_dst_staging.map_base = NULL;
@@ -183,17 +179,11 @@ void cxl_hybrid_dst_staging_cleanup(void)
             cxl_dst_staging.fd = -1;
         }
         g_clear_pointer(&cxl_dst_staging.slots, g_hash_table_destroy);
-        qemu_cond_broadcast(&cxl_dst_staging.cond);
-        while (cxl_dst_staging.waiters) {
-            qemu_cond_wait(&cxl_dst_staging.cond, &cxl_dst_staging.lock);
-        }
         cxl_dst_staging.capacity = 0;
         cxl_dst_staging.file_limit = 0;
         cxl_dst_staging.base_offset = 0;
         cxl_dst_staging.next_offset = 0;
         cxl_dst_staging.shared_map = false;
-        cxl_dst_staging.waiters = 0;
-        cxl_dst_staging.stopping = false;
         cxl_hybrid_dst_staging_reset_counters();
         qemu_mutex_unlock(&cxl_dst_staging.lock);
     } else {
@@ -212,8 +202,6 @@ void cxl_hybrid_dst_staging_cleanup(void)
         cxl_dst_staging.base_offset = 0;
         cxl_dst_staging.next_offset = 0;
         cxl_dst_staging.shared_map = false;
-        cxl_dst_staging.waiters = 0;
-        cxl_dst_staging.stopping = false;
         cxl_hybrid_dst_staging_reset_counters();
     }
 }
@@ -276,7 +264,6 @@ int cxl_hybrid_dst_staging_init_fixed_fd(int fd, size_t capacity,
     cxl_hybrid_dst_staging_cleanup();
     if (!cxl_dst_staging.sync_ready) {
         qemu_mutex_init(&cxl_dst_staging.lock);
-        qemu_cond_init(&cxl_dst_staging.cond);
         cxl_dst_staging.sync_ready = true;
     }
 
@@ -289,8 +276,6 @@ int cxl_hybrid_dst_staging_init_fixed_fd(int fd, size_t capacity,
     cxl_dst_staging.map_base = map_base;
     cxl_dst_staging.map_len = file_limit;
     cxl_dst_staging.shared_map = shared_map;
-    cxl_dst_staging.stopping = false;
-    cxl_dst_staging.waiters = 0;
     cxl_hybrid_dst_staging_reset_counters();
     cxl_dst_staging.slots =
         g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
@@ -660,9 +645,6 @@ int cxl_hybrid_dst_staging_store_page(const char *ramblock, uint64_t offset,
             qatomic_inc(&cxl_dst_staging.present_slots);
         }
     }
-    if (cxl_dst_staging.sync_ready) {
-        qemu_cond_broadcast(&cxl_dst_staging.cond);
-    }
 
 out:
     if (cxl_dst_staging.sync_ready) {
@@ -676,7 +658,6 @@ static int cxl_hybrid_dst_staging_register_external_page_locked(
     uint64_t guest_offset,
     uint64_t cxl_offset,
     size_t len,
-    bool *changedp,
     Error **errp)
 {
     CXLHybridDstStagingSlot *slot;
@@ -762,9 +743,6 @@ static int cxl_hybrid_dst_staging_register_external_page_locked(
         }
         if (!test_and_set_bit(first_page + page, slot->present_bitmap)) {
             qatomic_inc(&cxl_dst_staging.present_slots);
-            if (changedp) {
-                *changedp = true;
-            }
         }
     }
 
@@ -778,7 +756,6 @@ int cxl_hybrid_dst_staging_register_external_page(const char *ramblock,
                                                   size_t len,
                                                   Error **errp)
 {
-    bool changed = false;
     int rc;
 
     if (cxl_dst_staging.sync_ready) {
@@ -786,10 +763,7 @@ int cxl_hybrid_dst_staging_register_external_page(const char *ramblock,
     }
 
     rc = cxl_hybrid_dst_staging_register_external_page_locked(
-        ramblock, guest_offset, cxl_offset, len, &changed, errp);
-    if (!rc && changed && cxl_dst_staging.sync_ready) {
-        qemu_cond_broadcast(&cxl_dst_staging.cond);
-    }
+        ramblock, guest_offset, cxl_offset, len, errp);
 
     if (cxl_dst_staging.sync_ready) {
         qemu_mutex_unlock(&cxl_dst_staging.lock);
@@ -819,63 +793,6 @@ bool cxl_hybrid_dst_staging_range_present(const char *ramblock,
         qemu_mutex_unlock(&cxl_dst_staging.lock);
     }
     return present;
-}
-
-int cxl_hybrid_dst_staging_wait_page_present(const char *ramblock,
-                                             uint64_t offset,
-                                             Error **errp)
-{
-    return cxl_hybrid_dst_staging_wait_range_present(
-        ramblock, offset, CXL_HYBRID_STAGING_PAGE_SIZE, errp);
-}
-
-int cxl_hybrid_dst_staging_wait_range_present(const char *ramblock,
-                                              uint64_t offset,
-                                              size_t len,
-                                              Error **errp)
-{
-    if (!ramblock || !ramblock[0]) {
-        error_setg(errp, "CXL hybrid destination wait missing ramblock");
-        return -EINVAL;
-    }
-
-    if (!len ||
-        !QEMU_IS_ALIGNED(offset, CXL_HYBRID_STAGING_PAGE_SIZE) ||
-        !QEMU_IS_ALIGNED(len, CXL_HYBRID_STAGING_PAGE_SIZE) ||
-        offset > UINT64_MAX - len) {
-        error_setg(errp, "CXL hybrid destination wait requires page-aligned length");
-        return -EINVAL;
-    }
-
-    if (!cxl_dst_staging.sync_ready) {
-        error_setg(errp, "CXL hybrid destination staging wait is unavailable");
-        return -EINVAL;
-    }
-
-    qemu_mutex_lock(&cxl_dst_staging.lock);
-    if (!cxl_hybrid_dst_staging_is_active_locked()) {
-        qemu_mutex_unlock(&cxl_dst_staging.lock);
-        error_setg(errp, "CXL hybrid destination staging is not initialized");
-        return -EINVAL;
-    }
-    cxl_dst_staging.waiters++;
-    while (cxl_hybrid_dst_staging_is_active_locked() &&
-           !cxl_hybrid_dst_staging_range_present_locked(
-               ramblock, offset, len)) {
-        qemu_cond_wait(&cxl_dst_staging.cond, &cxl_dst_staging.lock);
-    }
-    if (!cxl_hybrid_dst_staging_is_active_locked()) {
-        cxl_dst_staging.waiters--;
-        qemu_cond_broadcast(&cxl_dst_staging.cond);
-        qemu_mutex_unlock(&cxl_dst_staging.lock);
-        error_setg(errp, "CXL hybrid destination staging was cleaned up");
-        return -ECANCELED;
-    }
-    cxl_dst_staging.waiters--;
-    qemu_cond_broadcast(&cxl_dst_staging.cond);
-    qemu_mutex_unlock(&cxl_dst_staging.lock);
-
-    return 0;
 }
 
 bool cxl_hybrid_dst_staging_is_active(void)
