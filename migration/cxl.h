@@ -48,36 +48,6 @@ typedef struct CXLHybridMetadata {
     CXLHybridMetadataEntry *entries;
 } CXLHybridMetadata;
 
-typedef struct CXLHybridWarmPage {
-    char *ramblock;
-    uint64_t offset;
-    uint32_t page_len;
-    uint8_t *data;
-} CXLHybridWarmPage;
-
-typedef struct CXLHybridWarmDescriptor {
-    char *ramblock;
-    uint64_t guest_offset;
-    uint64_t cxl_offset;
-    uint32_t page_len;
-    uint32_t flags;
-    uint32_t generation;
-} CXLHybridWarmDescriptor;
-
-typedef struct CXLHybridWarmDescRange {
-    char *ramblock;
-    uint64_t guest_offset;
-    uint64_t cxl_offset;
-    uint32_t page_len;
-    uint32_t flags;
-} CXLHybridWarmDescRange;
-
-typedef struct CXLHybridWarmDescBatch {
-    uint32_t generation;
-    uint32_t nr_entries;
-    CXLHybridWarmDescRange *entries;
-} CXLHybridWarmDescBatch;
-
 typedef struct CXLHybridPublishNotify {
     char *ramblock;
     uint64_t guest_offset;
@@ -139,8 +109,6 @@ typedef struct CXLHybridFaultRegionGeometry {
 typedef int (*CXLHybridFaultReadyConsumer)(
     const CXLHybridFaultReadyRecord *record, Error **errp);
 
-#define CXL_HYBRID_WARM_DESC_F_SHARED_CXL      (1U << 0)
-#define CXL_HYBRID_WARM_DESC_F_SOURCE_REMAPPED (1U << 1)
 #define CXL_HYBRID_FAULT_READY_F_PRIMARY        (1U << 0)
 #define CXL_HYBRID_FAULT_READY_F_BURST_NEIGHBOR (1U << 1)
 #define CXL_HYBRID_FAULT_READY_F_SOURCE_REMAPPED (1U << 2)
@@ -151,10 +119,6 @@ typedef struct CXLHybridWarmStats {
     uint64_t source_warm_queue_pages;
     uint64_t source_warm_sent_pages;
     uint64_t source_warm_sent_bytes;
-    uint64_t source_warm_desc_sent_pages;
-    uint64_t source_warm_desc_sent_bytes;
-    uint64_t source_warm_payload_fallback_pages;
-    uint64_t source_warm_desc_skip_unremapped;
     uint64_t source_warm_skip_received;
     uint64_t source_warm_skip_unstaged;
     uint64_t source_warm_last_miss_offset;
@@ -209,22 +173,10 @@ typedef struct CXLHybridDstRegionState {
 } CXLHybridDstRegionState;
 
 void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta);
-void cxl_hybrid_warm_page_cleanup(CXLHybridWarmPage *page);
-void cxl_hybrid_warm_desc_cleanup(CXLHybridWarmDescriptor *desc);
-void cxl_hybrid_warm_desc_batch_cleanup(CXLHybridWarmDescBatch *batch);
 void cxl_hybrid_publish_notify_cleanup(CXLHybridPublishNotify *notify);
 int cxl_hybrid_metadata_encoded_len(const CXLHybridMetadata *meta,
                                     size_t *len,
                                     Error **errp);
-int cxl_hybrid_warm_page_encoded_len(const CXLHybridWarmPage *page,
-                                     size_t *len,
-                                     Error **errp);
-int cxl_hybrid_warm_desc_encoded_len(const CXLHybridWarmDescriptor *desc,
-                                     size_t *len,
-                                     Error **errp);
-int cxl_hybrid_warm_desc_batch_encoded_len(const CXLHybridWarmDescBatch *batch,
-                                           size_t *len,
-                                           Error **errp);
 int cxl_hybrid_publish_notify_encoded_len(const CXLHybridPublishNotify *notify,
                                           size_t *len,
                                           Error **errp);
@@ -232,18 +184,6 @@ int cxl_hybrid_metadata_encode(const CXLHybridMetadata *meta,
                                uint8_t *buf,
                                size_t len,
                                Error **errp);
-int cxl_hybrid_warm_page_encode(const CXLHybridWarmPage *page,
-                                uint8_t *buf,
-                                size_t len,
-                                Error **errp);
-int cxl_hybrid_warm_desc_encode(const CXLHybridWarmDescriptor *desc,
-                                uint8_t *buf,
-                                size_t len,
-                                Error **errp);
-int cxl_hybrid_warm_desc_batch_encode(const CXLHybridWarmDescBatch *batch,
-                                      uint8_t *buf,
-                                      size_t len,
-                                      Error **errp);
 int cxl_hybrid_publish_notify_encode(const CXLHybridPublishNotify *notify,
                                      uint8_t *buf,
                                      size_t len,
@@ -252,26 +192,9 @@ int cxl_hybrid_metadata_decode(CXLHybridMetadata *meta,
                                const uint8_t *buf,
                                size_t len,
                                Error **errp);
-int cxl_hybrid_warm_page_decode(CXLHybridWarmPage *page,
-                                const uint8_t *buf,
-                                size_t len,
-                                Error **errp);
-int cxl_hybrid_warm_desc_decode(CXLHybridWarmDescriptor *desc,
-                                const uint8_t *buf,
-                                size_t len,
-                                Error **errp);
-int cxl_hybrid_warm_desc_batch_decode(CXLHybridWarmDescBatch *batch,
-                                      const uint8_t *buf,
-                                      size_t len,
-                                      Error **errp);
 int cxl_hybrid_publish_notify_decode(CXLHybridPublishNotify *notify,
                                      const uint8_t *buf,
                                      size_t len,
-                                     Error **errp);
-int cxl_hybrid_warm_page_store(const CXLHybridWarmPage *page, Error **errp);
-int cxl_hybrid_warm_desc_store(const CXLHybridWarmDescriptor *desc,
-                               Error **errp);
-int cxl_hybrid_warm_desc_batch_store(const CXLHybridWarmDescBatch *batch,
                                      Error **errp);
 int cxl_hybrid_metadata_snapshot_source(CXLHybridMetadata *meta,
                                         Error **errp);
@@ -435,11 +358,6 @@ uint64_t cxl_hybrid_mapped_ram_required_bytes(uint64_t align);
 bool cxl_hybrid_lookup_global_page(size_t page_index,
                                    RAMBlock **blockp,
                                    ram_addr_t *block_offsetp);
-int cxl_hybrid_send_warm_descriptor(QEMUFile *f, const char *ramblock,
-                                    uint64_t guest_offset, Error **errp);
-int cxl_hybrid_send_warm_page(QEMUFile *f, const char *ramblock,
-                              uint64_t offset, const uint8_t *data,
-                              size_t len, Error **errp);
 int cxl_hybrid_control_init_source(Error **errp);
 int cxl_hybrid_control_init_destination(Error **errp);
 int cxl_hybrid_control_begin_source_run(Error **errp);

@@ -86,9 +86,6 @@
     CXL_HYBRID_FAULT_CONTROL_PLANE_STREAM
 #define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
     CXL_HYBRID_FAULT_RESOLVE_MODE_COPY
-#define DEFAULT_MIGRATE_X_CXL_WARM_TRANSPORT CXL_HYBRID_WARM_TRANSPORT_AUTO
-#define DEFAULT_MIGRATE_X_CXL_DST_INSTALL_POLICY \
-    CXL_HYBRID_DST_INSTALL_POLICY_ON_DEMAND
 
 /*
  * Parameters for self_announce_delay giving a stream of RARP/ARP
@@ -246,15 +243,6 @@ const Property migration_properties[] = {
                       MigrationState,
                       parameters.x_cxl_fault_resolve_mode,
                       DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE),
-    DEFINE_PROP_CXL_HYBRID_WARM_TRANSPORT("x-cxl-warm-transport",
-                      MigrationState,
-                      parameters.x_cxl_warm_transport,
-                      DEFAULT_MIGRATE_X_CXL_WARM_TRANSPORT),
-    DEFINE_PROP_CXL_HYBRID_DST_INSTALL_POLICY("x-cxl-dst-install-policy",
-                      MigrationState,
-                      parameters.x_cxl_dst_install_policy,
-                      DEFAULT_MIGRATE_X_CXL_DST_INSTALL_POLICY),
-
     /* Migration capabilities */
     DEFINE_PROP_MIG_CAP("x-xbzrle", MIGRATION_CAPABILITY_XBZRLE),
     DEFINE_PROP_MIG_CAP("x-rdma-pin-all", MIGRATION_CAPABILITY_RDMA_PIN_ALL),
@@ -1119,20 +1107,6 @@ bool migrate_cxl_fault_resolve_uses_region(void)
            migrate_cxl_fault_resolve_region_remap_fallback_copy();
 }
 
-CXLHybridWarmTransport migrate_cxl_warm_transport(void)
-{
-    MigrationState *s = migrate_get_current();
-
-    return s->parameters.x_cxl_warm_transport;
-}
-
-CXLHybridDstInstallPolicy migrate_cxl_dst_install_policy(void)
-{
-    MigrationState *s = migrate_get_current();
-
-    return s->parameters.x_cxl_dst_install_policy;
-}
-
 MigMode migrate_mode(void)
 {
     MigMode mode = cpr_get_incoming_mode();
@@ -1339,8 +1313,6 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_shared_backing,
         &p->has_x_cxl_fault_control_plane,
         &p->has_x_cxl_fault_resolve_mode,
-        &p->has_x_cxl_warm_transport,
-        &p->has_x_cxl_dst_install_policy,
         &p->has_cpr_exec_command,
     };
 
@@ -1378,8 +1350,6 @@ void migrate_params_init(MigrationParameters *params)
         DEFAULT_MIGRATE_X_CXL_FAULT_CONTROL_PLANE;
     params->x_cxl_fault_resolve_mode =
         DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
-    params->x_cxl_dst_install_policy =
-        DEFAULT_MIGRATE_X_CXL_DST_INSTALL_POLICY;
     migrate_mark_all_params_present(params);
 }
 
@@ -1577,26 +1547,6 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         CXL_HYBRID_FAULT_RESOLVE_MODE__MAX) {
         error_setg(errp, "Invalid x-cxl-fault-resolve-mode value %d",
                    params->x_cxl_fault_resolve_mode);
-        return false;
-    }
-
-    if (params->x_cxl_warm_transport >= CXL_HYBRID_WARM_TRANSPORT__MAX) {
-        error_setg(errp, "Invalid x-cxl-warm-transport value %d",
-                   params->x_cxl_warm_transport);
-        return false;
-    }
-
-    if (params->x_cxl_dst_install_policy >=
-        CXL_HYBRID_DST_INSTALL_POLICY__MAX) {
-        error_setg(errp, "Invalid x-cxl-dst-install-policy value %d",
-                   params->x_cxl_dst_install_policy);
-        return false;
-    }
-
-    if (params->x_cxl_warm_transport == CXL_HYBRID_WARM_TRANSPORT_CXL_OFFSET &&
-        !params->x_cxl_shared_backing) {
-        error_setg(errp,
-                   "x-cxl-warm-transport=cxl-offset requires x-cxl-shared-backing=true");
         return false;
     }
 
@@ -1808,12 +1758,6 @@ static void migrate_params_test_apply(MigrationParameters *params,
     if (params->has_x_cxl_fault_resolve_mode) {
         dest->x_cxl_fault_resolve_mode = params->x_cxl_fault_resolve_mode;
     }
-    if (params->has_x_cxl_warm_transport) {
-        dest->x_cxl_warm_transport = params->x_cxl_warm_transport;
-    }
-    if (params->has_x_cxl_dst_install_policy) {
-        dest->x_cxl_dst_install_policy = params->x_cxl_dst_install_policy;
-    }
 
     if (params->has_cpr_exec_command) {
         dest->cpr_exec_command = params->cpr_exec_command;
@@ -1996,13 +1940,6 @@ static void migrate_params_apply(MigrationParameters *params)
     if (params->has_x_cxl_fault_resolve_mode) {
         s->parameters.x_cxl_fault_resolve_mode =
             params->x_cxl_fault_resolve_mode;
-    }
-    if (params->has_x_cxl_warm_transport) {
-        s->parameters.x_cxl_warm_transport = params->x_cxl_warm_transport;
-    }
-    if (params->has_x_cxl_dst_install_policy) {
-        s->parameters.x_cxl_dst_install_policy =
-            params->x_cxl_dst_install_policy;
     }
 
     if (params->has_cpr_exec_command) {

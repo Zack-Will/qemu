@@ -65,22 +65,6 @@ void qemu_savevm_send_cxl_hybrid_metadata(QEMUFile *f,
                                           uint32_t entries,
                                           const uint8_t *buf,
                                           size_t len);
-void qemu_savevm_send_cxl_hybrid_warm_page(QEMUFile *f,
-                                           const char *ramblock,
-                                           uint64_t offset,
-                                           const uint8_t *buf,
-                                           size_t len);
-void qemu_savevm_send_cxl_hybrid_warm_desc(QEMUFile *f,
-                                           const char *ramblock,
-                                           uint64_t guest_offset,
-                                           uint64_t cxl_offset,
-                                           const uint8_t *buf,
-                                           size_t len);
-void qemu_savevm_send_cxl_hybrid_warm_desc_batch(QEMUFile *f,
-                                                 uint32_t generation,
-                                                 uint32_t entries,
-                                                 const uint8_t *buf,
-                                                 size_t len);
 void qemu_savevm_send_cxl_hybrid_publish_ready(QEMUFile *f,
                                                const char *ramblock,
                                                uint64_t guest_offset,

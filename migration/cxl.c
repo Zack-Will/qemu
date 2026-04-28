@@ -188,10 +188,6 @@ static struct CXLMigrationState {
     uint64_t source_warm_queue_pages;
     uint64_t source_warm_sent_pages;
     uint64_t source_warm_sent_bytes;
-    uint64_t source_warm_desc_sent_pages;
-    uint64_t source_warm_desc_sent_bytes;
-    uint64_t source_warm_payload_fallback_pages;
-    uint64_t source_warm_desc_skip_unremapped;
     uint64_t source_warm_skip_received;
     uint64_t source_warm_skip_unstaged;
     uint64_t source_warm_last_miss_offset;
@@ -1791,14 +1787,6 @@ void cxl_populate_migration_info(MigrationInfo *info)
             ((double)info->x_cxl->staged_pages * 100.0) /
             (double)cxl_state.total_pages;
     }
-    info->x_cxl->warm_desc_sent_pages =
-        qatomic_read(&cxl_state.source_warm_desc_sent_pages);
-    info->x_cxl->warm_desc_sent_bytes =
-        qatomic_read(&cxl_state.source_warm_desc_sent_bytes);
-    info->x_cxl->warm_payload_fallback_pages =
-        qatomic_read(&cxl_state.source_warm_payload_fallback_pages);
-    info->x_cxl->warm_desc_skip_unremapped =
-        qatomic_read(&cxl_state.source_warm_desc_skip_unremapped);
     info->x_cxl->warm_publish_pages =
         qatomic_read(&cxl_state.warm_publish_pages);
     info->x_cxl->last_iterate_ram_pages =
@@ -1986,8 +1974,9 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
     ram_addr_t block_offset;
     uint32_t generation;
     uint64_t cxl_offset;
-    uint64_t offset;
     int ret;
+
+    (void)s;
 
     if (!cxl_hybrid_lookup_global_page(page_idx, &block, &block_offset)) {
         error_setg(errp, "CXL hybrid warm push page %zu no longer resolves",
@@ -2007,31 +1996,11 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
         return 0;
     }
 
-    offset = block_offset;
     generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions);
-
-    switch (migrate_cxl_warm_transport()) {
-    case CXL_HYBRID_WARM_TRANSPORT_CXL_OFFSET:
-    case CXL_HYBRID_WARM_TRANSPORT_AUTO:
-        ret = cxl_hybrid_publish_page_to_cxl(block->idstr, offset,
-                                             TARGET_PAGE_SIZE, generation,
-                                             CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH,
-                                             &cxl_offset, errp);
-        if (!ret && !migrate_cxl_shared_bitmap()) {
-            ret = cxl_hybrid_send_warm_descriptor(s->to_dst_file, block->idstr,
-                                                  offset, errp);
-        }
-        break;
-    case CXL_HYBRID_WARM_TRANSPORT_PAYLOAD:
-        error_setg(errp, "CXL-only hybrid warm push does not support payload transport");
-        ret = -EINVAL;
-        break;
-    default:
-        error_setg(errp, "Unsupported CXL warm transport mode %d",
-                   migrate_cxl_warm_transport());
-        ret = -EINVAL;
-        break;
-    }
+    ret = cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,
+                                         TARGET_PAGE_SIZE, generation,
+                                         CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH,
+                                         &cxl_offset, errp);
     if (ret) {
         return ret;
     }
@@ -2039,10 +2008,8 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
     set_bit_atomic(page_idx, cxl_state.warm_sent_bmap);
     clear_bit_atomic(page_idx, cxl_state.warm_dirty_bmap);
     qatomic_inc(&cxl_state.source_warm_queue_pages);
-    if (migrate_cxl_shared_bitmap()) {
-        qatomic_inc(&cxl_state.source_warm_sent_pages);
-        qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
-    }
+    qatomic_inc(&cxl_state.source_warm_sent_pages);
+    qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
     trace_cxl_hybrid_warm_page_queued(block->idstr, block_offset);
     return 1;
 }
@@ -2094,16 +2061,8 @@ static int cxl_hybrid_completion_publish_remaining_page(
         return ret;
     }
 
-    if (migrate_cxl_shared_bitmap()) {
-        qatomic_inc(&cxl_state.source_warm_sent_pages);
-        qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
-    } else {
-        ret = cxl_hybrid_send_warm_descriptor(s->to_dst_file, block->idstr,
-                                              block_offset, errp);
-        if (ret) {
-            return ret;
-        }
-    }
+    qatomic_inc(&cxl_state.source_warm_sent_pages);
+    qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
     return 1;
 }
 
@@ -2306,14 +2265,6 @@ void cxl_hybrid_warm_stats(CXLHybridWarmStats *stats)
         qatomic_read(&cxl_state.source_warm_sent_pages);
     stats->source_warm_sent_bytes =
         qatomic_read(&cxl_state.source_warm_sent_bytes);
-    stats->source_warm_desc_sent_pages =
-        qatomic_read(&cxl_state.source_warm_desc_sent_pages);
-    stats->source_warm_desc_sent_bytes =
-        qatomic_read(&cxl_state.source_warm_desc_sent_bytes);
-    stats->source_warm_payload_fallback_pages =
-        qatomic_read(&cxl_state.source_warm_payload_fallback_pages);
-    stats->source_warm_desc_skip_unremapped =
-        qatomic_read(&cxl_state.source_warm_desc_skip_unremapped);
     stats->source_warm_skip_received =
         qatomic_read(&cxl_state.source_warm_skip_received);
     stats->source_warm_skip_unstaged =
@@ -3451,152 +3402,6 @@ int cxl_hybrid_handle_fault_ready_record(
 
     return cxl_hybrid_handle_publish_ready(&notify, fault_primary,
                                            ready_recv_ns, errp);
-}
-
-int cxl_hybrid_send_warm_descriptor(QEMUFile *f, const char *ramblock,
-                                    uint64_t guest_offset, Error **errp)
-{
-    CXLHybridWarmDescriptor desc = { 0 };
-    RAMBlock *block;
-    ram_addr_t global_offset;
-    CXLHybridPublishedPageState publish_state = { 0 };
-    g_autofree uint8_t *buf = NULL;
-    size_t encoded_len;
-    int ret;
-
-    if (!f || !ramblock) {
-        error_setg(errp, "CXL hybrid warm descriptor missing arguments");
-        return -EINVAL;
-    }
-
-    if (!migrate_cxl_shared_backing()) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor transport requires x-cxl-shared-backing");
-        return -EPERM;
-    }
-
-    if (!cxl_hybrid_source_page_cxl_offset(ramblock, guest_offset,
-                                           &desc.cxl_offset)) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor page %s/0x%" PRIx64 " has no stable CXL offset",
-                   ramblock, guest_offset);
-        return -EINVAL;
-    }
-
-    block = qemu_ram_block_by_name(ramblock);
-    if (!block) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor page %s/0x%" PRIx64 " has no RAMBlock",
-                   ramblock, guest_offset);
-        return -ENOENT;
-    }
-
-    if (!cxl_hybrid_global_page_offset(block, guest_offset,
-                                       TARGET_PAGE_SIZE, &global_offset)) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor page %s/0x%" PRIx64
-                   " has invalid global offset",
-                   ramblock, guest_offset);
-        return -EINVAL;
-    }
-
-    if (!cxl_page_is_remapped(global_offset) &&
-        !cxl_hybrid_get_published_page_state(ramblock, guest_offset,
-                                             &publish_state)) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor page %s/0x%" PRIx64
-                   " is neither source-remapped nor published-to-CXL",
-                   ramblock, guest_offset);
-        return -EINVAL;
-    }
-
-    desc.ramblock = (char *)ramblock;
-    desc.guest_offset = guest_offset;
-    desc.page_len = TARGET_PAGE_SIZE;
-    desc.flags = CXL_HYBRID_WARM_DESC_F_SHARED_CXL;
-    if (cxl_page_is_remapped(global_offset)) {
-        desc.flags |= CXL_HYBRID_WARM_DESC_F_SOURCE_REMAPPED;
-    }
-    desc.generation = publish_state.valid ? publish_state.generation :
-                      (uint32_t)qatomic_read(&cxl_state.phase_transitions);
-
-    ret = cxl_hybrid_warm_desc_encoded_len(&desc, &encoded_len, errp);
-    if (ret) {
-        return ret;
-    }
-    if (encoded_len > UINT16_MAX) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor command too large: %zu",
-                   encoded_len);
-        return -E2BIG;
-    }
-
-    buf = g_malloc(encoded_len);
-    ret = cxl_hybrid_warm_desc_encode(&desc, buf, encoded_len, errp);
-    if (ret) {
-        return ret;
-    }
-
-    trace_cxl_hybrid_warm_desc_send(ramblock, guest_offset,
-                                    desc.cxl_offset, TARGET_PAGE_SIZE);
-    qemu_savevm_send_cxl_hybrid_warm_desc(f, ramblock, guest_offset,
-                                          desc.cxl_offset, buf, encoded_len);
-    ret = qemu_file_get_error(f);
-    if (ret) {
-        error_setg(errp,
-                   "Failed to send CXL hybrid warm descriptor command");
-        return ret < 0 ? ret : -EIO;
-    }
-
-    cxl_hybrid_account_dst_page_sent(ramblock, guest_offset, TARGET_PAGE_SIZE);
-    qatomic_inc(&cxl_state.source_warm_desc_sent_pages);
-    qatomic_add(&cxl_state.source_warm_desc_sent_bytes, TARGET_PAGE_SIZE);
-    qatomic_inc(&cxl_state.source_warm_sent_pages);
-    qatomic_add(&cxl_state.source_warm_sent_bytes, TARGET_PAGE_SIZE);
-    return 0;
-}
-
-int cxl_hybrid_send_warm_page(QEMUFile *f, const char *ramblock,
-                              uint64_t offset, const uint8_t *data,
-                              size_t len, Error **errp)
-{
-    CXLHybridWarmPage page = {
-        .ramblock = (char *)ramblock,
-        .offset = offset,
-        .page_len = len,
-        .data = (uint8_t *)data,
-    };
-    g_autofree uint8_t *buf = NULL;
-    size_t encoded_len;
-    int ret;
-
-    ret = cxl_hybrid_warm_page_encoded_len(&page, &encoded_len, errp);
-    if (ret) {
-        return ret;
-    }
-    if (encoded_len > UINT16_MAX) {
-        error_setg(errp, "CXL hybrid warm page command too large: %zu",
-                   encoded_len);
-        return -E2BIG;
-    }
-
-    buf = g_malloc(encoded_len);
-    ret = cxl_hybrid_warm_page_encode(&page, buf, encoded_len, errp);
-    if (ret) {
-        return ret;
-    }
-
-    trace_cxl_hybrid_warm_page_send(ramblock, offset, len);
-    qemu_savevm_send_cxl_hybrid_warm_page(f, ramblock, offset, buf, encoded_len);
-    ret = qemu_file_get_error(f);
-    if (ret) {
-        error_setg(errp, "Failed to send CXL hybrid warm page command");
-        return ret < 0 ? ret : -EIO;
-    }
-
-    qatomic_inc(&cxl_state.source_warm_sent_pages);
-    qatomic_add(&cxl_state.source_warm_sent_bytes, len);
-    return 0;
 }
 
 int cxl_hybrid_warm_push_iteration(MigrationState *s, Error **errp)

@@ -96,9 +96,6 @@ enum qemu_vm_cmd {
     MIG_CMD_RECV_BITMAP,       /* Request for recved bitmap on dst */
     MIG_CMD_SWITCHOVER_START,  /* Switchover start notification */
     MIG_CMD_CXL_HYBRID_METADATA, /* Hybrid CXL staging metadata snapshot */
-    MIG_CMD_CXL_HYBRID_WARM_PAGE, /* Hybrid warm page into dst CXL staging */
-    MIG_CMD_CXL_HYBRID_WARM_DESC, /* Hybrid warm descriptor into dst staging */
-    MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH, /* Hybrid batched warm descriptors */
     MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE, /* Stop new dst publish requests */
     MIG_CMD_CXL_HYBRID_PUBLISH_READY, /* Hybrid CXL publish-ready metadata */
     MIG_CMD_MAX
@@ -124,12 +121,6 @@ static struct mig_cmd_args {
     [MIG_CMD_SWITCHOVER_START] = { .len =  0, .name = "SWITCHOVER_START" },
     [MIG_CMD_CXL_HYBRID_METADATA] = { .len = -1,
                                       .name = "CXL_HYBRID_METADATA" },
-    [MIG_CMD_CXL_HYBRID_WARM_PAGE] = { .len = -1,
-                                       .name = "CXL_HYBRID_WARM_PAGE" },
-    [MIG_CMD_CXL_HYBRID_WARM_DESC] = { .len = -1,
-                                       .name = "CXL_HYBRID_WARM_DESC" },
-    [MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH] = { .len = -1,
-                                             .name = "CXL_HYBRID_WARM_DESC_BATCH" },
     [MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE] = {
         .len = 0, .name = "CXL_HYBRID_PUBLISH_QUIESCE" },
     [MIG_CMD_CXL_HYBRID_PUBLISH_READY] = {
@@ -1290,43 +1281,6 @@ void qemu_savevm_send_cxl_hybrid_metadata(QEMUFile *f,
     assert(len <= UINT16_MAX);
     trace_savevm_send_cxl_hybrid_metadata(generation, entries, len);
     qemu_savevm_command_send(f, MIG_CMD_CXL_HYBRID_METADATA, len,
-                             (uint8_t *)buf);
-}
-
-void qemu_savevm_send_cxl_hybrid_warm_page(QEMUFile *f,
-                                           const char *ramblock,
-                                           uint64_t offset,
-                                           const uint8_t *buf,
-                                           size_t len)
-{
-    trace_savevm_send_cxl_hybrid_warm_page(ramblock, offset, len);
-    qemu_savevm_command_send(f, MIG_CMD_CXL_HYBRID_WARM_PAGE, len,
-                             (uint8_t *)buf);
-}
-
-void qemu_savevm_send_cxl_hybrid_warm_desc(QEMUFile *f,
-                                           const char *ramblock,
-                                           uint64_t guest_offset,
-                                           uint64_t cxl_offset,
-                                           const uint8_t *buf,
-                                           size_t len)
-{
-    assert(len <= UINT16_MAX);
-    trace_savevm_send_cxl_hybrid_warm_desc(ramblock, guest_offset,
-                                           cxl_offset, len);
-    qemu_savevm_command_send(f, MIG_CMD_CXL_HYBRID_WARM_DESC, len,
-                             (uint8_t *)buf);
-}
-
-void qemu_savevm_send_cxl_hybrid_warm_desc_batch(QEMUFile *f,
-                                                 uint32_t generation,
-                                                 uint32_t entries,
-                                                 const uint8_t *buf,
-                                                 size_t len)
-{
-    assert(len <= UINT16_MAX);
-    trace_savevm_send_cxl_hybrid_warm_desc_batch(generation, entries, len);
-    qemu_savevm_command_send(f, MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH, len,
                              (uint8_t *)buf);
 }
 
@@ -2713,105 +2667,6 @@ static int loadvm_process_command(QEMUFile *f, Error **errp)
 
         ret = cxl_hybrid_metadata_recv(buf, len, errp);
         loadvm_trace_postcopy_timeline(mis, "dst-cxl-metadata-done", len);
-        return ret;
-    }
-    case MIG_CMD_CXL_HYBRID_WARM_PAGE:
-    {
-        g_autofree uint8_t *buf = g_malloc(len);
-        CXLHybridWarmPage page = { 0 };
-
-        if (qemu_get_buffer(f, buf, len) != len) {
-            error_setg(errp,
-                       "Failed to read CXL hybrid warm page payload: %u bytes",
-                       len);
-            return -EIO;
-        }
-
-        ret = qemu_file_get_error(f);
-        if (ret) {
-            error_setg(errp,
-                       "Stream error while reading CXL hybrid warm page: %d",
-                       ret);
-            return ret;
-        }
-
-        ret = cxl_hybrid_warm_page_decode(&page, buf, len, errp);
-        if (ret) {
-            return ret;
-        }
-
-        ret = cxl_hybrid_warm_page_store(&page, errp);
-        cxl_hybrid_warm_page_cleanup(&page);
-        return ret;
-    }
-    case MIG_CMD_CXL_HYBRID_WARM_DESC:
-    {
-        g_autofree uint8_t *buf = g_malloc(len);
-        CXLHybridWarmDescriptor desc = { 0 };
-
-        if (migrate_cxl_shared_bitmap()) {
-            error_setg(errp,
-                       "CXL shared-bitmap mode rejects legacy warm descriptor transport");
-            return -EINVAL;
-        }
-
-        if (qemu_get_buffer(f, buf, len) != len) {
-            error_setg(errp,
-                       "Failed to read CXL hybrid warm descriptor payload: %u bytes",
-                       len);
-            return -EIO;
-        }
-
-        ret = qemu_file_get_error(f);
-        if (ret) {
-            error_setg(errp,
-                       "Stream error while reading CXL hybrid warm descriptor: %d",
-                       ret);
-            return ret;
-        }
-
-        ret = cxl_hybrid_warm_desc_decode(&desc, buf, len, errp);
-        if (ret) {
-            return ret;
-        }
-
-        ret = cxl_hybrid_warm_desc_store(&desc, errp);
-        cxl_hybrid_warm_desc_cleanup(&desc);
-        return ret;
-    }
-    case MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH:
-    {
-        g_autofree uint8_t *buf = g_malloc(len);
-        CXLHybridWarmDescBatch batch = { 0 };
-
-        if (migrate_cxl_shared_bitmap()) {
-            error_setg(errp,
-                       "CXL shared-bitmap mode rejects legacy warm descriptor batch transport");
-            return -EINVAL;
-        }
-
-        if (qemu_get_buffer(f, buf, len) != len) {
-            error_setg(errp,
-                       "Failed to read CXL hybrid warm descriptor batch payload: %u bytes",
-                       len);
-            return -EIO;
-        }
-
-        ret = qemu_file_get_error(f);
-        if (ret) {
-            error_setg(errp,
-                       "Stream error while reading CXL hybrid warm descriptor batch: %d",
-                       ret);
-            return ret;
-        }
-
-        ret = cxl_hybrid_warm_desc_batch_decode(&batch, buf, len, errp);
-        if (ret) {
-            return ret;
-        }
-
-        ret = cxl_hybrid_warm_desc_batch_store(&batch, errp);
-        cxl_hybrid_warm_desc_batch_cleanup(&batch);
         return ret;
     }
     case MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE:

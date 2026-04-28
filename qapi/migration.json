@@ -255,52 +255,6 @@
             { 'name': 'manual', 'features': [ 'unstable' ] } ] }
 
 ##
-# @CXLHybridWarmTransport:
-#
-# Experimental transport policy for CXL hybrid warm pages.
-#
-# @payload: always carry warm page data in the migration stream
-#
-# @cxl-offset: only publish CXL-backed descriptors; fail if a page is
-#     not source-authoritative in CXL.  Requires
-#     @x-cxl-shared-backing to confirm that both endpoints can resolve
-#     the same CXL backing offsets.
-#
-# @auto: publish descriptors for source-remapped CXL pages and fall
-#     back to payload pages otherwise
-#
-# Features:
-#
-# @unstable: This enum is experimental.
-#
-# Since: 11.0
-##
-{ 'enum': 'CXLHybridWarmTransport',
-  'data': [ { 'name': 'payload', 'features': [ 'unstable' ] },
-            { 'name': 'cxl-offset', 'features': [ 'unstable' ] },
-            { 'name': 'auto', 'features': [ 'unstable' ] } ] }
-
-##
-# @CXLHybridDstInstallPolicy:
-#
-# Experimental destination-side install policy for
-# CXL hybrid postcopy.
-#
-# @on-demand: install warm-published data only when faults request it
-#
-# @eager: install warm-published data eagerly on arrival
-#
-# Features:
-#
-# @unstable: This enum is experimental.
-#
-# Since: 11.0
-##
-{ 'enum': 'CXLHybridDstInstallPolicy',
-  'data': [ { 'name': 'on-demand', 'features': [ 'unstable' ] },
-            { 'name': 'eager', 'features': [ 'unstable' ] } ] }
-
-##
 # @CXLHybridFaultControlPlane:
 #
 # Experimental fault control-plane transport for CXL hybrid postcopy.
@@ -604,21 +558,8 @@
 # @staged-pages-percent: percentage of tracked guest pages currently
 #     marked staged in source-side CXL backing
 #
-# @warm-desc-sent-pages: number of warm pages published as CXL offset
-#     descriptors instead of page payloads
-#
-# @warm-desc-sent-bytes: guest page bytes represented by warm
-#     descriptors
-#
-# @warm-payload-fallback-pages: number of warm pages sent through the
-#     legacy payload command because descriptor mode was unavailable
-#
-# @warm-desc-skip-unremapped: number of descriptor candidates skipped
-#     because the source page was not remapped and therefore not
-#     authoritative in CXL
-#
-# @warm-publish-pages: number of warm-publish operations issued to the
-#     destination-side install pipeline
+# @warm-publish-pages: number of warm-publish operations that copied
+#     pages into shared CXL backing and marked them visible
 #
 # @last-iterate-ram-pages: RAM pages transferred during the
 #     most recent migration main-loop iteration
@@ -820,10 +761,7 @@
 #     @dst-region-wake-failures, @dst-region-wait-samples,
 #     @dst-region-wait-time-ns, @max-dst-region-wait-time-ns,
 #     @dst-region-fallback-copies, @staged-pages,
-#     @staged-pages-percent,
-#     @warm-desc-sent-pages, @warm-desc-sent-bytes,
-#     @warm-payload-fallback-pages,
-#     @warm-desc-skip-unremapped, @warm-publish-pages,
+#     @staged-pages-percent, @warm-publish-pages,
 #     @last-iterate-ram-pages, @last-iterate-staged-pages-delta,
 #     @last-iterate-warm-push-pages,
 #     @last-iterate-fault-primary-pages,
@@ -954,14 +892,6 @@
                               'features': [ 'unstable' ] },
             'staged-pages-percent': { 'type': 'number',
                                       'features': [ 'unstable' ] },
-            'warm-desc-sent-pages': { 'type': 'uint64',
-                                      'features': [ 'unstable' ] },
-            'warm-desc-sent-bytes': { 'type': 'uint64',
-                                      'features': [ 'unstable' ] },
-            'warm-payload-fallback-pages': { 'type': 'uint64',
-                                             'features': [ 'unstable' ] },
-            'warm-desc-skip-unremapped': { 'type': 'uint64',
-                                           'features': [ 'unstable' ] },
             'warm-publish-pages': { 'type': 'uint64',
                                     'features': [ 'unstable' ] },
             'last-iterate-ram-pages': { 'type': 'uint64',
@@ -1713,8 +1643,7 @@
 #     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
 #     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
 #     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
-#     @x-cxl-shared-backing, @x-cxl-warm-transport,
-#     @x-cxl-dst-install-policy, @x-cxl-fault-control-plane, and
+#     @x-cxl-shared-backing, @x-cxl-fault-control-plane, and
 #     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
@@ -1763,10 +1692,6 @@
            { 'name': 'x-cxl-dst-cache-size',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-shared-backing',
-             'features': [ 'unstable' ] },
-           { 'name': 'x-cxl-warm-transport',
-             'features': [ 'unstable' ] },
-           { 'name': 'x-cxl-dst-install-policy',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-fault-control-plane',
              'features': [ 'unstable' ] },
@@ -1996,15 +1921,9 @@
 #
 # @x-cxl-shared-backing: Confirm that source and destination
 #     @cxl-path resolve the same interconnect-visible or otherwise
-#     explicitly shared CXL backing, allowing descriptor-only warm
-#     transport to reference stable CXL offsets across endpoints.
-#     Default is false.  (Since 11.0)
-#
-# @x-cxl-warm-transport: Experimental warm-page transport policy for
-#     CXL hybrid postcopy.  (Since 11.0)
-#
-# @x-cxl-dst-install-policy: Experimental destination-side install
-#     policy for CXL hybrid postcopy.  (Since 11.0)
+#     explicitly shared CXL backing, allowing published CXL contents
+#     and visibility state to be observed consistently across
+#     endpoints.  Default is false.  (Since 11.0)
 #
 # @x-cxl-fault-control-plane: Experimental fault control-plane
 #     transport for CXL hybrid postcopy.  (Since 11.0)
@@ -2025,8 +1944,7 @@
 #     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
 #     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
 #     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
-#     @x-cxl-shared-backing, @x-cxl-warm-transport,
-#     @x-cxl-dst-install-policy, @x-cxl-fault-control-plane, and
+#     @x-cxl-shared-backing, @x-cxl-fault-control-plane, and
 #     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
@@ -2088,12 +2006,6 @@
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-shared-backing': {
                 'type': 'bool', 'features': [ 'unstable' ] },
-            '*x-cxl-warm-transport': {
-                'type': 'CXLHybridWarmTransport',
-                'features': [ 'unstable' ] },
-            '*x-cxl-dst-install-policy': {
-                'type': 'CXLHybridDstInstallPolicy',
-                'features': [ 'unstable' ] },
             '*x-cxl-fault-control-plane': {
                 'type': 'CXLHybridFaultControlPlane',
                 'features': [ 'unstable' ] },

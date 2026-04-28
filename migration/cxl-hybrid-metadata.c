@@ -17,10 +17,7 @@
 #define CXL_HYBRID_METADATA_VERSION 1
 #define CXL_HYBRID_METADATA_ENTRY_HEADER_LEN (1 + 8 + 8 + 4 + 4)
 #define CXL_HYBRID_METADATA_HEADER_LEN (4 + 4 + 4)
-#define CXL_HYBRID_WARM_PAGE_HEADER_LEN (1 + 8 + 4)
-#define CXL_HYBRID_WARM_DESC_HEADER_LEN (1 + 8 + 8 + 4 + 4 + 4)
-#define CXL_HYBRID_WARM_DESC_BATCH_HEADER_LEN (4 + 4)
-#define CXL_HYBRID_WARM_DESC_BATCH_ENTRY_HEADER_LEN (1 + 8 + 8 + 4 + 4)
+#define CXL_HYBRID_PUBLISH_NOTIFY_HEADER_LEN (1 + 8 + 8 + 4 + 4 + 4)
 #define CXL_HYBRID_STAGING_PAGE_SIZE 4096
 
 typedef struct CXLHybridDstStagingSlot {
@@ -132,95 +129,44 @@ static bool cxl_hybrid_metadata_entry_valid(const CXLHybridMetadataEntry *entry,
     return true;
 }
 
-static bool cxl_hybrid_warm_page_valid(const CXLHybridWarmPage *page,
-                                       Error **errp)
+static bool cxl_hybrid_publish_notify_valid(
+    const CXLHybridPublishNotify *notify, Error **errp)
 {
     size_t name_len;
 
-    if (!page || !page->ramblock || !page->ramblock[0]) {
-        error_setg(errp, "CXL hybrid warm page missing ramblock name");
+    if (!notify || !notify->ramblock || !notify->ramblock[0]) {
+        error_setg(errp, "CXL hybrid publish notify missing ramblock name");
         return false;
     }
 
-    name_len = strlen(page->ramblock);
+    name_len = strlen(notify->ramblock);
     if (name_len > UCHAR_MAX) {
         error_setg(errp,
-                   "CXL hybrid warm page ramblock name too long: %zu bytes",
+                   "CXL hybrid publish notify ramblock name too long: %zu bytes",
                    name_len);
         return false;
     }
 
-    if (!page->page_len || !page->data) {
-        error_setg(errp, "CXL hybrid warm page missing payload");
+    if (!notify->page_len) {
+        error_setg(errp, "CXL hybrid publish notify missing page length");
         return false;
     }
 
-    if (!QEMU_IS_ALIGNED(page->offset, CXL_HYBRID_STAGING_PAGE_SIZE) ||
-        !QEMU_IS_ALIGNED(page->page_len, CXL_HYBRID_STAGING_PAGE_SIZE)) {
-        error_setg(errp, "CXL hybrid warm page payload must be page aligned");
+    if (!QEMU_IS_ALIGNED(notify->guest_offset, CXL_HYBRID_STAGING_PAGE_SIZE) ||
+        !QEMU_IS_ALIGNED(notify->cxl_offset, CXL_HYBRID_STAGING_PAGE_SIZE) ||
+        !QEMU_IS_ALIGNED(notify->page_len, CXL_HYBRID_STAGING_PAGE_SIZE)) {
+        error_setg(errp,
+                   "CXL hybrid publish notify offsets must be page aligned");
         return false;
     }
 
-    if (page->offset > UINT64_MAX - page->page_len) {
-        error_setg(errp, "CXL hybrid warm page range overflows");
+    if (notify->guest_offset > UINT64_MAX - notify->page_len ||
+        notify->cxl_offset > UINT64_MAX - notify->page_len) {
+        error_setg(errp, "CXL hybrid publish notify range overflows");
         return false;
     }
 
     return true;
-}
-
-static bool cxl_hybrid_warm_desc_valid(const CXLHybridWarmDescriptor *desc,
-                                       Error **errp)
-{
-    size_t name_len;
-
-    if (!desc || !desc->ramblock || !desc->ramblock[0]) {
-        error_setg(errp, "CXL hybrid warm descriptor missing ramblock name");
-        return false;
-    }
-
-    name_len = strlen(desc->ramblock);
-    if (name_len > UCHAR_MAX) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor ramblock name too long: %zu bytes",
-                   name_len);
-        return false;
-    }
-
-    if (!desc->page_len) {
-        error_setg(errp, "CXL hybrid warm descriptor missing page length");
-        return false;
-    }
-
-    if (!QEMU_IS_ALIGNED(desc->guest_offset, CXL_HYBRID_STAGING_PAGE_SIZE) ||
-        !QEMU_IS_ALIGNED(desc->cxl_offset, CXL_HYBRID_STAGING_PAGE_SIZE) ||
-        !QEMU_IS_ALIGNED(desc->page_len, CXL_HYBRID_STAGING_PAGE_SIZE)) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor offsets must be page aligned");
-        return false;
-    }
-
-    if (desc->guest_offset > UINT64_MAX - desc->page_len ||
-        desc->cxl_offset > UINT64_MAX - desc->page_len) {
-        error_setg(errp, "CXL hybrid warm descriptor range overflows");
-        return false;
-    }
-
-    return true;
-}
-
-static bool cxl_hybrid_warm_desc_range_valid(
-    const CXLHybridWarmDescRange *range, Error **errp)
-{
-    CXLHybridWarmDescriptor desc = {
-        .ramblock = range ? range->ramblock : NULL,
-        .guest_offset = range ? range->guest_offset : 0,
-        .cxl_offset = range ? range->cxl_offset : 0,
-        .page_len = range ? range->page_len : 0,
-        .flags = range ? range->flags : 0,
-    };
-
-    return cxl_hybrid_warm_desc_valid(&desc, errp);
 }
 
 void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta)
@@ -236,42 +182,6 @@ void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta)
     }
     g_free(meta->entries);
     memset(meta, 0, sizeof(*meta));
-}
-
-void cxl_hybrid_warm_page_cleanup(CXLHybridWarmPage *page)
-{
-    if (!page) {
-        return;
-    }
-
-    g_free(page->ramblock);
-    g_free(page->data);
-    memset(page, 0, sizeof(*page));
-}
-
-void cxl_hybrid_warm_desc_cleanup(CXLHybridWarmDescriptor *desc)
-{
-    if (!desc) {
-        return;
-    }
-
-    g_free(desc->ramblock);
-    memset(desc, 0, sizeof(*desc));
-}
-
-void cxl_hybrid_warm_desc_batch_cleanup(CXLHybridWarmDescBatch *batch)
-{
-    uint32_t i;
-
-    if (!batch) {
-        return;
-    }
-
-    for (i = 0; i < batch->nr_entries; i++) {
-        g_free(batch->entries[i].ramblock);
-    }
-    g_free(batch->entries);
-    memset(batch, 0, sizeof(*batch));
 }
 
 void cxl_hybrid_publish_notify_cleanup(CXLHybridPublishNotify *notify)
@@ -913,89 +823,6 @@ out:
     return rc;
 }
 
-static CXLHybridDstStagingSlot *cxl_hybrid_dst_staging_find_next_slot_locked(
-    const char *ramblock,
-    uint64_t guest_offset)
-{
-    GHashTableIter iter;
-    gpointer value;
-    CXLHybridDstStagingSlot *best = NULL;
-
-    if (!cxl_dst_staging.slots || !ramblock) {
-        return NULL;
-    }
-
-    g_hash_table_iter_init(&iter, cxl_dst_staging.slots);
-    while (g_hash_table_iter_next(&iter, NULL, &value)) {
-        CXLHybridDstStagingSlot *slot = value;
-
-        if (strcmp(slot->ramblock, ramblock) != 0 ||
-            slot->guest_offset <= guest_offset) {
-            continue;
-        }
-        if (!best || slot->guest_offset < best->guest_offset) {
-            best = slot;
-        }
-    }
-
-    return best;
-}
-
-static int cxl_hybrid_dst_staging_register_external_range_locked(
-    const char *ramblock,
-    uint64_t guest_offset,
-    uint64_t cxl_offset,
-    size_t len,
-    bool *changedp,
-    Error **errp)
-{
-    size_t remaining = len;
-    uint64_t guest_cursor = guest_offset;
-    uint64_t cxl_cursor = cxl_offset;
-
-    while (remaining) {
-        CXLHybridDstStagingSlot *slot =
-            cxl_hybrid_dst_staging_lookup(ramblock, guest_cursor);
-        size_t chunk_len = remaining;
-        int ret;
-
-        if (slot) {
-            uint64_t slot_end = slot->guest_offset + slot->length;
-
-            chunk_len = MIN(chunk_len, (size_t)(slot_end - guest_cursor));
-        } else {
-            CXLHybridDstStagingSlot *next_slot =
-                cxl_hybrid_dst_staging_find_next_slot_locked(ramblock,
-                                                             guest_cursor);
-
-            if (next_slot) {
-                chunk_len = MIN(chunk_len,
-                                (size_t)(next_slot->guest_offset -
-                                         guest_cursor));
-            }
-        }
-
-        if (!chunk_len ||
-            !QEMU_IS_ALIGNED(chunk_len, CXL_HYBRID_STAGING_PAGE_SIZE)) {
-            error_setg(errp,
-                       "CXL hybrid external staging registration could not split range");
-            return -EINVAL;
-        }
-
-        ret = cxl_hybrid_dst_staging_register_external_page_locked(
-            ramblock, guest_cursor, cxl_cursor, chunk_len, changedp, errp);
-        if (ret) {
-            return ret;
-        }
-
-        remaining -= chunk_len;
-        guest_cursor += chunk_len;
-        cxl_cursor += chunk_len;
-    }
-
-    return 0;
-}
-
 int cxl_hybrid_dst_staging_register_external_page(const char *ramblock,
                                                   uint64_t guest_offset,
                                                   uint64_t cxl_offset,
@@ -1291,123 +1118,25 @@ int cxl_hybrid_metadata_encoded_len(const CXLHybridMetadata *meta,
     return 0;
 }
 
-int cxl_hybrid_warm_page_encoded_len(const CXLHybridWarmPage *page,
-                                     size_t *len,
-                                     Error **errp)
-{
-    size_t name_len;
-
-    if (!len) {
-        error_setg(errp, "CXL hybrid warm page length request missing output");
-        return -EINVAL;
-    }
-
-    if (!cxl_hybrid_warm_page_valid(page, errp)) {
-        return -EINVAL;
-    }
-
-    name_len = strlen(page->ramblock);
-    if (page->page_len > SIZE_MAX - CXL_HYBRID_WARM_PAGE_HEADER_LEN - name_len) {
-        error_setg(errp, "CXL hybrid warm page payload too large");
-        return -EOVERFLOW;
-    }
-
-    *len = CXL_HYBRID_WARM_PAGE_HEADER_LEN + name_len + page->page_len;
-    return 0;
-}
-
-int cxl_hybrid_warm_desc_encoded_len(const CXLHybridWarmDescriptor *desc,
-                                     size_t *len,
-                                     Error **errp)
-{
-    size_t name_len;
-
-    if (!len) {
-        error_setg(errp, "CXL hybrid warm descriptor length request missing output");
-        return -EINVAL;
-    }
-
-    if (!cxl_hybrid_warm_desc_valid(desc, errp)) {
-        return -EINVAL;
-    }
-
-    name_len = strlen(desc->ramblock);
-    *len = CXL_HYBRID_WARM_DESC_HEADER_LEN + name_len;
-    return 0;
-}
-
-int cxl_hybrid_warm_desc_batch_encoded_len(const CXLHybridWarmDescBatch *batch,
-                                           size_t *len,
-                                           Error **errp)
-{
-    size_t total = CXL_HYBRID_WARM_DESC_BATCH_HEADER_LEN;
-    uint32_t i;
-
-    if (!len) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch length request missing output");
-        return -EINVAL;
-    }
-
-    if (!batch) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch length request missing batch");
-        return -EINVAL;
-    }
-
-    if (batch->nr_entries && !batch->entries) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch has %u entries without storage",
-                   batch->nr_entries);
-        return -EINVAL;
-    }
-
-    for (i = 0; i < batch->nr_entries; i++) {
-        const CXLHybridWarmDescRange *range = &batch->entries[i];
-        size_t name_len;
-
-        if (!cxl_hybrid_warm_desc_range_valid(range, errp)) {
-            return -EINVAL;
-        }
-
-        name_len = strlen(range->ramblock);
-        if (total > SIZE_MAX - CXL_HYBRID_WARM_DESC_BATCH_ENTRY_HEADER_LEN ||
-            total + CXL_HYBRID_WARM_DESC_BATCH_ENTRY_HEADER_LEN >
-            SIZE_MAX - name_len) {
-            error_setg(errp,
-                       "CXL hybrid warm descriptor batch payload too large");
-            return -EOVERFLOW;
-        }
-
-        total += CXL_HYBRID_WARM_DESC_BATCH_ENTRY_HEADER_LEN + name_len;
-    }
-
-    *len = total;
-    return 0;
-}
-
-static void cxl_hybrid_publish_notify_to_desc(
-    const CXLHybridPublishNotify *notify,
-    CXLHybridWarmDescriptor *desc)
-{
-    *desc = (CXLHybridWarmDescriptor) {
-        .ramblock = notify ? notify->ramblock : NULL,
-        .guest_offset = notify ? notify->guest_offset : 0,
-        .cxl_offset = notify ? notify->cxl_offset : 0,
-        .page_len = notify ? notify->page_len : 0,
-        .flags = 0,
-        .generation = notify ? notify->generation : 0,
-    };
-}
-
 int cxl_hybrid_publish_notify_encoded_len(const CXLHybridPublishNotify *notify,
                                           size_t *len,
                                           Error **errp)
 {
-    CXLHybridWarmDescriptor desc;
+    size_t name_len;
 
-    cxl_hybrid_publish_notify_to_desc(notify, &desc);
-    return cxl_hybrid_warm_desc_encoded_len(&desc, len, errp);
+    if (!len) {
+        error_setg(errp,
+                   "CXL hybrid publish notify length request missing output");
+        return -EINVAL;
+    }
+
+    if (!cxl_hybrid_publish_notify_valid(notify, errp)) {
+        return -EINVAL;
+    }
+
+    name_len = strlen(notify->ramblock);
+    *len = CXL_HYBRID_PUBLISH_NOTIFY_HEADER_LEN + name_len;
+    return 0;
 }
 
 int cxl_hybrid_metadata_encode(const CXLHybridMetadata *meta,
@@ -1464,150 +1193,47 @@ int cxl_hybrid_metadata_encode(const CXLHybridMetadata *meta,
     return 0;
 }
 
-int cxl_hybrid_warm_page_encode(const CXLHybridWarmPage *page,
-                                uint8_t *buf,
-                                size_t len,
-                                Error **errp)
-{
-    uint8_t *p = buf;
-    size_t expected_len;
-    uint8_t name_len;
-    int ret;
-
-    if (!buf) {
-        error_setg(errp, "CXL hybrid warm page encode missing buffer");
-        return -EINVAL;
-    }
-
-    ret = cxl_hybrid_warm_page_encoded_len(page, &expected_len, errp);
-    if (ret) {
-        return ret;
-    }
-
-    if (len != expected_len) {
-        error_setg(errp,
-                   "CXL hybrid warm page encode length mismatch: got %zu expected %zu",
-                   len, expected_len);
-        return -EINVAL;
-    }
-
-    name_len = strlen(page->ramblock);
-    *p++ = name_len;
-    memcpy(p, page->ramblock, name_len);
-    p += name_len;
-    stq_be_p(p, page->offset);
-    p += 8;
-    stl_be_p(p, page->page_len);
-    p += 4;
-    memcpy(p, page->data, page->page_len);
-    return 0;
-}
-
-int cxl_hybrid_warm_desc_encode(const CXLHybridWarmDescriptor *desc,
-                                uint8_t *buf,
-                                size_t len,
-                                Error **errp)
-{
-    uint8_t *p = buf;
-    size_t expected_len;
-    uint8_t name_len;
-    int ret;
-
-    if (!buf) {
-        error_setg(errp, "CXL hybrid warm descriptor encode missing buffer");
-        return -EINVAL;
-    }
-
-    ret = cxl_hybrid_warm_desc_encoded_len(desc, &expected_len, errp);
-    if (ret) {
-        return ret;
-    }
-
-    if (len != expected_len) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor encode length mismatch: got %zu expected %zu",
-                   len, expected_len);
-        return -EINVAL;
-    }
-
-    name_len = strlen(desc->ramblock);
-    *p++ = name_len;
-    memcpy(p, desc->ramblock, name_len);
-    p += name_len;
-    stq_be_p(p, desc->guest_offset);
-    p += 8;
-    stq_be_p(p, desc->cxl_offset);
-    p += 8;
-    stl_be_p(p, desc->page_len);
-    p += 4;
-    stl_be_p(p, desc->flags);
-    p += 4;
-    stl_be_p(p, desc->generation);
-    return 0;
-}
-
-int cxl_hybrid_warm_desc_batch_encode(const CXLHybridWarmDescBatch *batch,
-                                      uint8_t *buf,
-                                      size_t len,
-                                      Error **errp)
-{
-    uint8_t *p = buf;
-    size_t expected_len;
-    uint32_t i;
-    int ret;
-
-    if (!buf) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch encode missing buffer");
-        return -EINVAL;
-    }
-
-    ret = cxl_hybrid_warm_desc_batch_encoded_len(batch, &expected_len, errp);
-    if (ret) {
-        return ret;
-    }
-
-    if (len != expected_len) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch encode length mismatch: got %zu expected %zu",
-                   len, expected_len);
-        return -EINVAL;
-    }
-
-    stl_be_p(p, batch->generation);
-    p += 4;
-    stl_be_p(p, batch->nr_entries);
-    p += 4;
-
-    for (i = 0; i < batch->nr_entries; i++) {
-        const CXLHybridWarmDescRange *range = &batch->entries[i];
-        uint8_t name_len = strlen(range->ramblock);
-
-        *p++ = name_len;
-        memcpy(p, range->ramblock, name_len);
-        p += name_len;
-        stq_be_p(p, range->guest_offset);
-        p += 8;
-        stq_be_p(p, range->cxl_offset);
-        p += 8;
-        stl_be_p(p, range->page_len);
-        p += 4;
-        stl_be_p(p, range->flags);
-        p += 4;
-    }
-
-    return 0;
-}
-
 int cxl_hybrid_publish_notify_encode(const CXLHybridPublishNotify *notify,
                                      uint8_t *buf,
                                      size_t len,
                                      Error **errp)
 {
-    CXLHybridWarmDescriptor desc;
+    uint8_t *p = buf;
+    size_t expected_len;
+    uint8_t name_len;
+    int ret;
 
-    cxl_hybrid_publish_notify_to_desc(notify, &desc);
-    return cxl_hybrid_warm_desc_encode(&desc, buf, len, errp);
+    if (!buf) {
+        error_setg(errp, "CXL hybrid publish notify encode missing buffer");
+        return -EINVAL;
+    }
+
+    ret = cxl_hybrid_publish_notify_encoded_len(notify, &expected_len, errp);
+    if (ret) {
+        return ret;
+    }
+
+    if (len != expected_len) {
+        error_setg(errp,
+                   "CXL hybrid publish notify encode length mismatch: got %zu expected %zu",
+                   len, expected_len);
+        return -EINVAL;
+    }
+
+    name_len = strlen(notify->ramblock);
+    *p++ = name_len;
+    memcpy(p, notify->ramblock, name_len);
+    p += name_len;
+    stq_be_p(p, notify->guest_offset);
+    p += 8;
+    stq_be_p(p, notify->cxl_offset);
+    p += 8;
+    stl_be_p(p, notify->page_len);
+    p += 4;
+    stl_be_p(p, 0);
+    p += 4;
+    stl_be_p(p, notify->generation);
+    return 0;
 }
 
 int cxl_hybrid_metadata_decode(CXLHybridMetadata *meta,
@@ -1695,84 +1321,31 @@ fail:
     return -EINVAL;
 }
 
-int cxl_hybrid_warm_page_decode(CXLHybridWarmPage *page,
-                                const uint8_t *buf,
-                                size_t len,
-                                Error **errp)
+int cxl_hybrid_publish_notify_decode(CXLHybridPublishNotify *notify,
+                                     const uint8_t *buf,
+                                     size_t len,
+                                     Error **errp)
 {
     const uint8_t *p = buf;
     const uint8_t *end = buf + len;
-    CXLHybridWarmPage decoded = { 0 };
+    CXLHybridPublishNotify decoded = { 0 };
     uint8_t name_len;
 
-    if (!page || !buf) {
-        error_setg(errp, "CXL hybrid warm page decode missing arguments");
+    if (!notify || !buf) {
+        error_setg(errp, "CXL hybrid publish notify decode missing arguments");
         return -EINVAL;
     }
 
-    if (len < CXL_HYBRID_WARM_PAGE_HEADER_LEN) {
-        error_setg(errp, "CXL hybrid warm page payload too short: %zu", len);
-        return -EINVAL;
-    }
-
-    name_len = *p++;
-    if ((size_t)(end - p) < name_len + 8 + 4) {
-        error_setg(errp, "CXL hybrid warm page truncated in header");
-        return -EINVAL;
-    }
-
-    decoded.ramblock = g_strndup((const char *)p, name_len);
-    p += name_len;
-    decoded.offset = ldq_be_p(p);
-    p += 8;
-    decoded.page_len = ldl_be_p(p);
-    p += 4;
-
-    if ((size_t)(end - p) != decoded.page_len) {
-        error_setg(errp,
-                   "CXL hybrid warm page length mismatch: payload=%zu expected=%" PRIu32,
-                   (size_t)(end - p), decoded.page_len);
-        goto fail;
-    }
-
-    decoded.data = g_memdup2(p, decoded.page_len);
-    if (!cxl_hybrid_warm_page_valid(&decoded, errp)) {
-        goto fail;
-    }
-
-    cxl_hybrid_warm_page_cleanup(page);
-    *page = decoded;
-    return 0;
-
-fail:
-    cxl_hybrid_warm_page_cleanup(&decoded);
-    return -EINVAL;
-}
-
-int cxl_hybrid_warm_desc_decode(CXLHybridWarmDescriptor *desc,
-                                const uint8_t *buf,
-                                size_t len,
-                                Error **errp)
-{
-    const uint8_t *p = buf;
-    const uint8_t *end = buf + len;
-    CXLHybridWarmDescriptor decoded = { 0 };
-    uint8_t name_len;
-
-    if (!desc || !buf) {
-        error_setg(errp, "CXL hybrid warm descriptor decode missing arguments");
-        return -EINVAL;
-    }
-
-    if (len < CXL_HYBRID_WARM_DESC_HEADER_LEN) {
-        error_setg(errp, "CXL hybrid warm descriptor payload too short: %zu",
+    if (len < CXL_HYBRID_PUBLISH_NOTIFY_HEADER_LEN) {
+        error_setg(errp, "CXL hybrid publish notify payload too short: %zu",
                    len);
         return -EINVAL;
     }
 
     name_len = *p++;
-    if ((size_t)(end - p) < name_len + CXL_HYBRID_WARM_DESC_HEADER_LEN - 1) {
-        error_setg(errp, "CXL hybrid warm descriptor truncated in header");
+    if ((size_t)(end - p) <
+        name_len + CXL_HYBRID_PUBLISH_NOTIFY_HEADER_LEN - 1) {
+        error_setg(errp, "CXL hybrid publish notify truncated in header");
         return -EINVAL;
     }
 
@@ -1784,250 +1357,26 @@ int cxl_hybrid_warm_desc_decode(CXLHybridWarmDescriptor *desc,
     p += 8;
     decoded.page_len = ldl_be_p(p);
     p += 4;
-    decoded.flags = ldl_be_p(p);
     p += 4;
     decoded.generation = ldl_be_p(p);
     p += 4;
 
     if (p != end) {
         error_setg(errp,
-                   "CXL hybrid warm descriptor payload has %zu trailing bytes",
+                   "CXL hybrid publish notify payload has %zu trailing bytes",
                    (size_t)(end - p));
         goto fail;
     }
 
-    if (!cxl_hybrid_warm_desc_valid(&decoded, errp)) {
+    if (!cxl_hybrid_publish_notify_valid(&decoded, errp)) {
         goto fail;
-    }
-
-    cxl_hybrid_warm_desc_cleanup(desc);
-    *desc = decoded;
-    return 0;
-
-fail:
-    cxl_hybrid_warm_desc_cleanup(&decoded);
-    return -EINVAL;
-}
-
-int cxl_hybrid_warm_desc_batch_decode(CXLHybridWarmDescBatch *batch,
-                                      const uint8_t *buf,
-                                      size_t len,
-                                      Error **errp)
-{
-    const uint8_t *p = buf;
-    const uint8_t *end = buf + len;
-    CXLHybridWarmDescBatch decoded = { 0 };
-    uint32_t i;
-
-    if (!batch || !buf) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch decode missing arguments");
-        return -EINVAL;
-    }
-
-    if (len < CXL_HYBRID_WARM_DESC_BATCH_HEADER_LEN) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch payload too short: %zu",
-                   len);
-        return -EINVAL;
-    }
-
-    decoded.generation = ldl_be_p(p);
-    p += 4;
-    decoded.nr_entries = ldl_be_p(p);
-    p += 4;
-
-    if (decoded.nr_entries) {
-        decoded.entries = g_new0(CXLHybridWarmDescRange, decoded.nr_entries);
-    }
-
-    for (i = 0; i < decoded.nr_entries; i++) {
-        CXLHybridWarmDescRange *range = &decoded.entries[i];
-        uint8_t name_len;
-
-        if ((size_t)(end - p) < 1) {
-            error_setg(errp,
-                       "CXL hybrid warm descriptor batch truncated before entry %u name length",
-                       i);
-            goto fail;
-        }
-
-        name_len = *p++;
-        if ((size_t)(end - p) <
-            name_len + CXL_HYBRID_WARM_DESC_BATCH_ENTRY_HEADER_LEN - 1) {
-            error_setg(errp,
-                       "CXL hybrid warm descriptor batch truncated in entry %u",
-                       i);
-            goto fail;
-        }
-
-        range->ramblock = g_strndup((const char *)p, name_len);
-        p += name_len;
-        range->guest_offset = ldq_be_p(p);
-        p += 8;
-        range->cxl_offset = ldq_be_p(p);
-        p += 8;
-        range->page_len = ldl_be_p(p);
-        p += 4;
-        range->flags = ldl_be_p(p);
-        p += 4;
-
-        if (!cxl_hybrid_warm_desc_range_valid(range, errp)) {
-            goto fail;
-        }
-    }
-
-    if (p != end) {
-        error_setg(errp,
-                   "CXL hybrid warm descriptor batch payload has %zu trailing bytes",
-                   (size_t)(end - p));
-        goto fail;
-    }
-
-    cxl_hybrid_warm_desc_batch_cleanup(batch);
-    *batch = decoded;
-    return 0;
-
-fail:
-    cxl_hybrid_warm_desc_batch_cleanup(&decoded);
-    return -EINVAL;
-}
-
-int cxl_hybrid_publish_notify_decode(CXLHybridPublishNotify *notify,
-                                     const uint8_t *buf,
-                                     size_t len,
-                                     Error **errp)
-{
-    CXLHybridWarmDescriptor desc = { 0 };
-    int ret;
-
-    if (!notify) {
-        error_setg(errp, "CXL hybrid publish notify decode missing output");
-        return -EINVAL;
-    }
-
-    ret = cxl_hybrid_warm_desc_decode(&desc, buf, len, errp);
-    if (ret) {
-        return ret;
     }
 
     cxl_hybrid_publish_notify_cleanup(notify);
-    *notify = (CXLHybridPublishNotify) {
-        .ramblock = g_steal_pointer(&desc.ramblock),
-        .guest_offset = desc.guest_offset,
-        .cxl_offset = desc.cxl_offset,
-        .page_len = desc.page_len,
-        .generation = desc.generation,
-    };
-    cxl_hybrid_warm_desc_cleanup(&desc);
+    *notify = decoded;
     return 0;
-}
 
-int cxl_hybrid_warm_page_store(const CXLHybridWarmPage *page, Error **errp)
-{
-    int ret;
-
-    if (!cxl_hybrid_warm_page_valid(page, errp)) {
-        return -EINVAL;
-    }
-
-    if (!cxl_hybrid_dst_staging_is_active()) {
-        error_setg(errp, "CXL hybrid destination staging is not initialized");
-        return -EINVAL;
-    }
-
-    ret = cxl_hybrid_dst_staging_store_page(page->ramblock, page->offset,
-                                            page->data, page->page_len,
-                                            errp);
-    if (ret) {
-        return ret;
-    }
-
-    trace_cxl_hybrid_warm_page_recv(page->ramblock, page->offset,
-                                    page->page_len);
-    return 0;
-}
-
-int cxl_hybrid_warm_desc_store(const CXLHybridWarmDescriptor *desc,
-                               Error **errp)
-{
-    int ret;
-
-    if (!cxl_hybrid_warm_desc_valid(desc, errp)) {
-        return -EINVAL;
-    }
-
-    if (!cxl_hybrid_dst_staging_is_active()) {
-        error_setg(errp, "CXL hybrid destination staging is not initialized");
-        return -EINVAL;
-    }
-
-    ret = cxl_hybrid_dst_staging_register_external_page(desc->ramblock,
-                                                        desc->guest_offset,
-                                                        desc->cxl_offset,
-                                                        desc->page_len,
-                                                        errp);
-    if (ret) {
-        return ret;
-    }
-
-    trace_cxl_hybrid_warm_desc_recv(desc->ramblock, desc->guest_offset,
-                                    desc->cxl_offset, desc->page_len);
-    return 0;
-}
-
-int cxl_hybrid_warm_desc_batch_store(const CXLHybridWarmDescBatch *batch,
-                                     Error **errp)
-{
-    uint32_t i;
-    uint32_t pages = 0;
-    bool changed = false;
-    size_t encoded_len;
-    int ret = 0;
-
-    if (!batch) {
-        error_setg(errp, "CXL hybrid warm descriptor batch missing batch");
-        return -EINVAL;
-    }
-
-    ret = cxl_hybrid_warm_desc_batch_encoded_len(batch, &encoded_len, errp);
-    if (ret) {
-        return ret;
-    }
-
-    if (!cxl_hybrid_dst_staging_is_active()) {
-        error_setg(errp, "CXL hybrid destination staging is not initialized");
-        return -EINVAL;
-    }
-
-    if (cxl_dst_staging.sync_ready) {
-        qemu_mutex_lock(&cxl_dst_staging.lock);
-    }
-
-    for (i = 0; i < batch->nr_entries; i++) {
-        const CXLHybridWarmDescRange *range = &batch->entries[i];
-
-        ret = cxl_hybrid_dst_staging_register_external_range_locked(
-            range->ramblock, range->guest_offset, range->cxl_offset,
-            range->page_len, &changed, errp);
-        if (ret) {
-            goto out;
-        }
-
-        pages += range->page_len / CXL_HYBRID_STAGING_PAGE_SIZE;
-        trace_cxl_hybrid_warm_desc_recv(range->ramblock, range->guest_offset,
-                                        range->cxl_offset, range->page_len);
-    }
-
-    if (changed && cxl_dst_staging.sync_ready) {
-        qemu_cond_broadcast(&cxl_dst_staging.cond);
-    }
-    trace_cxl_hybrid_warm_desc_batch_recv(batch->generation, batch->nr_entries,
-                                          pages, encoded_len);
-
-out:
-    if (cxl_dst_staging.sync_ready) {
-        qemu_mutex_unlock(&cxl_dst_staging.lock);
-    }
-    return ret;
+fail:
+    cxl_hybrid_publish_notify_cleanup(&decoded);
+    return -EINVAL;
 }
