@@ -147,7 +147,6 @@ static void test_header_reset_clears_visible_bitmap(void)
         .version = 0xffffU,
         .flags = 0xffffU,
         .request_ring_order = 77,
-        .ready_ring_order = 88,
         .generation = 99,
         .visible_page_words = 1234,
         .owned_region_words = 5678,
@@ -159,8 +158,6 @@ static void test_header_reset_clears_visible_bitmap(void)
         .request_cons = 9,
         .active_enqueue_count = 4,
         .active_request_count = 3,
-        .ready_prod = 20,
-        .ready_cons = 19,
         .source_write_count = 33,
         .completed_generation = 99,
         .completion_flags = CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE,
@@ -181,7 +178,6 @@ static void test_header_reset_clears_visible_bitmap(void)
     g_assert_cmpuint(hdr.version, ==, CXL_HYBRID_CTRL_VERSION);
     g_assert_cmpuint(hdr.flags, ==, 0);
     g_assert_cmpuint(hdr.request_ring_order, ==, CXL_HYBRID_CTRL_REQUEST_ORDER);
-    g_assert_cmpuint(hdr.ready_ring_order, ==, CXL_HYBRID_CTRL_READY_ORDER);
     g_assert_cmpuint(hdr.generation, ==, 2);
     g_assert_cmpuint(hdr.visible_page_words, ==, G_N_ELEMENTS(visible_bitmap));
     g_assert_cmpuint(hdr.owned_region_words, ==, G_N_ELEMENTS(owned_bitmap));
@@ -195,8 +191,6 @@ static void test_header_reset_clears_visible_bitmap(void)
     g_assert_cmpuint(hdr.request_cons, ==, 0);
     g_assert_cmpuint(hdr.active_enqueue_count, ==, 0);
     g_assert_cmpuint(hdr.active_request_count, ==, 0);
-    g_assert_cmpuint(hdr.ready_prod, ==, 0);
-    g_assert_cmpuint(hdr.ready_cons, ==, 0);
     g_assert_cmpuint(hdr.source_write_count, ==, 0);
     g_assert_cmpuint(hdr.completed_generation, ==, 0);
     g_assert_cmpuint(hdr.completion_flags, ==, 0);

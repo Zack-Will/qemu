@@ -18,9 +18,8 @@
 
 #define CXL_HYBRID_METADATA_VERSION 1
 #define CXL_HYBRID_CTRL_MAGIC 0x43584c48U
-#define CXL_HYBRID_CTRL_VERSION 3
+#define CXL_HYBRID_CTRL_VERSION 4
 #define CXL_HYBRID_CTRL_REQUEST_ORDER 10
-#define CXL_HYBRID_CTRL_READY_ORDER 11
 #define CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE (1U << 0)
 #define CXL_REMAP_GRANULE_DEFAULT (64 * 1024)
 #define CXL_REMAP_GRANULE_ENV "QEMU_CXL_REMAP_GRANULE"
@@ -54,7 +53,6 @@ typedef struct CXLHybridControlHeader {
     uint16_t version;
     uint16_t flags;
     uint32_t request_ring_order;
-    uint32_t ready_ring_order;
     uint32_t generation;
     uint32_t visible_page_words;
     uint32_t owned_region_words;
@@ -66,8 +64,6 @@ typedef struct CXLHybridControlHeader {
     uint64_t request_cons;
     uint64_t active_enqueue_count;
     uint64_t active_request_count;
-    uint64_t ready_prod;
-    uint64_t ready_cons;
     uint64_t source_write_count;
     uint32_t completed_generation;
     uint32_t completion_flags;
@@ -82,15 +78,6 @@ typedef struct CXLHybridFaultRequestRecord {
     uint64_t request_ts_ns;
 } CXLHybridFaultRequestRecord;
 
-typedef struct CXLHybridFaultReadyRecord {
-    uint64_t seq;
-    uint64_t page_index;
-    uint64_t cxl_offset;
-    uint32_t generation;
-    uint32_t flags;
-    uint64_t ready_ts_ns;
-} CXLHybridFaultReadyRecord;
-
 typedef bool (*CXLHybridPageResolveFunc)(uint64_t page_index, void *opaque);
 
 typedef struct CXLHybridFaultRegionGeometry {
@@ -103,12 +90,6 @@ typedef struct CXLHybridFaultRegionGeometry {
     uint64_t region_index;
 } CXLHybridFaultRegionGeometry;
 
-typedef int (*CXLHybridFaultReadyConsumer)(
-    const CXLHybridFaultReadyRecord *record, Error **errp);
-
-#define CXL_HYBRID_FAULT_READY_F_PRIMARY        (1U << 0)
-#define CXL_HYBRID_FAULT_READY_F_BURST_NEIGHBOR (1U << 1)
-#define CXL_HYBRID_FAULT_READY_F_SOURCE_REMAPPED (1U << 2)
 #define CXL_HYBRID_FAULT_REQUEST_F_REGION       (1U << 0)
 
 typedef struct CXLHybridWarmStats {
@@ -433,9 +414,6 @@ void cxl_hybrid_ctrl_mark_region_owned(uint64_t region_index,
 void cxl_hybrid_ctrl_source_write_begin(void);
 void cxl_hybrid_ctrl_source_write_end(void);
 bool cxl_hybrid_ctrl_dequeue_fault_request(CXLHybridFaultRequestRecord *record);
-int cxl_hybrid_ctrl_enqueue_fault_ready(
-    const CXLHybridFaultReadyRecord *record, Error **errp);
-bool cxl_hybrid_ctrl_dequeue_fault_ready(CXLHybridFaultReadyRecord *record);
 
 void cxl_hybrid_get_publish_stats(CXLHybridPublishStats *stats);
 bool cxl_hybrid_get_published_page_state(const char *ramblock,
@@ -445,15 +423,11 @@ void cxl_hybrid_note_publish_request_received(const char *ramblock,
                                               uint64_t guest_offset,
                                               uint32_t generation,
                                               uint64_t req_recv_ns);
-int cxl_hybrid_handle_fault_ready_record(
-    const CXLHybridFaultReadyRecord *record, Error **errp);
 int cxl_hybrid_publish_fault_request_core(const char *ramblock,
                                           uint64_t guest_offset,
                                           uint32_t page_len,
                                           uint32_t generation,
                                           bool emit_burst,
-                                          CXLHybridFaultReadyRecord *primary_ready,
-                                          CXLHybridFaultReadyConsumer ready_consumer,
                                           Error **errp);
 int cxl_hybrid_publish_fault_region_request_core(uint64_t first_page,
                                                  uint32_t nr_pages,

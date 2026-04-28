@@ -20,7 +20,6 @@ typedef struct CXLHybridControlRegion {
     unsigned long *visible_bitmap;
     unsigned long *owned_region_bitmap;
     CXLHybridFaultRequestRecord *request_ring;
-    CXLHybridFaultReadyRecord *ready_ring;
     uint64_t total_pages;
     uint64_t total_regions;
     uint64_t region_granule;
@@ -28,7 +27,6 @@ typedef struct CXLHybridControlRegion {
     uint32_t owned_region_words;
     uint32_t region_granule_shift;
     uint32_t request_ring_entries;
-    uint32_t ready_ring_entries;
     uint32_t users;
 } CXLHybridControlRegion;
 
@@ -39,11 +37,8 @@ typedef struct CXLHybridControlState {
     unsigned long *visible_bitmap;
     unsigned long *owned_region_bitmap;
     CXLHybridFaultRequestRecord *request_ring;
-    CXLHybridFaultReadyRecord *ready_ring;
     QemuThread request_worker;
-    QemuThread ready_poller;
     bool request_worker_running;
-    bool ready_poller_running;
     bool shutdown;
 } CXLHybridControlState;
 
@@ -53,13 +48,10 @@ static CXLHybridControlRegion cxl_hybrid_control_region = {
 static CXLHybridControlState cxl_hybrid_control_source;
 static CXLHybridControlState cxl_hybrid_control_destination;
 static QemuMutex cxl_hybrid_control_request_lock;
-static QemuMutex cxl_hybrid_control_ready_lock;
 static bool cxl_hybrid_control_locks_ready;
 
 static bool cxl_hybrid_ctrl_try_dequeue_request(CXLHybridControlState *state,
                                                 CXLHybridFaultRequestRecord *record);
-static bool cxl_hybrid_ctrl_try_dequeue_ready(CXLHybridControlState *state,
-                                              CXLHybridFaultReadyRecord *record);
 
 static uint64_t cxl_hybrid_ctrl_total_pages(void)
 {
@@ -161,12 +153,9 @@ uint64_t cxl_hybrid_fault_control_region_bytes(void)
     size_t request_bytes =
         (size_t)cxl_hybrid_ctrl_ring_entries(CXL_HYBRID_CTRL_REQUEST_ORDER) *
         sizeof(CXLHybridFaultRequestRecord);
-    size_t ready_bytes =
-        (size_t)cxl_hybrid_ctrl_ring_entries(CXL_HYBRID_CTRL_READY_ORDER) *
-        sizeof(CXLHybridFaultReadyRecord);
 
     return ROUND_UP(sizeof(CXLHybridControlHeader) + visible_bitmap_bytes +
-                    owned_region_bitmap_bytes + request_bytes + ready_bytes,
+                    owned_region_bitmap_bytes + request_bytes,
                     (size_t)qemu_real_host_page_size());
 }
 
@@ -262,7 +251,6 @@ static void cxl_hybrid_ctrl_ensure_locks(void)
     }
 
     qemu_mutex_init(&cxl_hybrid_control_request_lock);
-    qemu_mutex_init(&cxl_hybrid_control_ready_lock);
     cxl_hybrid_control_locks_ready = true;
 }
 
@@ -275,7 +263,6 @@ static void cxl_hybrid_ctrl_bind_state(CXLHybridControlState *state)
     state->owned_region_bitmap =
         cxl_hybrid_control_region.owned_region_bitmap;
     state->request_ring = cxl_hybrid_control_region.request_ring;
-    state->ready_ring = cxl_hybrid_control_region.ready_ring;
     state->shutdown = false;
 }
 
@@ -400,8 +387,6 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
         cxl_hybrid_control_region_granule_shift(region_granule);
     cxl_hybrid_control_region.request_ring_entries =
         cxl_hybrid_ctrl_ring_entries(CXL_HYBRID_CTRL_REQUEST_ORDER);
-    cxl_hybrid_control_region.ready_ring_entries =
-        cxl_hybrid_ctrl_ring_entries(CXL_HYBRID_CTRL_READY_ORDER);
     cxl_hybrid_control_region.visible_bitmap = (unsigned long *)(hdr + 1);
     cxl_hybrid_control_region.owned_region_bitmap =
         (unsigned long *)((char *)cxl_hybrid_control_region.visible_bitmap +
@@ -410,10 +395,6 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
         (CXLHybridFaultRequestRecord *)
         ((char *)cxl_hybrid_control_region.owned_region_bitmap +
          owned_region_bitmap_bytes);
-    cxl_hybrid_control_region.ready_ring =
-        (CXLHybridFaultReadyRecord *)(
-            cxl_hybrid_control_region.request_ring +
-            cxl_hybrid_control_region.request_ring_entries);
 
     return 0;
 }
@@ -442,11 +423,9 @@ static bool cxl_hybrid_ctrl_state_ready(const CXLHybridControlState *state)
 {
     return state->hdr && state->visible_bitmap &&
            state->owned_region_bitmap && state->request_ring &&
-           state->ready_ring &&
            state->hdr->magic == CXL_HYBRID_CTRL_MAGIC &&
            state->hdr->version == CXL_HYBRID_CTRL_VERSION &&
-           state->hdr->request_ring_order == CXL_HYBRID_CTRL_REQUEST_ORDER &&
-           state->hdr->ready_ring_order == CXL_HYBRID_CTRL_READY_ORDER;
+           state->hdr->request_ring_order == CXL_HYBRID_CTRL_REQUEST_ORDER;
 }
 
 static bool cxl_hybrid_ctrl_state_run_completed(
@@ -621,8 +600,6 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                     TARGET_PAGE_SIZE,
                     record.generation,
                     !migrate_cxl_fault_resolve_uses_region(),
-                    &(CXLHybridFaultReadyRecord){ 0 },
-                    NULL,
                     &local_err)) {
                 if (local_err) {
                     error_report_err(local_err);
@@ -636,30 +613,6 @@ request_done:
         g_usleep(50);
     }
     trace_cxl_hybrid_ctrl_request_worker_stop();
-    return NULL;
-}
-
-static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)
-{
-    CXLHybridControlState *state = opaque;
-    CXLHybridFaultReadyRecord record;
-
-    trace_cxl_hybrid_ctrl_ready_poller_start();
-    while (!qatomic_read(&state->shutdown)) {
-        if (cxl_hybrid_ctrl_dequeue_fault_ready(&record)) {
-            Error *local_err = NULL;
-
-            if (!cxl_hybrid_control_generation_matches(state->hdr,
-                                                       record.generation)) {
-                continue;
-            }
-            cxl_hybrid_handle_fault_ready_record(&record, &local_err);
-            error_free(local_err);
-            continue;
-        }
-        g_usleep(50);
-    }
-    trace_cxl_hybrid_ctrl_ready_poller_stop();
     return NULL;
 }
 
@@ -688,44 +641,9 @@ static void cxl_hybrid_ctrl_stop_request_worker(CXLHybridControlState *state)
     qatomic_set(&state->shutdown, false);
 }
 
-static void cxl_hybrid_ctrl_start_ready_poller(CXLHybridControlState *state)
-{
-    if (state->ready_poller_running) {
-        return;
-    }
-
-    qatomic_set(&state->shutdown, false);
-    qemu_thread_create(&state->ready_poller, "cxl-ctrl-ready",
-                       cxl_hybrid_ctrl_ready_poller_thread, state,
-                       QEMU_THREAD_JOINABLE);
-    state->ready_poller_running = true;
-}
-
-static void cxl_hybrid_ctrl_stop_ready_poller(CXLHybridControlState *state)
-{
-    if (!state->ready_poller_running) {
-        return;
-    }
-
-    qatomic_set(&state->shutdown, true);
-    qemu_thread_join(&state->ready_poller);
-    state->ready_poller_running = false;
-    qatomic_set(&state->shutdown, false);
-}
-
 static void cxl_hybrid_ctrl_publish_request(CXLHybridFaultRequestRecord *slot,
                                             const CXLHybridFaultRequestRecord *src,
                                             uint64_t seq)
-{
-    *slot = *src;
-    smp_wmb();
-    qatomic_set(&slot->seq, seq);
-}
-
-static void cxl_hybrid_ctrl_publish_fault_ready(
-    CXLHybridFaultReadyRecord *slot,
-    const CXLHybridFaultReadyRecord *src,
-    uint64_t seq)
 {
     *slot = *src;
     smp_wmb();
@@ -793,46 +711,6 @@ out:
     return ret;
 }
 
-static int cxl_hybrid_ctrl_try_enqueue_ready(CXLHybridControlState *state,
-                                             const CXLHybridFaultReadyRecord *record,
-                                             Error **errp)
-{
-    CXLHybridFaultReadyRecord entry = { 0 };
-    CXLHybridFaultReadyRecord *slot;
-    uint64_t cons;
-    uint64_t prod;
-    uint64_t seq;
-    uint64_t mask;
-    int ret = 0;
-
-    if (!cxl_hybrid_ctrl_state_ready(state)) {
-        error_setg(errp, "CXL hybrid fault ready ring is not initialized");
-        return -EINVAL;
-    }
-
-    qemu_mutex_lock(&cxl_hybrid_control_ready_lock);
-    prod = qatomic_read(&state->hdr->ready_prod);
-    cons = qatomic_read(&state->hdr->ready_cons);
-    if (prod - cons >= cxl_hybrid_control_region.ready_ring_entries) {
-        error_setg(errp, "CXL hybrid fault ready ring is full");
-        ret = -ENOSPC;
-        goto out;
-    }
-
-    seq = prod + 1;
-    mask = cxl_hybrid_control_region.ready_ring_entries - 1;
-    slot = &state->ready_ring[prod & mask];
-    entry = *record;
-    entry.seq = 0;
-    cxl_hybrid_ctrl_publish_fault_ready(slot, &entry, seq);
-    smp_wmb();
-    qatomic_set(&state->hdr->ready_prod, seq);
-
-out:
-    qemu_mutex_unlock(&cxl_hybrid_control_ready_lock);
-    return ret;
-}
-
 static bool cxl_hybrid_ctrl_try_dequeue_request(CXLHybridControlState *state,
                                                 CXLHybridFaultRequestRecord *record)
 {
@@ -863,38 +741,6 @@ static bool cxl_hybrid_ctrl_try_dequeue_request(CXLHybridControlState *state,
     *record = *slot;
     cxl_hybrid_ctrl_active_request_begin(state);
     qatomic_store_release(&state->hdr->request_cons, expected_seq);
-    return true;
-}
-
-static bool cxl_hybrid_ctrl_try_dequeue_ready(CXLHybridControlState *state,
-                                              CXLHybridFaultReadyRecord *record)
-{
-    CXLHybridFaultReadyRecord *slot;
-    uint64_t expected_seq;
-    uint64_t mask;
-    uint64_t prod;
-    uint64_t cons;
-
-    if (!record || !cxl_hybrid_ctrl_state_ready(state)) {
-        return false;
-    }
-
-    cons = qatomic_read(&state->hdr->ready_cons);
-    prod = qatomic_read(&state->hdr->ready_prod);
-    if (cons == prod) {
-        return false;
-    }
-
-    expected_seq = cons + 1;
-    mask = cxl_hybrid_control_region.ready_ring_entries - 1;
-    slot = &state->ready_ring[cons & mask];
-    if (qatomic_read(&slot->seq) != expected_seq) {
-        return false;
-    }
-
-    smp_rmb();
-    *record = *slot;
-    qatomic_set(&state->hdr->ready_cons, expected_seq);
     return true;
 }
 
@@ -1115,7 +961,6 @@ int cxl_hybrid_control_activate_destination(Error **errp)
         return -EINVAL;
     }
 
-    cxl_hybrid_ctrl_start_ready_poller(&cxl_hybrid_control_destination);
     return 0;
 }
 
@@ -1127,7 +972,6 @@ void cxl_hybrid_control_cleanup_source(void)
 
 void cxl_hybrid_control_cleanup_destination(void)
 {
-    cxl_hybrid_ctrl_stop_ready_poller(&cxl_hybrid_control_destination);
     cxl_hybrid_ctrl_unbind_state(&cxl_hybrid_control_destination);
 }
 
@@ -1357,17 +1201,4 @@ bool cxl_hybrid_ctrl_dequeue_fault_request(CXLHybridFaultRequestRecord *record)
 {
     return cxl_hybrid_ctrl_try_dequeue_request(&cxl_hybrid_control_source,
                                                record);
-}
-
-int cxl_hybrid_ctrl_enqueue_fault_ready(
-    const CXLHybridFaultReadyRecord *record, Error **errp)
-{
-    return cxl_hybrid_ctrl_try_enqueue_ready(&cxl_hybrid_control_source,
-                                             record, errp);
-}
-
-bool cxl_hybrid_ctrl_dequeue_fault_ready(CXLHybridFaultReadyRecord *record)
-{
-    return cxl_hybrid_ctrl_try_dequeue_ready(
-        &cxl_hybrid_control_destination, record);
 }

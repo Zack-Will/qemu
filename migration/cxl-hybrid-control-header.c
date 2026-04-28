@@ -223,7 +223,6 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
     hdr->magic = CXL_HYBRID_CTRL_MAGIC;
     hdr->version = CXL_HYBRID_CTRL_VERSION;
     hdr->request_ring_order = CXL_HYBRID_CTRL_REQUEST_ORDER;
-    hdr->ready_ring_order = CXL_HYBRID_CTRL_READY_ORDER;
     hdr->generation = generation;
     hdr->active_enqueue_count = 0;
     hdr->active_request_count = 0;
