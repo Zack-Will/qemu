@@ -426,7 +426,6 @@ static void test_query_migrate_cxl_schema_loop_stats(void)
     assert_schema_object_has_member(cxl_type, "last-iterate-warm-push-pages");
     assert_schema_object_has_member(cxl_type, "last-iterate-fault-primary-pages");
     assert_schema_object_has_member(cxl_type, "last-iterate-fault-burst-pages");
-    assert_schema_object_has_member(cxl_type, "last-iterate-publish-ready-pages");
     assert_schema_object_has_member(cxl_type, "last-iterate-phase");
     assert_schema_object_has_member(cxl_type, "staged-pages-percent");
 

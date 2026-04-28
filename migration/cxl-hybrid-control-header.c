@@ -225,6 +225,10 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
     hdr->request_ring_order = CXL_HYBRID_CTRL_REQUEST_ORDER;
     hdr->ready_ring_order = CXL_HYBRID_CTRL_READY_ORDER;
     hdr->generation = generation;
+    hdr->active_enqueue_count = 0;
+    hdr->active_request_count = 0;
+    hdr->completed_generation = 0;
+    hdr->completion_flags = 0;
     hdr->visible_page_words = BITS_TO_LONGS(visible_pages);
     hdr->owned_region_words = BITS_TO_LONGS(total_regions);
     hdr->region_granule_shift =

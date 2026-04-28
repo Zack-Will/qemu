@@ -47,27 +47,12 @@ typedef struct CXLHybridPublishedPageEntry {
     bool source_remapped;
 } CXLHybridPublishedPageEntry;
 
-typedef struct CXLHybridPendingReady {
-    CXLHybridPublishNotify notify;
-    uint64_t queued_at_ns;
-    bool fault_primary;
-    QSIMPLEQ_ENTRY(CXLHybridPendingReady) next;
-} CXLHybridPendingReady;
-
 typedef struct CXLHybridLastPublishRequestInfo {
     uint64_t count;
     uint64_t guest_offset;
     uint32_t generation;
     char *ramblock;
 } CXLHybridLastPublishRequestInfo;
-
-typedef struct CXLHybridLastPublishReadyInfo {
-    uint64_t count;
-    uint64_t guest_offset;
-    uint64_t cxl_offset;
-    uint32_t generation;
-    char *ramblock;
-} CXLHybridLastPublishReadyInfo;
 
 typedef struct CXLHybridLastPublishWaitInfo {
     uint64_t count;
@@ -79,11 +64,6 @@ typedef struct CXLHybridLastPublishWaitInfo {
     bool has_wait_time_ns;
     bool has_ret;
 } CXLHybridLastPublishWaitInfo;
-
-typedef struct CXLHybridFaultWaitRecord {
-    uint64_t wait_begin_ns;
-    uint64_t ready_recv_ns;
-} CXLHybridFaultWaitRecord;
 
 static CXLIncomingMetadataState cxl_incoming_meta_state;
 static size_t cxl_global_page_index(RAMBlock *block, ram_addr_t block_offset);
@@ -100,24 +80,12 @@ static bool cxl_hybrid_page_eligible(size_t page_idx);
 static uint64_t cxl_hybrid_prefetch_rate_limit(void);
 static void cxl_hybrid_warm_sleep(uint32_t pages_sent);
 static bool cxl_hybrid_warm_disabled(void);
-static int cxl_hybrid_stream_ready_consumer(
-    const CXLHybridFaultReadyRecord *record, Error **errp);
-static void cxl_hybrid_queue_publish_ready(const char *ramblock,
-                                           uint64_t guest_offset,
-                                           uint64_t cxl_offset,
-                                           uint32_t page_len,
-                                           uint32_t generation,
-                                           bool fault_primary);
-static char *cxl_hybrid_publish_wait_key(const char *ramblock,
-                                         uint64_t guest_offset,
-                                         uint32_t generation);
 static void cxl_hybrid_invalidate_published_page(const char *ramblock,
                                                  uint64_t guest_offset);
 static bool cxl_hybrid_range_is_remapped(RAMBlock *block,
                                          uint64_t guest_offset,
                                          uint32_t page_len);
 static void cxl_hybrid_ensure_publish_mutex(void);
-static void cxl_hybrid_ensure_fault_wait_records(void);
 
 #define CXL_HYBRID_FAULT_BURST_PAGES 4
 
@@ -195,7 +163,6 @@ static struct CXLMigrationState {
     uint64_t warm_push_publish_pages;
     uint64_t fault_primary_publish_pages;
     uint64_t fault_burst_publish_pages;
-    uint64_t pending_ready_publish_pages;
     uint64_t completion_publish_pages;
     uint64_t fault_publish_requests;
     uint64_t fault_publish_waits;
@@ -215,27 +182,6 @@ static struct CXLMigrationState {
     uint64_t region_publish_requests;
     uint64_t region_publish_pages;
     uint64_t region_publish_time_ns;
-    uint64_t fault_primary_ready_drain_samples;
-    uint64_t fault_primary_ready_drain_time_ns;
-    uint64_t max_fault_primary_ready_drain_time_ns;
-    uint64_t fault_primary_ready_write_samples;
-    uint64_t fault_primary_ready_write_time_ns;
-    uint64_t max_fault_primary_ready_write_time_ns;
-    uint64_t fault_primary_ready_recv_samples;
-    uint64_t fault_primary_ready_recv_time_ns;
-    uint64_t max_fault_primary_ready_recv_time_ns;
-    uint64_t fault_primary_ready_handle_samples;
-    uint64_t fault_primary_ready_handle_time_ns;
-    uint64_t max_fault_primary_ready_handle_time_ns;
-    uint64_t fault_primary_ready_send_samples;
-    uint64_t fault_primary_ready_send_time_ns;
-    uint64_t max_fault_primary_ready_send_time_ns;
-    uint64_t fault_wait_ready_recv_samples;
-    uint64_t fault_wait_ready_recv_time_ns;
-    uint64_t max_fault_wait_ready_recv_time_ns;
-    uint64_t fault_wait_after_ready_recv_samples;
-    uint64_t fault_wait_after_ready_recv_time_ns;
-    uint64_t max_fault_wait_after_ready_recv_time_ns;
     uint64_t dst_region_map_attempts;
     uint64_t dst_region_map_successes;
     uint64_t dst_region_map_failures;
@@ -245,16 +191,9 @@ static struct CXLMigrationState {
     uint64_t dst_region_wait_time_ns;
     uint64_t max_dst_region_wait_time_ns;
     uint64_t dst_region_fallback_copies;
-    uint64_t pending_publish_ready;
-    uint64_t completion_pending_publish_ready;
-    uint64_t publish_ready_sent_pages;
     CXLHybridLastPublishRequestInfo last_publish_request;
-    CXLHybridLastPublishReadyInfo last_publish_ready;
-    CXLHybridLastPublishReadyInfo last_completion_publish_ready;
-    CXLHybridLastPublishReadyInfo last_publish_ready_recv;
     CXLHybridLastPublishWaitInfo last_publish_wait_begin;
     CXLHybridLastPublishWaitInfo last_publish_wait_complete;
-    GHashTable *fault_wait_records;
     uint64_t publish_copied_pages;
     uint64_t publish_copied_bytes;
     uint64_t publish_skip_ready;
@@ -265,9 +204,7 @@ static struct CXLMigrationState {
         uint64_t warm_push_publish_pages;
         uint64_t fault_primary_publish_pages;
         uint64_t fault_burst_publish_pages;
-        uint64_t pending_ready_publish_pages;
         uint64_t completion_publish_pages;
-        uint64_t publish_ready_sent_pages;
         CXLHybridPhase phase;
     } iter_begin;
     uint64_t last_iterate_ram_pages;
@@ -275,14 +212,12 @@ static struct CXLMigrationState {
     uint64_t last_iterate_warm_push_pages;
     uint64_t last_iterate_fault_primary_pages;
     uint64_t last_iterate_fault_burst_pages;
-    uint64_t last_iterate_publish_ready_pages;
     CXLHybridPhase last_iterate_phase;
     size_t warm_scan_cursor;
     ram_addr_t warm_last_miss_offset;
     char *warm_last_miss_ramblock;
     CXLHybridDstRegionState dst_region_state;
     CXLHybridPublishedPageEntry *published_page_state;
-    QSIMPLEQ_HEAD(, CXLHybridPendingReady) pending_ready;
     QemuMutex publish_mutex;
     bool publish_mutex_ready;
     bool sender_sync_ready;
@@ -294,7 +229,6 @@ static struct CXLMigrationState {
     .fd = -1,
     .phase = CXL_HYBRID_PHASE_DISABLED,
     .switch_reason = CXL_MIGRATION_SWITCH_REASON_NONE,
-    .pending_ready = QSIMPLEQ_HEAD_INITIALIZER(cxl_state.pending_ready),
 };
 
 static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size);
@@ -315,14 +249,6 @@ static void cxl_process_pending_remaps_bh(void *opaque);
 static inline uint64_t cxl_now_ns(void)
 {
     return qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-}
-
-static char *cxl_hybrid_publish_wait_key(const char *ramblock,
-                                         uint64_t guest_offset,
-                                         uint32_t generation)
-{
-    return g_strdup_printf("%s:0x%" PRIx64 ":%u", ramblock, guest_offset,
-                           generation);
 }
 
 static void cxl_hybrid_record_timing(uint64_t *samplesp,
@@ -347,29 +273,6 @@ static void cxl_hybrid_record_timing(uint64_t *samplesp,
     }
 }
 
-static CXLHybridFaultWaitRecord *
-cxl_hybrid_lookup_fault_wait_record_locked(const char *ramblock,
-                                           uint64_t guest_offset,
-                                           uint32_t generation,
-                                           bool create)
-{
-    CXLHybridFaultWaitRecord *record;
-    g_autofree char *key = NULL;
-
-    if (!cxl_state.fault_wait_records || !ramblock) {
-        return NULL;
-    }
-
-    key = cxl_hybrid_publish_wait_key(ramblock, guest_offset, generation);
-    record = g_hash_table_lookup(cxl_state.fault_wait_records, key);
-    if (!record && create) {
-        record = g_new0(CXLHybridFaultWaitRecord, 1);
-        g_hash_table_insert(cxl_state.fault_wait_records,
-                            g_steal_pointer(&key), record);
-    }
-    return record;
-}
-
 static void cxl_hybrid_ensure_publish_mutex(void)
 {
     if (cxl_state.publish_mutex_ready) {
@@ -378,16 +281,6 @@ static void cxl_hybrid_ensure_publish_mutex(void)
 
     qemu_mutex_init(&cxl_state.publish_mutex);
     cxl_state.publish_mutex_ready = true;
-}
-
-static void cxl_hybrid_ensure_fault_wait_records(void)
-{
-    if (!cxl_state.fault_wait_records) {
-        cxl_state.fault_wait_records = g_hash_table_new_full(g_str_hash,
-                                                             g_str_equal,
-                                                             g_free,
-                                                             g_free);
-    }
 }
 
 static void cxl_hybrid_set_last_publish_request(
@@ -404,26 +297,6 @@ static void cxl_hybrid_set_last_publish_request(
     g_free(info->ramblock);
     info->ramblock = g_strdup(ramblock);
     info->guest_offset = guest_offset;
-    info->generation = generation;
-    info->count = count;
-}
-
-static void cxl_hybrid_set_last_publish_ready(
-    CXLHybridLastPublishReadyInfo *info,
-    const char *ramblock,
-    uint64_t guest_offset,
-    uint64_t cxl_offset,
-    uint32_t generation,
-    uint64_t count)
-{
-    if (!info) {
-        return;
-    }
-
-    g_free(info->ramblock);
-    info->ramblock = g_strdup(ramblock);
-    info->guest_offset = guest_offset;
-    info->cxl_offset = cxl_offset;
     info->generation = generation;
     info->count = count;
 }
@@ -491,9 +364,6 @@ static void cxl_hybrid_record_publish_source(CXLHybridPublishSource source,
     case CXL_HYBRID_PUBLISH_SOURCE_FAULT_BURST:
         qatomic_add(&cxl_state.fault_burst_publish_pages, npages);
         break;
-    case CXL_HYBRID_PUBLISH_SOURCE_PENDING_READY:
-        qatomic_add(&cxl_state.pending_ready_publish_pages, npages);
-        break;
     case CXL_HYBRID_PUBLISH_SOURCE_COMPLETION:
         qatomic_add(&cxl_state.completion_publish_pages, npages);
         break;
@@ -513,12 +383,8 @@ void cxl_hybrid_iteration_snapshot_begin(uint64_t ram_pages)
         qatomic_read(&cxl_state.fault_primary_publish_pages);
     cxl_state.iter_begin.fault_burst_publish_pages =
         qatomic_read(&cxl_state.fault_burst_publish_pages);
-    cxl_state.iter_begin.pending_ready_publish_pages =
-        qatomic_read(&cxl_state.pending_ready_publish_pages);
     cxl_state.iter_begin.completion_publish_pages =
         qatomic_read(&cxl_state.completion_publish_pages);
-    cxl_state.iter_begin.publish_ready_sent_pages =
-        qatomic_read(&cxl_state.publish_ready_sent_pages);
     cxl_state.iter_begin.phase = cxl_state.phase;
 }
 
@@ -528,10 +394,7 @@ void cxl_hybrid_iteration_snapshot_end(uint64_t ram_pages)
     uint64_t warm_push = qatomic_read(&cxl_state.warm_push_publish_pages);
     uint64_t fault_primary = qatomic_read(&cxl_state.fault_primary_publish_pages);
     uint64_t fault_burst = qatomic_read(&cxl_state.fault_burst_publish_pages);
-    uint64_t pending_ready = qatomic_read(&cxl_state.pending_ready_publish_pages);
     uint64_t completion = qatomic_read(&cxl_state.completion_publish_pages);
-    uint64_t publish_ready_sent_pages =
-        qatomic_read(&cxl_state.publish_ready_sent_pages);
 
     qatomic_set(&cxl_state.last_iterate_ram_pages,
                 ram_pages - cxl_state.iter_begin.ram_pages);
@@ -543,8 +406,6 @@ void cxl_hybrid_iteration_snapshot_end(uint64_t ram_pages)
                 fault_primary - cxl_state.iter_begin.fault_primary_publish_pages);
     qatomic_set(&cxl_state.last_iterate_fault_burst_pages,
                 fault_burst - cxl_state.iter_begin.fault_burst_publish_pages);
-    qatomic_set(&cxl_state.last_iterate_publish_ready_pages,
-                publish_ready_sent_pages - cxl_state.iter_begin.publish_ready_sent_pages);
     qatomic_set(&cxl_state.last_iterate_phase, cxl_state.iter_begin.phase);
 
     trace_cxl_hybrid_iteration_profile(
@@ -555,15 +416,13 @@ void cxl_hybrid_iteration_snapshot_end(uint64_t ram_pages)
         cxl_state.total_pages,
         qatomic_read(&cxl_state.last_iterate_warm_push_pages),
         qatomic_read(&cxl_state.last_iterate_fault_primary_pages),
-        qatomic_read(&cxl_state.last_iterate_fault_burst_pages),
-        qatomic_read(&cxl_state.last_iterate_publish_ready_pages));
+        qatomic_read(&cxl_state.last_iterate_fault_burst_pages));
 
     /*
      * Keep completion-originated republishes in their own cumulative counter.
      * They are not reported as a distinct per-iteration field yet because the
      * user-facing question is about warm push and fault-triggered traffic.
      */
-    (void)(pending_ready - cxl_state.iter_begin.pending_ready_publish_pages);
     (void)(completion - cxl_state.iter_begin.completion_publish_pages);
 }
 
@@ -580,24 +439,6 @@ static CXLMigrationPublishRequestInfo *cxl_hybrid_export_last_publish_request(
     dst->count = src->count;
     dst->ramblock = g_strdup(src->ramblock);
     dst->guest_offset = src->guest_offset;
-    dst->generation = src->generation;
-    return dst;
-}
-
-static CXLMigrationPublishReadyInfo *cxl_hybrid_export_last_publish_ready(
-    const CXLHybridLastPublishReadyInfo *src)
-{
-    CXLMigrationPublishReadyInfo *dst;
-
-    if (!src || !src->ramblock || !src->count) {
-        return NULL;
-    }
-
-    dst = g_new0(CXLMigrationPublishReadyInfo, 1);
-    dst->count = src->count;
-    dst->ramblock = g_strdup(src->ramblock);
-    dst->guest_offset = src->guest_offset;
-    dst->cxl_offset = src->cxl_offset;
     dst->generation = src->generation;
     return dst;
 }
@@ -1027,6 +868,7 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
                                                            g.nr_pages,
                                                            generation,
                                                            wait_start_ns,
+                                                           NULL,
                                                            errp);
         if (ret) {
             return ret;
@@ -1285,8 +1127,8 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
     page_index = cxl_global_page_index(rb, offset);
     if (!cxl_hybrid_ctrl_page_visible(page_index, generation)) {
         ret = cxl_hybrid_ctrl_enqueue_fault_request(page_index, generation,
-                                                    wait_start_ns, errp);
-        publish_req_sent = (ret == 0);
+                                                    wait_start_ns,
+                                                    &publish_req_sent, errp);
         if (ret) {
             return ret;
         }
@@ -1349,7 +1191,7 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
     }
     if (ret == 0) {
         error_setg(errp,
-                   "CXL hybrid publish-ready did not make %s/0x%" PRIx64
+                   "CXL hybrid visible page did not make %s/0x%" PRIx64
                    " available",
                    ramblock, (uint64_t)offset);
         return -ENOENT;
@@ -1441,7 +1283,6 @@ bool cxl_hybrid_init_destination(Error **errp)
     int ret;
 
     cxl_hybrid_ensure_publish_mutex();
-    cxl_hybrid_ensure_fault_wait_records();
     cxl_state.hybrid_enabled = migrate_cxl_hybrid();
     if (cxl_state.hybrid_enabled &&
         cxl_state.phase == CXL_HYBRID_PHASE_DISABLED) {
@@ -1716,8 +1557,6 @@ void cxl_populate_migration_info(MigrationInfo *info)
         qatomic_read(&cxl_state.last_iterate_fault_primary_pages);
     info->x_cxl->last_iterate_fault_burst_pages =
         qatomic_read(&cxl_state.last_iterate_fault_burst_pages);
-    info->x_cxl->last_iterate_publish_ready_pages =
-        qatomic_read(&cxl_state.last_iterate_publish_ready_pages);
     info->x_cxl->last_iterate_phase =
         qatomic_read(&cxl_state.last_iterate_phase);
     info->x_cxl->fault_publish_requests =
@@ -1756,66 +1595,12 @@ void cxl_populate_migration_info(MigrationInfo *info)
         qatomic_read(&cxl_state.fault_publish_req_handle_time_ns);
     info->x_cxl->max_fault_publish_req_handle_time_ns =
         qatomic_read(&cxl_state.max_fault_publish_req_handle_time_ns);
-    info->x_cxl->fault_primary_ready_drain_samples =
-        qatomic_read(&cxl_state.fault_primary_ready_drain_samples);
-    info->x_cxl->fault_primary_ready_drain_time_ns =
-        qatomic_read(&cxl_state.fault_primary_ready_drain_time_ns);
-    info->x_cxl->max_fault_primary_ready_drain_time_ns =
-        qatomic_read(&cxl_state.max_fault_primary_ready_drain_time_ns);
-    info->x_cxl->fault_primary_ready_write_samples =
-        qatomic_read(&cxl_state.fault_primary_ready_write_samples);
-    info->x_cxl->fault_primary_ready_write_time_ns =
-        qatomic_read(&cxl_state.fault_primary_ready_write_time_ns);
-    info->x_cxl->max_fault_primary_ready_write_time_ns =
-        qatomic_read(&cxl_state.max_fault_primary_ready_write_time_ns);
-    info->x_cxl->fault_primary_ready_recv_samples =
-        qatomic_read(&cxl_state.fault_primary_ready_recv_samples);
-    info->x_cxl->fault_primary_ready_recv_time_ns =
-        qatomic_read(&cxl_state.fault_primary_ready_recv_time_ns);
-    info->x_cxl->max_fault_primary_ready_recv_time_ns =
-        qatomic_read(&cxl_state.max_fault_primary_ready_recv_time_ns);
-    info->x_cxl->fault_primary_ready_handle_samples =
-        qatomic_read(&cxl_state.fault_primary_ready_handle_samples);
-    info->x_cxl->fault_primary_ready_handle_time_ns =
-        qatomic_read(&cxl_state.fault_primary_ready_handle_time_ns);
-    info->x_cxl->max_fault_primary_ready_handle_time_ns =
-        qatomic_read(&cxl_state.max_fault_primary_ready_handle_time_ns);
-    info->x_cxl->fault_primary_ready_send_samples =
-        qatomic_read(&cxl_state.fault_primary_ready_send_samples);
-    info->x_cxl->fault_primary_ready_send_time_ns =
-        qatomic_read(&cxl_state.fault_primary_ready_send_time_ns);
-    info->x_cxl->max_fault_primary_ready_send_time_ns =
-        qatomic_read(&cxl_state.max_fault_primary_ready_send_time_ns);
-    info->x_cxl->fault_wait_ready_recv_samples =
-        qatomic_read(&cxl_state.fault_wait_ready_recv_samples);
-    info->x_cxl->fault_wait_ready_recv_time_ns =
-        qatomic_read(&cxl_state.fault_wait_ready_recv_time_ns);
-    info->x_cxl->max_fault_wait_ready_recv_time_ns =
-        qatomic_read(&cxl_state.max_fault_wait_ready_recv_time_ns);
-    info->x_cxl->fault_wait_after_ready_recv_samples =
-        qatomic_read(&cxl_state.fault_wait_after_ready_recv_samples);
-    info->x_cxl->fault_wait_after_ready_recv_time_ns =
-        qatomic_read(&cxl_state.fault_wait_after_ready_recv_time_ns);
-    info->x_cxl->max_fault_wait_after_ready_recv_time_ns =
-        qatomic_read(&cxl_state.max_fault_wait_after_ready_recv_time_ns);
-    info->x_cxl->pending_publish_ready =
-        qatomic_read(&cxl_state.pending_publish_ready);
-    info->x_cxl->completion_pending_publish_ready =
-        qatomic_read(&cxl_state.completion_pending_publish_ready);
     if (cxl_state.publish_mutex_ready) {
         qemu_mutex_lock(&cxl_state.publish_mutex);
     }
     info->x_cxl->last_publish_request =
         cxl_hybrid_export_last_publish_request(
             &cxl_state.last_publish_request);
-    info->x_cxl->last_publish_ready =
-        cxl_hybrid_export_last_publish_ready(&cxl_state.last_publish_ready);
-    info->x_cxl->last_completion_publish_ready =
-        cxl_hybrid_export_last_publish_ready(
-            &cxl_state.last_completion_publish_ready);
-    info->x_cxl->last_publish_ready_recv =
-        cxl_hybrid_export_last_publish_ready(
-            &cxl_state.last_publish_ready_recv);
     info->x_cxl->last_publish_wait_begin =
         cxl_hybrid_export_last_publish_wait(
             &cxl_state.last_publish_wait_begin);
@@ -2528,22 +2313,6 @@ out:
     return found;
 }
 
-void cxl_hybrid_record_publish_req_recv_time(uint64_t elapsed_ns)
-{
-    cxl_hybrid_record_timing(&cxl_state.fault_publish_req_recv_samples,
-                             &cxl_state.fault_publish_req_recv_time_ns,
-                             &cxl_state.max_fault_publish_req_recv_time_ns,
-                             elapsed_ns);
-}
-
-void cxl_hybrid_record_publish_ready_recv_time(uint64_t elapsed_ns)
-{
-    cxl_hybrid_record_timing(&cxl_state.fault_primary_ready_recv_samples,
-                             &cxl_state.fault_primary_ready_recv_time_ns,
-                             &cxl_state.max_fault_primary_ready_recv_time_ns,
-                             elapsed_ns);
-}
-
 void cxl_hybrid_note_publish_request_received(const char *ramblock,
                                               uint64_t guest_offset,
                                               uint32_t generation,
@@ -2566,156 +2335,6 @@ void cxl_hybrid_note_publish_request_received(const char *ramblock,
                                  &cxl_state.max_fault_publish_req_recv_time_ns,
                                  cxl_now_ns() - req_recv_ns);
     }
-}
-
-static int cxl_hybrid_stream_ready_consumer(
-    const CXLHybridFaultReadyRecord *record, Error **errp)
-{
-    RAMBlock *block;
-    ram_addr_t block_offset;
-    bool fault_primary;
-
-    if (!record) {
-        error_setg(errp, "CXL hybrid stream ready consumer missing record");
-        return -EINVAL;
-    }
-
-    if (!cxl_hybrid_lookup_global_page(record->page_index, &block,
-                                       &block_offset)) {
-        error_setg(errp,
-                   "CXL hybrid stream ready page %" PRIu64 " no longer resolves",
-                   record->page_index);
-        return -ENOENT;
-    }
-
-    fault_primary = record->flags & CXL_HYBRID_FAULT_READY_F_PRIMARY;
-    cxl_hybrid_queue_publish_ready(qemu_ram_get_idstr(block), block_offset,
-                                   record->cxl_offset, TARGET_PAGE_SIZE,
-                                   record->generation, fault_primary);
-    return 0;
-}
-
-static void cxl_hybrid_queue_publish_ready(const char *ramblock,
-                                           uint64_t guest_offset,
-                                           uint64_t cxl_offset,
-                                           uint32_t page_len,
-                                           uint32_t generation,
-                                           bool fault_primary)
-{
-    CXLHybridPendingReady *ready = g_new0(CXLHybridPendingReady, 1);
-    uint64_t pending;
-
-    ready->notify.ramblock = g_strdup(ramblock);
-    ready->notify.guest_offset = guest_offset;
-    ready->notify.cxl_offset = cxl_offset;
-    ready->notify.page_len = page_len;
-    ready->notify.generation = generation;
-    ready->queued_at_ns = cxl_now_ns();
-    ready->fault_primary = fault_primary;
-
-    if (cxl_state.publish_mutex_ready) {
-        qemu_mutex_lock(&cxl_state.publish_mutex);
-    }
-    QSIMPLEQ_INSERT_TAIL(&cxl_state.pending_ready, ready, next);
-    pending = qatomic_inc_fetch(&cxl_state.pending_publish_ready);
-    trace_cxl_hybrid_publish_ready_queue(ramblock, guest_offset, cxl_offset,
-                                         generation, pending);
-    if (cxl_state.publish_mutex_ready) {
-        qemu_mutex_unlock(&cxl_state.publish_mutex);
-    }
-    if (fault_primary) {
-        migration_mark_cxl_hybrid_ready_urgent();
-    }
-}
-
-static int cxl_hybrid_republish_pending_ready(CXLHybridPendingReady *ready,
-                                              Error **errp)
-{
-    CXLHybridPublishedPageState state = { 0 };
-    uint64_t cxl_offset = 0;
-    int ret;
-
-    if (!ready || !ready->notify.ramblock) {
-        error_setg(errp, "CXL hybrid pending publish-ready missing arguments");
-        return -EINVAL;
-    }
-
-    if (cxl_hybrid_get_published_page_state(ready->notify.ramblock,
-                                            ready->notify.guest_offset,
-                                            &state) &&
-        state.ready &&
-        state.generation == ready->notify.generation &&
-        state.cxl_offset == ready->notify.cxl_offset) {
-        return 0;
-    }
-
-    ret = cxl_hybrid_publish_page_to_cxl(ready->notify.ramblock,
-                                         ready->notify.guest_offset,
-                                         ready->notify.page_len,
-                                         ready->notify.generation,
-                                         CXL_HYBRID_PUBLISH_SOURCE_PENDING_READY,
-                                         &cxl_offset, errp);
-    if (ret) {
-        return ret;
-    }
-
-    ready->notify.cxl_offset = cxl_offset;
-    return 0;
-}
-
-static CXLHybridPendingReady *cxl_hybrid_pop_publish_ready(void)
-{
-    CXLHybridPendingReady *ready;
-
-    if (cxl_state.publish_mutex_ready) {
-        qemu_mutex_lock(&cxl_state.publish_mutex);
-    }
-    ready = QSIMPLEQ_FIRST(&cxl_state.pending_ready);
-    if (ready) {
-        uint64_t pending;
-
-        QSIMPLEQ_REMOVE_HEAD(&cxl_state.pending_ready, next);
-        pending = qatomic_dec_fetch(&cxl_state.pending_publish_ready);
-        trace_cxl_hybrid_publish_ready_pop(ready->notify.ramblock,
-                                           ready->notify.guest_offset,
-                                           ready->notify.cxl_offset,
-                                           ready->notify.generation,
-                                           pending);
-    }
-    if (cxl_state.publish_mutex_ready) {
-        qemu_mutex_unlock(&cxl_state.publish_mutex);
-    }
-    return ready;
-}
-
-uint64_t cxl_hybrid_pending_publish_ready(void)
-{
-    return qatomic_read(&cxl_state.pending_publish_ready);
-}
-
-void cxl_hybrid_mark_completion_pending_publish_ready(void)
-{
-    qatomic_set(&cxl_state.completion_pending_publish_ready,
-                qatomic_read(&cxl_state.pending_publish_ready));
-}
-
-void cxl_hybrid_mark_completion_publish_ready_flushed(void)
-{
-    if (!cxl_state.publish_mutex_ready) {
-        return;
-    }
-
-    qemu_mutex_lock(&cxl_state.publish_mutex);
-    if (cxl_state.last_publish_ready.count) {
-        cxl_hybrid_set_last_publish_ready(
-            &cxl_state.last_completion_publish_ready,
-            cxl_state.last_publish_ready.ramblock,
-            cxl_state.last_publish_ready.guest_offset,
-            cxl_state.last_publish_ready.cxl_offset,
-            cxl_state.last_publish_ready.generation,
-            cxl_state.last_publish_ready.count);
-    }
-    qemu_mutex_unlock(&cxl_state.publish_mutex);
 }
 
 int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
@@ -2920,30 +2539,6 @@ static void cxl_hybrid_publish_fault_burst(const char *ramblock,
     }
 }
 
-int cxl_hybrid_handle_publish_request(const char *ramblock,
-                                      uint64_t guest_offset,
-                                      uint32_t page_len,
-                                      uint32_t generation,
-                                      uint64_t req_recv_ns,
-                                      Error **errp)
-{
-    CXLHybridFaultReadyRecord primary_ready = { 0 };
-    int ret;
-
-    cxl_hybrid_note_publish_request_received(ramblock, guest_offset,
-                                             generation, req_recv_ns);
-
-    ret = cxl_hybrid_publish_fault_request_core(ramblock, guest_offset,
-                                                page_len, generation, true,
-                                                &primary_ready,
-                                                cxl_hybrid_stream_ready_consumer,
-                                                errp);
-    if (ret) {
-        return ret;
-    }
-    return 0;
-}
-
 int cxl_hybrid_publish_fault_region_request_core(uint64_t first_page,
                                                  uint32_t nr_pages,
                                                  uint32_t generation,
@@ -3104,190 +2699,11 @@ int cxl_hybrid_publish_fault_request_core(const char *ramblock,
     return 0;
 }
 
-int cxl_hybrid_handle_publish_quiesce(MigrationIncomingState *mis,
-                                      Error **errp)
-{
-    int ret;
-
-    if (!mis) {
-        error_setg(errp, "CXL hybrid publish quiesce missing migration state");
-        return -EINVAL;
-    }
-
-    mis->cxl_publish_request_quiesce = true;
-    ret = migrate_send_rp_cxl_publish_quiesce_ack(mis);
-    if (ret) {
-        error_setg(errp, "Failed to send CXL hybrid publish quiesce ACK");
-        return ret < 0 ? ret : -EIO;
-    }
-
-    return 0;
-}
-
-int cxl_hybrid_send_pending_publish_ready(QEMUFile *f, Error **errp)
-{
-    CXLHybridPendingReady *ready;
-    int sent = 0;
-
-    if (!f) {
-        return 0;
-    }
-
-    trace_cxl_hybrid_publish_ready_drain_begin(
-        qatomic_read(&cxl_state.pending_publish_ready));
-    if (migration_cxl_hybrid_ready_urgent()) {
-        migration_clear_cxl_hybrid_ready_urgent();
-    }
-    while ((ready = cxl_hybrid_pop_publish_ready()) != NULL) {
-        g_autofree uint8_t *buf = NULL;
-        uint64_t drain_start_ns;
-        size_t len;
-        int ret;
-
-        drain_start_ns = cxl_now_ns();
-        if (ready->fault_primary) {
-            cxl_hybrid_record_timing(
-                &cxl_state.fault_primary_ready_drain_samples,
-                &cxl_state.fault_primary_ready_drain_time_ns,
-                &cxl_state.max_fault_primary_ready_drain_time_ns,
-                drain_start_ns - ready->queued_at_ns);
-        }
-        ret = cxl_hybrid_republish_pending_ready(ready, errp);
-        if (!ret) {
-            ret = cxl_hybrid_publish_notify_encoded_len(&ready->notify, &len,
-                                                        errp);
-        }
-        if (!ret) {
-            buf = g_malloc(len);
-            ret = cxl_hybrid_publish_notify_encode(&ready->notify, buf, len,
-                                                   errp);
-        }
-        if (!ret) {
-            uint64_t ready_complete_ns;
-            uint64_t ready_send_time_ns;
-            uint64_t ready_write_time_ns;
-
-            trace_cxl_hybrid_publish_ready_send(ready->notify.ramblock,
-                                                ready->notify.guest_offset,
-                                                ready->notify.cxl_offset,
-                                                ready->notify.generation);
-            qemu_savevm_send_cxl_hybrid_publish_ready(
-                f, ready->notify.ramblock, ready->notify.guest_offset,
-                ready->notify.cxl_offset, buf, len, ready->fault_primary);
-            ret = qemu_file_get_error(f);
-            if (ret) {
-                error_setg(errp, "Failed to send CXL hybrid publish-ready");
-            } else {
-                ready_complete_ns = cxl_now_ns();
-                if (ready->fault_primary) {
-                    ready_send_time_ns = ready_complete_ns -
-                                         ready->queued_at_ns;
-                    ready_write_time_ns = ready_complete_ns - drain_start_ns;
-                    cxl_hybrid_record_timing(
-                        &cxl_state.fault_primary_ready_write_samples,
-                        &cxl_state.fault_primary_ready_write_time_ns,
-                        &cxl_state.max_fault_primary_ready_write_time_ns,
-                        ready_write_time_ns);
-                    cxl_hybrid_record_timing(
-                        &cxl_state.fault_primary_ready_send_samples,
-                        &cxl_state.fault_primary_ready_send_time_ns,
-                        &cxl_state.max_fault_primary_ready_send_time_ns,
-                        ready_send_time_ns);
-                }
-                if (cxl_state.publish_mutex_ready) {
-                    qemu_mutex_lock(&cxl_state.publish_mutex);
-                    cxl_hybrid_set_last_publish_ready(
-                        &cxl_state.last_publish_ready,
-                        ready->notify.ramblock,
-                        ready->notify.guest_offset,
-                        ready->notify.cxl_offset,
-                        ready->notify.generation,
-                        cxl_state.last_publish_ready.count + 1);
-                    qemu_mutex_unlock(&cxl_state.publish_mutex);
-                }
-                qatomic_inc(&cxl_state.publish_ready_sent_pages);
-            }
-        }
-
-        cxl_hybrid_publish_notify_cleanup(&ready->notify);
-        g_free(ready);
-        if (ret) {
-            return ret < 0 ? ret : -EIO;
-        }
-        sent++;
-    }
-
-    trace_cxl_hybrid_publish_ready_drain_end(
-        sent, qatomic_read(&cxl_state.pending_publish_ready));
-    return sent;
-}
-
-int cxl_hybrid_handle_publish_ready(const CXLHybridPublishNotify *notify,
-                                    bool fault_primary,
-                                    uint64_t ready_recv_ns,
-                                    Error **errp)
-{
-    uint64_t handle_start_ns;
-    uint64_t handle_time_ns;
-    uint64_t ready_complete_ns;
-    int ret;
-
-    if (!notify || !notify->ramblock) {
-        error_setg(errp, "CXL hybrid publish-ready missing arguments");
-        return -EINVAL;
-    }
-
-    handle_start_ns = ready_recv_ns ? ready_recv_ns : cxl_now_ns();
-    ret = cxl_hybrid_dst_staging_register_external_page(
-        notify->ramblock, notify->guest_offset, notify->cxl_offset,
-        notify->page_len, errp);
-    if (ret) {
-        return ret;
-    }
-
-    ready_complete_ns = cxl_now_ns();
-    if (fault_primary) {
-        handle_time_ns = ready_complete_ns - handle_start_ns;
-        cxl_hybrid_record_timing(&cxl_state.fault_primary_ready_handle_samples,
-                                 &cxl_state.fault_primary_ready_handle_time_ns,
-                                 &cxl_state.max_fault_primary_ready_handle_time_ns,
-                                 handle_time_ns);
-    }
-    if (cxl_state.publish_mutex_ready) {
-        CXLHybridFaultWaitRecord *wait_record;
-
-        qemu_mutex_lock(&cxl_state.publish_mutex);
-        cxl_hybrid_set_last_publish_ready(
-            &cxl_state.last_publish_ready_recv,
-            notify->ramblock,
-            notify->guest_offset,
-            notify->cxl_offset,
-            notify->generation,
-            cxl_state.last_publish_ready_recv.count + 1);
-        wait_record = cxl_hybrid_lookup_fault_wait_record_locked(
-            notify->ramblock, notify->guest_offset, notify->generation,
-            false);
-        if (wait_record && !wait_record->ready_recv_ns) {
-            wait_record->ready_recv_ns = ready_complete_ns;
-        }
-        qemu_mutex_unlock(&cxl_state.publish_mutex);
-    }
-    trace_cxl_hybrid_publish_ready_recv(notify->ramblock,
-                                        notify->guest_offset,
-                                        notify->cxl_offset,
-                                        notify->generation);
-    return 0;
-}
-
 int cxl_hybrid_handle_fault_ready_record(
     const CXLHybridFaultReadyRecord *record, Error **errp)
 {
     RAMBlock *block;
     ram_addr_t block_offset;
-    bool fault_primary;
-    uint64_t ready_recv_ns;
-    uint64_t ready_recv_elapsed_ns = 0;
-    CXLHybridPublishNotify notify = { 0 };
 
     if (!record) {
         error_setg(errp, "CXL hybrid fault ready record missing");
@@ -3302,23 +2718,9 @@ int cxl_hybrid_handle_fault_ready_record(
         return -ENOENT;
     }
 
-    fault_primary = record->flags & CXL_HYBRID_FAULT_READY_F_PRIMARY;
-    ready_recv_ns = cxl_now_ns();
-    notify.ramblock = (char *)qemu_ram_get_idstr(block);
-    notify.guest_offset = block_offset;
-    notify.cxl_offset = record->cxl_offset;
-    notify.page_len = TARGET_PAGE_SIZE;
-    notify.generation = record->generation;
-
-    if (fault_primary) {
-        if (record->ready_ts_ns && ready_recv_ns >= record->ready_ts_ns) {
-            ready_recv_elapsed_ns = ready_recv_ns - record->ready_ts_ns;
-        }
-        cxl_hybrid_record_publish_ready_recv_time(ready_recv_elapsed_ns);
-    }
-
-    return cxl_hybrid_handle_publish_ready(&notify, fault_primary,
-                                           ready_recv_ns, errp);
+    return cxl_hybrid_dst_staging_register_external_page(
+        qemu_ram_get_idstr(block), block_offset, record->cxl_offset,
+        TARGET_PAGE_SIZE, errp);
 }
 
 int cxl_hybrid_warm_push_iteration(MigrationState *s, Error **errp)
@@ -3709,9 +3111,7 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
     cxl_state.switch_reason = CXL_MIGRATION_SWITCH_REASON_NONE;
     cxl_state.switch_iteration = 0;
     cxl_state.phase_transitions = cxl_state.hybrid_enabled ? 1 : 0;
-    QSIMPLEQ_INIT(&cxl_state.pending_ready);
     cxl_hybrid_ensure_publish_mutex();
-    cxl_hybrid_ensure_fault_wait_records();
 
     if (!cxl_write_redirect_enabled()) {
         warn_report("CXL write-redirect: disabled via %s", CXL_WRITE_REDIRECT_ENV);
@@ -3765,7 +3165,6 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
 
 static void cxl_remap_state_cleanup(void)
 {
-    CXLHybridPendingReady *ready;
     RAMBlock *block;
 
     if (!cxl_state.active && !cxl_state.publish_mutex_ready) {
@@ -3843,25 +3242,13 @@ static void cxl_remap_state_cleanup(void)
         qemu_mutex_destroy(&cxl_state.sender_sync_mutex);
     }
     cxl_hybrid_latch_cleanup_snapshot();
-    while ((ready = QSIMPLEQ_FIRST(&cxl_state.pending_ready)) != NULL) {
-        QSIMPLEQ_REMOVE_HEAD(&cxl_state.pending_ready, next);
-        qatomic_dec(&cxl_state.pending_publish_ready);
-        cxl_hybrid_publish_notify_cleanup(&ready->notify);
-        g_free(ready);
-    }
     if (cxl_state.publish_mutex_ready) {
         qemu_mutex_destroy(&cxl_state.publish_mutex);
     }
     g_free(cxl_state.warm_last_miss_ramblock);
     g_free(cxl_state.last_publish_request.ramblock);
-    g_free(cxl_state.last_publish_ready.ramblock);
-    g_free(cxl_state.last_completion_publish_ready.ramblock);
-    g_free(cxl_state.last_publish_ready_recv.ramblock);
     g_free(cxl_state.last_publish_wait_begin.ramblock);
     g_free(cxl_state.last_publish_wait_complete.ramblock);
-    if (cxl_state.fault_wait_records) {
-        g_hash_table_unref(cxl_state.fault_wait_records);
-    }
     g_free(cxl_state.migrated_bmap);
     g_free(cxl_state.warm_sent_bmap);
     g_free(cxl_state.dst_sent_bmap);

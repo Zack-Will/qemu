@@ -318,32 +318,6 @@
             'generation': 'uint32' } }
 
 ##
-# @CXLMigrationPublishReadyInfo:
-#
-# Most recent source-side publish-ready notification observed for
-# diagnostics.
-#
-# @count: running count of source-side publish-ready notifications
-#     sent on the migration stream when this event was recorded
-#
-# @ramblock: guest RAMBlock name for the published page
-#
-# @guest-offset: guest page offset within @ramblock
-#
-# @cxl-offset: stable CXL offset advertised to destination
-#
-# @generation: publish generation associated with the page
-#
-# Since: 11.0
-##
-{ 'struct': 'CXLMigrationPublishReadyInfo',
-  'data': { 'count': 'uint64',
-            'ramblock': 'str',
-            'guest-offset': 'uint64',
-            'cxl-offset': 'uint64',
-            'generation': 'uint32' } }
-
-##
 # @CXLMigrationPublishWaitInfo:
 #
 # Most recent destination-side publish wait event observed for
@@ -555,10 +529,6 @@
 # @last-iterate-fault-burst-pages: neighbor fault-burst pages issued
 #     during the most recent migration main-loop iteration
 #
-# @last-iterate-publish-ready-pages: publish-ready notifications
-#     emitted onto the migration stream during the most recent
-#     migration main-loop iteration
-#
 # @last-iterate-phase: CXL hybrid phase observed at the
 #     beginning of the most recent migration main-loop iteration
 #
@@ -585,8 +555,7 @@
 #     publish measurements recorded before any burst work
 #
 # @fault-publish-primary-time-ns: cumulative nanoseconds spent
-#     publishing the primary fault page and queueing its ready
-#     notification
+#     publishing the primary fault page
 #
 # @max-fault-publish-primary-time-ns: maximum nanoseconds observed in
 #     a single source-side primary fault publish measurement
@@ -599,17 +568,6 @@
 #
 # @max-fault-publish-burst-time-ns: maximum nanoseconds observed in a
 #     single source-side fault-burst publish measurement
-#
-# @fault-primary-ready-send-samples: number of source-side primary
-#     publish-ready queue-to-send measurements recorded
-#
-# @fault-primary-ready-send-time-ns: cumulative nanoseconds from
-#     queueing a primary fault publish-ready notification until it was
-#     emitted on the migration stream
-#
-# @max-fault-primary-ready-send-time-ns: maximum nanoseconds observed
-#     in a single source-side primary publish-ready queue-to-send
-#     measurement
 #
 # @fault-publish-req-recv-samples: number of source-side publish
 #     request receive-latency measurements recorded
@@ -625,106 +583,21 @@
 #     request receive-to-primary-enqueue measurements recorded
 #
 # @fault-publish-req-handle-time-ns: cumulative nanoseconds from
-#     source return-path receive of a publish request until the
-#     primary publish-ready notification was queued
+#     source receive of a publish request until the primary page was
+#     published
 #
 # @max-fault-publish-req-handle-time-ns: maximum nanoseconds observed
 #     in a single source-side publish request receive-to-primary-
-#     enqueue measurement
-#
-# @fault-primary-ready-drain-samples: number of source-side primary
-#     publish-ready enqueue-to-drain measurements recorded
-#
-# @fault-primary-ready-drain-time-ns: cumulative nanoseconds from
-#     queueing a primary publish-ready notification until migration
-#     thread drain began handling it
-#
-# @max-fault-primary-ready-drain-time-ns: maximum nanoseconds observed
-#     in a single source-side primary publish-ready enqueue-to-drain
-#     measurement
-#
-# @fault-primary-ready-write-samples: number of source-side primary
-#     publish-ready drain-to-write measurements recorded
-#
-# @fault-primary-ready-write-time-ns: cumulative nanoseconds from
-#     beginning primary publish-ready drain handling until the
-#     notification write completed on the migration stream
-#
-# @max-fault-primary-ready-write-time-ns: maximum nanoseconds observed
-#     in a single source-side primary publish-ready drain-to-write
-#     measurement
-#
-# @fault-primary-ready-recv-samples: number of destination-side
-#     primary publish-ready send-to-decode measurements recorded
-#
-# @fault-primary-ready-recv-time-ns: cumulative nanoseconds from
-#     source publish-ready send timestamp until destination decode of
-#     the publish-ready command completed
-#
-# @max-fault-primary-ready-recv-time-ns: maximum nanoseconds observed
-#     in a single destination-side primary publish-ready
-#     send-to-decode measurement
-#
-# @fault-primary-ready-handle-samples: number of destination-side
-#     primary publish-ready decode-to-register measurements recorded
-#
-# @fault-primary-ready-handle-time-ns: cumulative nanoseconds from
-#     destination publish-ready decode completion until staging
-#     registration and bookkeeping completed
-#
-# @max-fault-primary-ready-handle-time-ns: maximum nanoseconds
-#     observed in a single destination-side primary publish-ready
-#     decode-to-register measurement
-#
-# @fault-wait-ready-recv-samples: number of destination-side fault
-#     waits for which a matching publish-ready receive timestamp was
-#     recorded
-#
-# @fault-wait-ready-recv-time-ns: cumulative nanoseconds from
-#     destination fault-wait begin until the matching publish-ready
-#     was received and registered
-#
-# @max-fault-wait-ready-recv-time-ns: maximum nanoseconds observed in
-#     a single destination fault-wait begin-to-ready-recv measurement
-#
-# @fault-wait-after-ready-recv-samples: number of destination-side
-#     fault waits for which a matching ready-recv to wait-complete
-#     segment was recorded
-#
-# @fault-wait-after-ready-recv-time-ns: cumulative nanoseconds from
-#     matching publish-ready receive until destination fault wait
-#     completion
-#
-# @max-fault-wait-after-ready-recv-time-ns: maximum nanoseconds
-#     observed in a single destination ready-recv to wait-complete
-#     measurement
-#
-# @pending-publish-ready: number of source-side publish-ready
-#     notifications queued but not yet emitted onto the migration
-#     stream
-#
-# @completion-pending-publish-ready: source-side pending
-#     publish-ready queue depth last observed immediately before
-#     migration completion teardown
+#     publish measurement
 #
 # @last-publish-request: most recent source-side publish-request
 #     received from destination fault handling
 #
-# @last-publish-ready: most recent source-side publish-ready
-#     notification emitted to the migration stream
-#
-# @last-completion-publish-ready: most recent source-side
-#     publish-ready notification known to have been flushed during
-#     migration completion teardown
-#
-# @last-publish-ready-recv: most recent destination-side
-#     publish-ready notification successfully received and registered
-#
 # @last-publish-wait-begin: most recent destination-side fault wait
-#     that began waiting for publish-ready completion
+#     that began waiting for CXL visibility
 #
 # @last-publish-wait-complete: most recent destination-side fault wait
-#     that completed waiting for publish-ready completion
+#     that completed waiting for CXL visibility
 #
 # Features:
 #
@@ -744,8 +617,7 @@
 #     @last-iterate-ram-pages, @last-iterate-staged-pages-delta,
 #     @last-iterate-warm-push-pages,
 #     @last-iterate-fault-primary-pages,
-#     @last-iterate-fault-burst-pages,
-#     @last-iterate-publish-ready-pages, @last-iterate-phase,
+#     @last-iterate-fault-burst-pages, @last-iterate-phase,
 #     @fault-publish-requests, @fault-publish-waits,
 #     @fault-publish-wait-time-ns,
 #     @region-publish-requests, @region-publish-pages,
@@ -756,36 +628,13 @@
 #     @fault-publish-burst-samples,
 #     @fault-publish-burst-time-ns,
 #     @max-fault-publish-burst-time-ns,
-#     @fault-primary-ready-send-samples,
-#     @fault-primary-ready-send-time-ns,
-#     @max-fault-primary-ready-send-time-ns,
 #     @fault-publish-req-recv-samples,
 #     @fault-publish-req-recv-time-ns,
 #     @max-fault-publish-req-recv-time-ns,
 #     @fault-publish-req-handle-samples,
 #     @fault-publish-req-handle-time-ns,
 #     @max-fault-publish-req-handle-time-ns,
-#     @fault-primary-ready-drain-samples,
-#     @fault-primary-ready-drain-time-ns,
-#     @max-fault-primary-ready-drain-time-ns,
-#     @fault-primary-ready-write-samples,
-#     @fault-primary-ready-write-time-ns,
-#     @max-fault-primary-ready-write-time-ns,
-#     @fault-primary-ready-recv-samples,
-#     @fault-primary-ready-recv-time-ns,
-#     @max-fault-primary-ready-recv-time-ns,
-#     @fault-primary-ready-handle-samples,
-#     @fault-primary-ready-handle-time-ns,
-#     @max-fault-primary-ready-handle-time-ns,
-#     @fault-wait-ready-recv-samples,
-#     @fault-wait-ready-recv-time-ns,
-#     @max-fault-wait-ready-recv-time-ns,
-#     @fault-wait-after-ready-recv-samples,
-#     @fault-wait-after-ready-recv-time-ns,
-#     @max-fault-wait-after-ready-recv-time-ns,
-#     @pending-publish-ready, @completion-pending-publish-ready,
-#     @last-publish-request, @last-publish-ready,
-#     @last-completion-publish-ready, @last-publish-ready-recv,
+#     @last-publish-request,
 #     @last-publish-wait-begin, and @last-publish-wait-complete are
 #     experimental.
 #
@@ -883,8 +732,6 @@
                                                   'features': [ 'unstable' ] },
             'last-iterate-fault-burst-pages': { 'type': 'uint64',
                                                 'features': [ 'unstable' ] },
-            'last-iterate-publish-ready-pages': { 'type': 'uint64',
-                                                  'features': [ 'unstable' ] },
             'last-iterate-phase': { 'type': 'CXLMigrationPhase',
                                     'features': [ 'unstable' ] },
             'fault-publish-requests': { 'type': 'uint64',
@@ -911,12 +758,6 @@
                                              'features': [ 'unstable' ] },
             'max-fault-publish-burst-time-ns': { 'type': 'uint64',
                                                  'features': [ 'unstable' ] },
-            'fault-primary-ready-send-samples': { 'type': 'uint64',
-                                                  'features': [ 'unstable' ] },
-            'fault-primary-ready-send-time-ns': { 'type': 'uint64',
-                                                  'features': [ 'unstable' ] },
-            'max-fault-primary-ready-send-time-ns': { 'type': 'uint64',
-                                                      'features': [ 'unstable' ] },
             'fault-publish-req-recv-samples': { 'type': 'uint64',
                                                 'features': [ 'unstable' ] },
             'fault-publish-req-recv-time-ns': { 'type': 'uint64',
@@ -929,58 +770,8 @@
                                                   'features': [ 'unstable' ] },
             'max-fault-publish-req-handle-time-ns': { 'type': 'uint64',
                                                       'features': [ 'unstable' ] },
-            'fault-primary-ready-drain-samples': { 'type': 'uint64',
-                                                   'features': [ 'unstable' ] },
-            'fault-primary-ready-drain-time-ns': { 'type': 'uint64',
-                                                   'features': [ 'unstable' ] },
-            'max-fault-primary-ready-drain-time-ns': { 'type': 'uint64',
-                                                       'features': [ 'unstable' ] },
-            'fault-primary-ready-write-samples': { 'type': 'uint64',
-                                                   'features': [ 'unstable' ] },
-            'fault-primary-ready-write-time-ns': { 'type': 'uint64',
-                                                   'features': [ 'unstable' ] },
-            'max-fault-primary-ready-write-time-ns': { 'type': 'uint64',
-                                                       'features': [ 'unstable' ] },
-            'fault-primary-ready-recv-samples': { 'type': 'uint64',
-                                                  'features': [ 'unstable' ] },
-            'fault-primary-ready-recv-time-ns': { 'type': 'uint64',
-                                                  'features': [ 'unstable' ] },
-            'max-fault-primary-ready-recv-time-ns': { 'type': 'uint64',
-                                                      'features': [ 'unstable' ] },
-            'fault-primary-ready-handle-samples': { 'type': 'uint64',
-                                                    'features': [ 'unstable' ] },
-            'fault-primary-ready-handle-time-ns': { 'type': 'uint64',
-                                                    'features': [ 'unstable' ] },
-            'max-fault-primary-ready-handle-time-ns': { 'type': 'uint64',
-                                                        'features': [ 'unstable' ] },
-            'fault-wait-ready-recv-samples': { 'type': 'uint64',
-                                               'features': [ 'unstable' ] },
-            'fault-wait-ready-recv-time-ns': { 'type': 'uint64',
-                                               'features': [ 'unstable' ] },
-            'max-fault-wait-ready-recv-time-ns': { 'type': 'uint64',
-                                                   'features': [ 'unstable' ] },
-            'fault-wait-after-ready-recv-samples': { 'type': 'uint64',
-                                                     'features': [ 'unstable' ] },
-            'fault-wait-after-ready-recv-time-ns': { 'type': 'uint64',
-                                                     'features': [ 'unstable' ] },
-            'max-fault-wait-after-ready-recv-time-ns': { 'type': 'uint64',
-                                                         'features': [ 'unstable' ] },
-            'pending-publish-ready': { 'type': 'uint64',
-                                       'features': [ 'unstable' ] },
-            'completion-pending-publish-ready': {
-                'type': 'uint64',
-                'features': [ 'unstable' ] },
             '*last-publish-request': {
                 'type': 'CXLMigrationPublishRequestInfo',
-                'features': [ 'unstable' ] },
-            '*last-publish-ready': {
-                'type': 'CXLMigrationPublishReadyInfo',
-                'features': [ 'unstable' ] },
-            '*last-completion-publish-ready': {
-                'type': 'CXLMigrationPublishReadyInfo',
-                'features': [ 'unstable' ] },
-            '*last-publish-ready-recv': {
-                'type': 'CXLMigrationPublishReadyInfo',
                 'features': [ 'unstable' ] },
             '*last-publish-wait-begin': {
                 'type': 'CXLMigrationPublishWaitInfo',

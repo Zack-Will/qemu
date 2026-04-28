@@ -17,7 +17,6 @@
 #define CXL_HYBRID_METADATA_VERSION 1
 #define CXL_HYBRID_METADATA_ENTRY_HEADER_LEN (1 + 8 + 8 + 4 + 4)
 #define CXL_HYBRID_METADATA_HEADER_LEN (4 + 4 + 4)
-#define CXL_HYBRID_PUBLISH_NOTIFY_HEADER_LEN (1 + 8 + 8 + 4 + 4 + 4)
 #define CXL_HYBRID_STAGING_PAGE_SIZE 4096
 
 typedef struct CXLHybridDstStagingSlot {
@@ -129,46 +128,6 @@ static bool cxl_hybrid_metadata_entry_valid(const CXLHybridMetadataEntry *entry,
     return true;
 }
 
-static bool cxl_hybrid_publish_notify_valid(
-    const CXLHybridPublishNotify *notify, Error **errp)
-{
-    size_t name_len;
-
-    if (!notify || !notify->ramblock || !notify->ramblock[0]) {
-        error_setg(errp, "CXL hybrid publish notify missing ramblock name");
-        return false;
-    }
-
-    name_len = strlen(notify->ramblock);
-    if (name_len > UCHAR_MAX) {
-        error_setg(errp,
-                   "CXL hybrid publish notify ramblock name too long: %zu bytes",
-                   name_len);
-        return false;
-    }
-
-    if (!notify->page_len) {
-        error_setg(errp, "CXL hybrid publish notify missing page length");
-        return false;
-    }
-
-    if (!QEMU_IS_ALIGNED(notify->guest_offset, CXL_HYBRID_STAGING_PAGE_SIZE) ||
-        !QEMU_IS_ALIGNED(notify->cxl_offset, CXL_HYBRID_STAGING_PAGE_SIZE) ||
-        !QEMU_IS_ALIGNED(notify->page_len, CXL_HYBRID_STAGING_PAGE_SIZE)) {
-        error_setg(errp,
-                   "CXL hybrid publish notify offsets must be page aligned");
-        return false;
-    }
-
-    if (notify->guest_offset > UINT64_MAX - notify->page_len ||
-        notify->cxl_offset > UINT64_MAX - notify->page_len) {
-        error_setg(errp, "CXL hybrid publish notify range overflows");
-        return false;
-    }
-
-    return true;
-}
-
 void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta)
 {
     uint32_t i;
@@ -182,16 +141,6 @@ void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta)
     }
     g_free(meta->entries);
     memset(meta, 0, sizeof(*meta));
-}
-
-void cxl_hybrid_publish_notify_cleanup(CXLHybridPublishNotify *notify)
-{
-    if (!notify) {
-        return;
-    }
-
-    g_free(notify->ramblock);
-    memset(notify, 0, sizeof(*notify));
 }
 
 bool cxl_hybrid_global_page_offset(const RAMBlock *block,
@@ -1118,27 +1067,6 @@ int cxl_hybrid_metadata_encoded_len(const CXLHybridMetadata *meta,
     return 0;
 }
 
-int cxl_hybrid_publish_notify_encoded_len(const CXLHybridPublishNotify *notify,
-                                          size_t *len,
-                                          Error **errp)
-{
-    size_t name_len;
-
-    if (!len) {
-        error_setg(errp,
-                   "CXL hybrid publish notify length request missing output");
-        return -EINVAL;
-    }
-
-    if (!cxl_hybrid_publish_notify_valid(notify, errp)) {
-        return -EINVAL;
-    }
-
-    name_len = strlen(notify->ramblock);
-    *len = CXL_HYBRID_PUBLISH_NOTIFY_HEADER_LEN + name_len;
-    return 0;
-}
-
 int cxl_hybrid_metadata_encode(const CXLHybridMetadata *meta,
                                uint8_t *buf,
                                size_t len,
@@ -1190,49 +1118,6 @@ int cxl_hybrid_metadata_encode(const CXLHybridMetadata *meta,
         p += 4;
     }
 
-    return 0;
-}
-
-int cxl_hybrid_publish_notify_encode(const CXLHybridPublishNotify *notify,
-                                     uint8_t *buf,
-                                     size_t len,
-                                     Error **errp)
-{
-    uint8_t *p = buf;
-    size_t expected_len;
-    uint8_t name_len;
-    int ret;
-
-    if (!buf) {
-        error_setg(errp, "CXL hybrid publish notify encode missing buffer");
-        return -EINVAL;
-    }
-
-    ret = cxl_hybrid_publish_notify_encoded_len(notify, &expected_len, errp);
-    if (ret) {
-        return ret;
-    }
-
-    if (len != expected_len) {
-        error_setg(errp,
-                   "CXL hybrid publish notify encode length mismatch: got %zu expected %zu",
-                   len, expected_len);
-        return -EINVAL;
-    }
-
-    name_len = strlen(notify->ramblock);
-    *p++ = name_len;
-    memcpy(p, notify->ramblock, name_len);
-    p += name_len;
-    stq_be_p(p, notify->guest_offset);
-    p += 8;
-    stq_be_p(p, notify->cxl_offset);
-    p += 8;
-    stl_be_p(p, notify->page_len);
-    p += 4;
-    stl_be_p(p, 0);
-    p += 4;
-    stl_be_p(p, notify->generation);
     return 0;
 }
 
@@ -1318,65 +1203,5 @@ int cxl_hybrid_metadata_decode(CXLHybridMetadata *meta,
 
 fail:
     cxl_hybrid_metadata_cleanup(&decoded);
-    return -EINVAL;
-}
-
-int cxl_hybrid_publish_notify_decode(CXLHybridPublishNotify *notify,
-                                     const uint8_t *buf,
-                                     size_t len,
-                                     Error **errp)
-{
-    const uint8_t *p = buf;
-    const uint8_t *end = buf + len;
-    CXLHybridPublishNotify decoded = { 0 };
-    uint8_t name_len;
-
-    if (!notify || !buf) {
-        error_setg(errp, "CXL hybrid publish notify decode missing arguments");
-        return -EINVAL;
-    }
-
-    if (len < CXL_HYBRID_PUBLISH_NOTIFY_HEADER_LEN) {
-        error_setg(errp, "CXL hybrid publish notify payload too short: %zu",
-                   len);
-        return -EINVAL;
-    }
-
-    name_len = *p++;
-    if ((size_t)(end - p) <
-        name_len + CXL_HYBRID_PUBLISH_NOTIFY_HEADER_LEN - 1) {
-        error_setg(errp, "CXL hybrid publish notify truncated in header");
-        return -EINVAL;
-    }
-
-    decoded.ramblock = g_strndup((const char *)p, name_len);
-    p += name_len;
-    decoded.guest_offset = ldq_be_p(p);
-    p += 8;
-    decoded.cxl_offset = ldq_be_p(p);
-    p += 8;
-    decoded.page_len = ldl_be_p(p);
-    p += 4;
-    p += 4;
-    decoded.generation = ldl_be_p(p);
-    p += 4;
-
-    if (p != end) {
-        error_setg(errp,
-                   "CXL hybrid publish notify payload has %zu trailing bytes",
-                   (size_t)(end - p));
-        goto fail;
-    }
-
-    if (!cxl_hybrid_publish_notify_valid(&decoded, errp)) {
-        goto fail;
-    }
-
-    cxl_hybrid_publish_notify_cleanup(notify);
-    *notify = decoded;
-    return 0;
-
-fail:
-    cxl_hybrid_publish_notify_cleanup(&decoded);
     return -EINVAL;
 }

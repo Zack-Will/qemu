@@ -21,6 +21,7 @@
 #define CXL_HYBRID_CTRL_VERSION 3
 #define CXL_HYBRID_CTRL_REQUEST_ORDER 10
 #define CXL_HYBRID_CTRL_READY_ORDER 11
+#define CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE (1U << 0)
 #define CXL_REMAP_GRANULE_DEFAULT (64 * 1024)
 #define CXL_REMAP_GRANULE_ENV "QEMU_CXL_REMAP_GRANULE"
 
@@ -48,14 +49,6 @@ typedef struct CXLHybridMetadata {
     CXLHybridMetadataEntry *entries;
 } CXLHybridMetadata;
 
-typedef struct CXLHybridPublishNotify {
-    char *ramblock;
-    uint64_t guest_offset;
-    uint64_t cxl_offset;
-    uint32_t page_len;
-    uint32_t generation;
-} CXLHybridPublishNotify;
-
 typedef struct CXLHybridControlHeader {
     uint32_t magic;
     uint16_t version;
@@ -71,9 +64,13 @@ typedef struct CXLHybridControlHeader {
     uint64_t region_granule;
     uint64_t request_prod;
     uint64_t request_cons;
+    uint64_t active_enqueue_count;
+    uint64_t active_request_count;
     uint64_t ready_prod;
     uint64_t ready_cons;
     uint64_t source_write_count;
+    uint32_t completed_generation;
+    uint32_t completion_flags;
 } CXLHybridControlHeader;
 
 typedef struct CXLHybridFaultRequestRecord {
@@ -145,7 +142,6 @@ typedef enum CXLHybridPublishSource {
     CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH,
     CXL_HYBRID_PUBLISH_SOURCE_FAULT_PRIMARY,
     CXL_HYBRID_PUBLISH_SOURCE_FAULT_BURST,
-    CXL_HYBRID_PUBLISH_SOURCE_PENDING_READY,
     CXL_HYBRID_PUBLISH_SOURCE_COMPLETION,
 } CXLHybridPublishSource;
 
@@ -173,29 +169,17 @@ typedef struct CXLHybridDstRegionState {
 } CXLHybridDstRegionState;
 
 void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta);
-void cxl_hybrid_publish_notify_cleanup(CXLHybridPublishNotify *notify);
 int cxl_hybrid_metadata_encoded_len(const CXLHybridMetadata *meta,
                                     size_t *len,
                                     Error **errp);
-int cxl_hybrid_publish_notify_encoded_len(const CXLHybridPublishNotify *notify,
-                                          size_t *len,
-                                          Error **errp);
 int cxl_hybrid_metadata_encode(const CXLHybridMetadata *meta,
                                uint8_t *buf,
                                size_t len,
                                Error **errp);
-int cxl_hybrid_publish_notify_encode(const CXLHybridPublishNotify *notify,
-                                     uint8_t *buf,
-                                     size_t len,
-                                     Error **errp);
 int cxl_hybrid_metadata_decode(CXLHybridMetadata *meta,
                                const uint8_t *buf,
                                size_t len,
                                Error **errp);
-int cxl_hybrid_publish_notify_decode(CXLHybridPublishNotify *notify,
-                                     const uint8_t *buf,
-                                     size_t len,
-                                     Error **errp);
 int cxl_hybrid_metadata_snapshot_source(CXLHybridMetadata *meta,
                                         Error **errp);
 int cxl_hybrid_metadata_send(QEMUFile *f, Error **errp);
@@ -361,6 +345,8 @@ bool cxl_hybrid_lookup_global_page(size_t page_index,
 int cxl_hybrid_control_init_source(Error **errp);
 int cxl_hybrid_control_init_destination(Error **errp);
 int cxl_hybrid_control_begin_source_run(Error **errp);
+int cxl_hybrid_control_complete_source_run(Error **errp);
+bool cxl_hybrid_control_source_run_completed(uint32_t generation);
 int cxl_hybrid_control_activate_destination(Error **errp);
 void cxl_hybrid_control_cleanup_source(void);
 void cxl_hybrid_control_cleanup_destination(void);
@@ -425,6 +411,7 @@ int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
 int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
                                           uint32_t generation,
                                           uint64_t request_ts_ns,
+                                          bool *queuedp,
                                           Error **errp);
 bool cxl_hybrid_ctrl_region_visible(uint64_t first_page,
                                     uint32_t nr_pages,
@@ -437,6 +424,7 @@ int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
                                                  uint32_t nr_pages,
                                                  uint32_t generation,
                                                  uint64_t request_ts_ns,
+                                                 bool *queuedp,
                                                  Error **errp);
 bool cxl_hybrid_ctrl_region_owned(uint64_t region_index,
                                   uint32_t generation);
@@ -457,14 +445,6 @@ void cxl_hybrid_note_publish_request_received(const char *ramblock,
                                               uint64_t guest_offset,
                                               uint32_t generation,
                                               uint64_t req_recv_ns);
-void cxl_hybrid_record_publish_req_recv_time(uint64_t elapsed_ns);
-void cxl_hybrid_record_publish_ready_recv_time(uint64_t elapsed_ns);
-int cxl_hybrid_handle_publish_request(const char *ramblock,
-                                      uint64_t guest_offset,
-                                      uint32_t page_len,
-                                      uint32_t generation,
-                                      uint64_t req_recv_ns,
-                                      Error **errp);
 int cxl_hybrid_handle_fault_ready_record(
     const CXLHybridFaultReadyRecord *record, Error **errp);
 int cxl_hybrid_publish_fault_request_core(const char *ramblock,
@@ -486,17 +466,7 @@ bool cxl_hybrid_source_region_owned_by_destination_generation(
     uint32_t generation);
 bool cxl_hybrid_source_region_owned_by_destination(RAMBlock *block,
                                                    ram_addr_t offset);
-int cxl_hybrid_handle_publish_quiesce(MigrationIncomingState *mis,
-                                      Error **errp);
-int cxl_hybrid_send_pending_publish_ready(QEMUFile *f, Error **errp);
-int cxl_hybrid_handle_publish_ready(const CXLHybridPublishNotify *notify,
-                                    bool fault_primary,
-                                    uint64_t ready_recv_ns,
-                                    Error **errp);
 int cxl_hybrid_completion_publish_remaining_pages(MigrationState *s,
                                                   Error **errp);
-void cxl_hybrid_mark_completion_pending_publish_ready(void);
-void cxl_hybrid_mark_completion_publish_ready_flushed(void);
-uint64_t cxl_hybrid_pending_publish_ready(void);
 
 #endif

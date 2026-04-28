@@ -133,8 +133,6 @@ struct MigrationIncomingState {
     QemuMutex rp_mutex;    /* We send replies from multiple threads */
     /* RAMBlock of last request sent to source */
     RAMBlock *last_rb;
-    /* Block new CXL publish requests once completion quiesce starts. */
-    bool cxl_publish_request_quiesce;
     /*
      * Number of postcopy channels including the default precopy channel, so
      * vanilla postcopy will only contain one channel which contain both
@@ -530,7 +528,6 @@ struct MigrationState {
      * switchover has been received.
      */
     bool switchover_acked;
-    bool cxl_publish_quiesce_acked;
     bool cxl_hybrid_ready_urgent;
     /* Is this a rdma migration */
     bool rdma_migration;
@@ -582,11 +579,6 @@ void migrate_send_rp_pong(MigrationIncomingState *mis,
                           uint32_t value);
 int migrate_send_rp_req_pages(MigrationIncomingState *mis, RAMBlock *rb,
                               ram_addr_t start, uint64_t haddr, uint32_t tid);
-int migrate_send_rp_cxl_publish_req(MigrationIncomingState *mis, RAMBlock *rb,
-                                    ram_addr_t start, uint32_t page_len,
-                                    uint32_t generation,
-                                    bool *sentp);
-int migrate_send_rp_cxl_publish_quiesce_ack(MigrationIncomingState *mis);
 int migrate_send_rp_message_req_pages(MigrationIncomingState *mis,
                                       RAMBlock *rb, ram_addr_t start);
 void migrate_send_rp_recv_bitmap(MigrationIncomingState *mis,

@@ -40,7 +40,6 @@ savevm_send_postcopy_resume(void) ""
 savevm_send_recv_bitmap(char *name) "%s"
 savevm_send_switchover_start(void) ""
 savevm_send_cxl_hybrid_metadata(uint32_t generation, uint32_t entries, size_t len) "generation=%u entries=%u len=%zu"
-savevm_send_cxl_hybrid_publish_ready(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, size_t len) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " len=%zu"
 savevm_state_setup(void) ""
 savevm_state_resume_prepare(void) ""
 savevm_state_header(void) ""
@@ -68,12 +67,6 @@ cxl_hybrid_publish_complete(const char *ramblock, uint64_t guest_offset, uint64_
 cxl_hybrid_publish_skip_ready(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u"
 cxl_hybrid_publish_request_send(const char *ramblock, uint64_t guest_offset, uint32_t generation) "%s guest=0x%" PRIx64 " generation=%u"
 cxl_hybrid_publish_request_recv(const char *ramblock, uint64_t guest_offset, uint32_t generation) "%s guest=0x%" PRIx64 " generation=%u"
-cxl_hybrid_publish_ready_queue(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation, uint64_t pending) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u pending=%" PRIu64
-cxl_hybrid_publish_ready_pop(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation, uint64_t pending) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u pending=%" PRIu64
-cxl_hybrid_publish_ready_drain_begin(uint64_t pending) "pending=%" PRIu64
-cxl_hybrid_publish_ready_drain_end(int sent, uint64_t pending) "sent=%d pending=%" PRIu64
-cxl_hybrid_publish_ready_send(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u"
-cxl_hybrid_publish_ready_recv(const char *ramblock, uint64_t guest_offset, uint64_t cxl_offset, uint32_t generation) "%s guest=0x%" PRIx64 " cxl=0x%" PRIx64 " generation=%u"
 cxl_hybrid_region_request_enqueue(uint64_t first_page, uint32_t nr_pages, uint32_t generation) "first-page=%" PRIu64 " pages=%u gen=%u"
 cxl_hybrid_region_request_dequeue(uint64_t first_page, uint32_t nr_pages, uint32_t generation) "first-page=%" PRIu64 " pages=%u gen=%u"
 cxl_hybrid_region_publish_complete(uint64_t first_page, uint32_t nr_pages, int published, uint32_t generation) "first-page=%" PRIu64 " pages=%u published=%d gen=%u"
@@ -82,15 +75,15 @@ cxl_hybrid_region_wait_complete(uint64_t first_page, uint32_t nr_pages, uint32_t
 cxl_hybrid_region_owned_set(uint64_t region_index, uint32_t generation) "region=%" PRIu64 " gen=%u"
 cxl_hybrid_dst_region_remap(const char *ramblock, uint64_t offset, uint64_t len, uint64_t cxl_offset, uint64_t region_index) "%s/0x%" PRIx64 " len=%" PRIu64 " cxl=0x%" PRIx64 " region=%" PRIu64
 cxl_hybrid_ram_stream_skip_dst_owned(const char *ramblock, uint64_t offset) "%s/0x%" PRIx64
-cxl_hybrid_iteration_profile(uint32_t phase, uint64_t ram_pages, uint64_t staged_delta, uint64_t staged_pages, uint64_t total_pages, uint64_t warm_push_pages, uint64_t fault_primary_pages, uint64_t fault_burst_pages, uint64_t publish_ready_pages) "phase=%u ram_pages=%" PRIu64 " staged_delta=%" PRIu64 " staged_pages=%" PRIu64 " total_pages=%" PRIu64 " warm_push_pages=%" PRIu64 " fault_primary_pages=%" PRIu64 " fault_burst_pages=%" PRIu64 " publish_ready_pages=%" PRIu64
+cxl_hybrid_iteration_profile(uint32_t phase, uint64_t ram_pages, uint64_t staged_delta, uint64_t staged_pages, uint64_t total_pages, uint64_t warm_push_pages, uint64_t fault_primary_pages, uint64_t fault_burst_pages) "phase=%u ram_pages=%" PRIu64 " staged_delta=%" PRIu64 " staged_pages=%" PRIu64 " total_pages=%" PRIu64 " warm_push_pages=%" PRIu64 " fault_primary_pages=%" PRIu64 " fault_burst_pages=%" PRIu64
 cxl_hybrid_ctrl_request_worker_start(void) ""
 cxl_hybrid_ctrl_request_worker_stop(void) ""
 cxl_hybrid_ctrl_ready_poller_start(void) ""
 cxl_hybrid_ctrl_ready_poller_stop(void) ""
 cxl_hybrid_publish_wait_begin(const char *ramblock, uint64_t guest_offset, uint32_t generation) "%s guest=0x%" PRIx64 " generation=%u"
 cxl_hybrid_publish_wait_complete(const char *ramblock, uint64_t guest_offset, uint32_t generation, uint64_t wait_time_ns, int ret) "%s guest=0x%" PRIx64 " generation=%u wait_time_ns=%" PRIu64 " ret=%d"
-cxl_hybrid_completion_prepare_begin(uint64_t pending) "pending=%" PRIu64
-cxl_hybrid_completion_prepare_end(int remaining, int ready, uint64_t pending, int ret) "remaining=%d ready=%d pending=%" PRIu64 " ret=%d"
+cxl_hybrid_completion_prepare_begin(void) ""
+cxl_hybrid_completion_prepare_end(int remaining_sent, int ret) "remaining_sent=%d ret=%d"
 
 # vmstate.c
 vmstate_load_field_error(const char *field, int ret) "field \"%s\" load failed, ret = %d"

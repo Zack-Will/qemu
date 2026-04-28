@@ -449,6 +449,109 @@ static bool cxl_hybrid_ctrl_state_ready(const CXLHybridControlState *state)
            state->hdr->ready_ring_order == CXL_HYBRID_CTRL_READY_ORDER;
 }
 
+static bool cxl_hybrid_ctrl_state_run_completed(
+    const CXLHybridControlState *state,
+    uint32_t generation)
+{
+    uint32_t completed;
+
+    if (!state->hdr) {
+        return false;
+    }
+
+    completed = qatomic_load_acquire(&state->hdr->completed_generation);
+    return completed == generation;
+}
+
+static bool cxl_hybrid_ctrl_state_quiescing(
+    const CXLHybridControlState *state,
+    uint32_t generation)
+{
+    uint32_t flags;
+
+    if (!state->hdr ||
+        !cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+        return false;
+    }
+
+    flags = qatomic_load_acquire(&state->hdr->completion_flags);
+    return flags & CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE;
+}
+
+static bool cxl_hybrid_ctrl_request_visible(
+    const CXLHybridControlState *state,
+    const CXLHybridFaultRequestRecord *record)
+{
+    if (record->flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
+        return cxl_hybrid_control_region_visible(
+            state->hdr, state->visible_bitmap, record->page_index,
+            record->nr_pages, record->generation);
+    }
+
+    return cxl_hybrid_control_page_visible(state->hdr, state->visible_bitmap,
+                                           record->page_index,
+                                           record->generation);
+}
+
+static int cxl_hybrid_ctrl_request_completed_status(
+    const CXLHybridControlState *state,
+    const CXLHybridFaultRequestRecord *record,
+    Error **errp)
+{
+    if (cxl_hybrid_ctrl_request_visible(state, record)) {
+        return 0;
+    }
+
+    if (record->flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
+        error_setg(errp,
+                   "CXL hybrid source completed before region "
+                   "(first-page=%" PRIu64 " pages=%u) became visible",
+                   record->page_index, record->nr_pages);
+    } else {
+        error_setg(errp,
+                   "CXL hybrid source completed before page %" PRIu64
+                   " became visible",
+                   record->page_index);
+    }
+    return -ENOENT;
+}
+
+static uint64_t cxl_hybrid_ctrl_active_request_count(
+    const CXLHybridControlState *state)
+{
+    return state->hdr ? qatomic_load_acquire(&state->hdr->active_request_count)
+                      : 0;
+}
+
+static uint64_t cxl_hybrid_ctrl_active_enqueue_count(
+    const CXLHybridControlState *state)
+{
+    return state->hdr ? qatomic_load_acquire(&state->hdr->active_enqueue_count)
+                      : 0;
+}
+
+static void cxl_hybrid_ctrl_active_enqueue_begin(CXLHybridControlState *state)
+{
+    qatomic_inc(&state->hdr->active_enqueue_count);
+}
+
+static void cxl_hybrid_ctrl_active_enqueue_end(CXLHybridControlState *state)
+{
+    qatomic_dec(&state->hdr->active_enqueue_count);
+}
+
+static void cxl_hybrid_ctrl_active_request_begin(
+    CXLHybridControlState *state)
+{
+    qatomic_inc(&state->hdr->active_request_count);
+}
+
+static void cxl_hybrid_ctrl_active_request_end(
+    CXLHybridControlState *state)
+{
+    qatomic_dec(&state->hdr->active_request_count);
+}
+
 static void cxl_hybrid_ctrl_abort_generation(CXLHybridControlState *state,
                                              uint32_t generation)
 {
@@ -471,7 +574,7 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
 
             if (!cxl_hybrid_control_generation_matches(state->hdr,
                                                        record.generation)) {
-                continue;
+                goto request_done;
             }
             if (record.flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
                 trace_cxl_hybrid_region_request_dequeue(record.page_index,
@@ -489,7 +592,7 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                         error_report_err(local_err);
                     }
                     cxl_hybrid_ctrl_abort_generation(state, record.generation);
-                    continue;
+                    goto request_done;
                 }
                 if (cxl_hybrid_publish_fault_region_request_core(
                         record.page_index, record.nr_pages,
@@ -500,12 +603,12 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                     }
                     cxl_hybrid_ctrl_abort_generation(state, record.generation);
                 }
-                continue;
+                goto request_done;
             }
             if (!cxl_hybrid_lookup_global_page(record.page_index, &block,
                                                &block_offset)) {
                 cxl_hybrid_ctrl_abort_generation(state, record.generation);
-                continue;
+                goto request_done;
             }
 
             cxl_hybrid_note_publish_request_received(qemu_ram_get_idstr(block),
@@ -526,6 +629,8 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                 }
                 cxl_hybrid_ctrl_abort_generation(state, record.generation);
             }
+request_done:
+            cxl_hybrid_ctrl_active_request_end(state);
             continue;
         }
         g_usleep(50);
@@ -617,9 +722,10 @@ static void cxl_hybrid_ctrl_publish_request(CXLHybridFaultRequestRecord *slot,
     qatomic_set(&slot->seq, seq);
 }
 
-static void cxl_hybrid_ctrl_publish_ready(CXLHybridFaultReadyRecord *slot,
-                                          const CXLHybridFaultReadyRecord *src,
-                                          uint64_t seq)
+static void cxl_hybrid_ctrl_publish_fault_ready(
+    CXLHybridFaultReadyRecord *slot,
+    const CXLHybridFaultReadyRecord *src,
+    uint64_t seq)
 {
     *slot = *src;
     smp_wmb();
@@ -628,6 +734,7 @@ static void cxl_hybrid_ctrl_publish_ready(CXLHybridFaultReadyRecord *slot,
 
 static int cxl_hybrid_ctrl_try_enqueue_request(CXLHybridControlState *state,
                                                const CXLHybridFaultRequestRecord *record,
+                                               bool *queuedp,
                                                Error **errp)
 {
     CXLHybridFaultRequestRecord entry = { 0 };
@@ -638,13 +745,28 @@ static int cxl_hybrid_ctrl_try_enqueue_request(CXLHybridControlState *state,
     uint64_t mask;
     int ret = 0;
 
+    if (queuedp) {
+        *queuedp = false;
+    }
     if (!cxl_hybrid_ctrl_state_ready(state)) {
         error_setg(errp,
                    "CXL hybrid fault request ring is not initialized");
         return -EINVAL;
     }
 
+    cxl_hybrid_ctrl_active_enqueue_begin(state);
+    smp_mb();
+
     qemu_mutex_lock(&cxl_hybrid_control_request_lock);
+    if (cxl_hybrid_ctrl_state_run_completed(state, record->generation)) {
+        ret = cxl_hybrid_ctrl_request_completed_status(state, record, errp);
+        goto out;
+    }
+    if (cxl_hybrid_ctrl_state_quiescing(state, record->generation)) {
+        ret = 0;
+        goto out;
+    }
+
     prod = qatomic_read(&state->hdr->request_prod);
     cons = qatomic_read(&state->hdr->request_cons);
     if (prod - cons >= cxl_hybrid_control_region.request_ring_entries) {
@@ -659,11 +781,15 @@ static int cxl_hybrid_ctrl_try_enqueue_request(CXLHybridControlState *state,
     entry = *record;
     entry.seq = 0;
     cxl_hybrid_ctrl_publish_request(slot, &entry, seq);
-    smp_wmb();
-    qatomic_set(&state->hdr->request_prod, seq);
+    qatomic_store_release(&state->hdr->request_prod, seq);
+    if (queuedp) {
+        *queuedp = true;
+    }
 
 out:
     qemu_mutex_unlock(&cxl_hybrid_control_request_lock);
+    smp_mb();
+    cxl_hybrid_ctrl_active_enqueue_end(state);
     return ret;
 }
 
@@ -698,7 +824,7 @@ static int cxl_hybrid_ctrl_try_enqueue_ready(CXLHybridControlState *state,
     slot = &state->ready_ring[prod & mask];
     entry = *record;
     entry.seq = 0;
-    cxl_hybrid_ctrl_publish_ready(slot, &entry, seq);
+    cxl_hybrid_ctrl_publish_fault_ready(slot, &entry, seq);
     smp_wmb();
     qatomic_set(&state->hdr->ready_prod, seq);
 
@@ -735,7 +861,8 @@ static bool cxl_hybrid_ctrl_try_dequeue_request(CXLHybridControlState *state,
 
     smp_rmb();
     *record = *slot;
-    qatomic_set(&state->hdr->request_cons, expected_seq);
+    cxl_hybrid_ctrl_active_request_begin(state);
+    qatomic_store_release(&state->hdr->request_cons, expected_seq);
     return true;
 }
 
@@ -817,6 +944,86 @@ int cxl_hybrid_control_begin_source_run(Error **errp)
                                        generation);
     cxl_hybrid_ctrl_start_request_worker(&cxl_hybrid_control_source);
     return 0;
+}
+
+int cxl_hybrid_control_complete_source_run(Error **errp)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_source;
+    uint32_t generation;
+
+    if (!cxl_hybrid_ctrl_state_ready(state)) {
+        error_setg(errp,
+                   "CXL hybrid fault control source is not initialized");
+        return -EINVAL;
+    }
+
+    generation = cxl_hybrid_fault_publish_generation();
+    if (!cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+        error_setg(errp,
+                   "CXL hybrid fault control completion generation mismatch "
+                   "(header=%u expected=%u)",
+                   cxl_hybrid_control_generation(state->hdr), generation);
+        return -EINVAL;
+    }
+
+    qatomic_or(&state->hdr->completion_flags,
+               CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE);
+
+    while (cxl_hybrid_ctrl_active_enqueue_count(state) != 0) {
+        if (!cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+            error_setg(errp,
+                       "CXL hybrid fault control generation changed while "
+                       "waiting for active enqueues");
+            return -EINVAL;
+        }
+        cpu_relax();
+    }
+
+    while (qatomic_load_acquire(&state->hdr->request_cons) !=
+           qatomic_load_acquire(&state->hdr->request_prod)) {
+        if (!cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+            error_setg(errp,
+                       "CXL hybrid fault control generation changed while "
+                       "draining requests");
+            return -EINVAL;
+        }
+        cpu_relax();
+    }
+
+    while (cxl_hybrid_ctrl_active_request_count(state) != 0) {
+        if (!cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+            error_setg(errp,
+                       "CXL hybrid fault control generation changed while "
+                       "waiting for active requests");
+            return -EINVAL;
+        }
+        cpu_relax();
+    }
+
+    while (cxl_hybrid_control_source_write_count(state->hdr) != 0) {
+        if (!cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+            error_setg(errp,
+                       "CXL hybrid fault control generation changed while "
+                       "waiting for source writes");
+            return -EINVAL;
+        }
+        cpu_relax();
+    }
+
+    qatomic_store_release(&state->hdr->completed_generation, generation);
+    return 0;
+}
+
+bool cxl_hybrid_control_source_run_completed(uint32_t generation)
+{
+    CXLHybridControlState *state = cxl_hybrid_control_destination.hdr ?
+        &cxl_hybrid_control_destination : &cxl_hybrid_control_source;
+
+    if (!state->hdr) {
+        return false;
+    }
+
+    return cxl_hybrid_ctrl_state_run_completed(state, generation);
 }
 
 int cxl_hybrid_control_activate_destination(Error **errp)
@@ -972,6 +1179,14 @@ int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
                        generation);
             return -EINVAL;
         }
+        if (cxl_hybrid_ctrl_state_run_completed(
+                &cxl_hybrid_control_destination, generation)) {
+            error_setg(errp,
+                       "CXL hybrid source completed before page %" PRIu64
+                       " became visible",
+                       page_index);
+            return -ENOENT;
+        }
 
         cpu_relax();
     }
@@ -1021,6 +1236,15 @@ int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
             ret = -EINVAL;
             break;
         }
+        if (cxl_hybrid_ctrl_state_run_completed(
+                &cxl_hybrid_control_destination, generation)) {
+            error_setg(errp,
+                       "CXL hybrid source completed before region "
+                       "(first-page=%" PRIu64 " pages=%u) became visible",
+                       first_page, nr_pages);
+            ret = -ENOENT;
+            break;
+        }
 
         cpu_relax();
     }
@@ -1033,6 +1257,7 @@ int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
 int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
                                           uint32_t generation,
                                           uint64_t request_ts_ns,
+                                          bool *queuedp,
                                           Error **errp)
 {
     CXLHybridFaultRequestRecord record = {
@@ -1042,13 +1267,14 @@ int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
     };
 
     return cxl_hybrid_ctrl_try_enqueue_request(
-        &cxl_hybrid_control_destination, &record, errp);
+        &cxl_hybrid_control_destination, &record, queuedp, errp);
 }
 
 int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
                                                  uint32_t nr_pages,
                                                  uint32_t generation,
                                                  uint64_t request_ts_ns,
+                                                 bool *queuedp,
                                                  Error **errp)
 {
     CXLHybridFaultRequestRecord record = {
@@ -1060,6 +1286,9 @@ int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
     };
     int ret;
 
+    if (queuedp) {
+        *queuedp = false;
+    }
     trace_cxl_hybrid_region_request_enqueue(first_page, nr_pages, generation);
     ret = cxl_hybrid_ctrl_validate_region_range(
         cxl_hybrid_control_destination.hdr, first_page, nr_pages, errp);
@@ -1068,7 +1297,7 @@ int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
     }
 
     return cxl_hybrid_ctrl_try_enqueue_request(
-        &cxl_hybrid_control_destination, &record, errp);
+        &cxl_hybrid_control_destination, &record, queuedp, errp);
 }
 
 bool cxl_hybrid_ctrl_region_owned(uint64_t region_index, uint32_t generation)

@@ -96,13 +96,10 @@ enum qemu_vm_cmd {
     MIG_CMD_RECV_BITMAP,       /* Request for recved bitmap on dst */
     MIG_CMD_SWITCHOVER_START,  /* Switchover start notification */
     MIG_CMD_CXL_HYBRID_METADATA, /* Hybrid CXL staging metadata snapshot */
-    MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE, /* Stop new dst publish requests */
-    MIG_CMD_CXL_HYBRID_PUBLISH_READY, /* Hybrid CXL publish-ready metadata */
     MIG_CMD_MAX
 };
 
 #define MAX_VM_CMD_PACKAGED_SIZE UINT32_MAX
-#define CXL_HYBRID_PUBLISH_READY_FLAG_PRIMARY BIT(0)
 static struct mig_cmd_args {
     ssize_t     len; /* -1 = variable */
     const char *name;
@@ -121,10 +118,6 @@ static struct mig_cmd_args {
     [MIG_CMD_SWITCHOVER_START] = { .len =  0, .name = "SWITCHOVER_START" },
     [MIG_CMD_CXL_HYBRID_METADATA] = { .len = -1,
                                       .name = "CXL_HYBRID_METADATA" },
-    [MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE] = {
-        .len = 0, .name = "CXL_HYBRID_PUBLISH_QUIESCE" },
-    [MIG_CMD_CXL_HYBRID_PUBLISH_READY] = {
-        .len = -1, .name = "CXL_HYBRID_PUBLISH_READY" },
     [MIG_CMD_MAX]              = { .len = -1, .name = "MAX" },
 };
 
@@ -1284,35 +1277,6 @@ void qemu_savevm_send_cxl_hybrid_metadata(QEMUFile *f,
                              (uint8_t *)buf);
 }
 
-void qemu_savevm_send_cxl_hybrid_publish_ready(QEMUFile *f,
-                                               const char *ramblock,
-                                               uint64_t guest_offset,
-                                               uint64_t cxl_offset,
-                                               const uint8_t *buf,
-                                               size_t len,
-                                               bool fault_primary)
-{
-    g_autofree uint8_t *cmd_buf = NULL;
-    uint64_t sent_at_ns;
-    size_t cmd_hdr_len = 8 + 1;
-
-    assert(len <= UINT16_MAX - cmd_hdr_len);
-    sent_at_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    cmd_buf = g_malloc(cmd_hdr_len + len);
-    stq_be_p(cmd_buf, sent_at_ns);
-    cmd_buf[8] = fault_primary ? CXL_HYBRID_PUBLISH_READY_FLAG_PRIMARY : 0;
-    memcpy(cmd_buf + cmd_hdr_len, buf, len);
-    trace_savevm_send_cxl_hybrid_publish_ready(ramblock, guest_offset,
-                                               cxl_offset, cmd_hdr_len + len);
-    qemu_savevm_command_send(f, MIG_CMD_CXL_HYBRID_PUBLISH_READY,
-                             cmd_hdr_len + len, cmd_buf);
-}
-
-void qemu_savevm_send_cxl_hybrid_publish_quiesce(QEMUFile *f)
-{
-    qemu_savevm_command_send(f, MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE, 0, NULL);
-}
-
 bool qemu_savevm_state_blocked(Error **errp)
 {
     SaveStateEntry *se;
@@ -2318,13 +2282,11 @@ static gboolean postcopy_sync_page_req(gpointer key, gpointer value,
     }
 
     if (migrate_cxl_hybrid()) {
-        ret = migrate_send_rp_cxl_publish_req(
-            mis, rb, rb_offset, qemu_ram_pagesize(rb),
-            cxl_hybrid_fault_publish_generation(), &sent);
-    } else {
-        ret = migrate_send_rp_message_req_pages(mis, rb, rb_offset);
-        sent = ret == 0;
+        return FALSE;
     }
+
+    ret = migrate_send_rp_message_req_pages(mis, rb, rb_offset);
+    sent = ret == 0;
     if (ret) {
         /* Please refer to above comment. */
         error_report("%s: send rp message failed for addr %p",
@@ -2667,67 +2629,6 @@ static int loadvm_process_command(QEMUFile *f, Error **errp)
 
         ret = cxl_hybrid_metadata_recv(buf, len, errp);
         loadvm_trace_postcopy_timeline(mis, "dst-cxl-metadata-done", len);
-        return ret;
-    }
-    case MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE:
-        return cxl_hybrid_handle_publish_quiesce(mis, errp);
-
-    case MIG_CMD_CXL_HYBRID_PUBLISH_READY:
-    {
-        g_autofree uint8_t *buf = g_malloc(len);
-        CXLHybridPublishNotify notify = { 0 };
-        bool fault_primary;
-        uint64_t publish_ready_recv_ns;
-        uint64_t publish_ready_sent_at_ns;
-
-        if (migrate_cxl_shared_bitmap()) {
-            error_setg(errp,
-                       "CXL shared-bitmap mode rejects legacy publish-ready transport");
-            return -EINVAL;
-        }
-
-        if (qemu_get_buffer(f, buf, len) != len) {
-            error_setg(errp,
-                       "Failed to read CXL hybrid publish-ready payload: %u bytes",
-                       len);
-            return -EIO;
-        }
-
-        ret = qemu_file_get_error(f);
-        if (ret) {
-            error_setg(errp,
-                       "Stream error while reading CXL hybrid publish-ready: %d",
-                       ret);
-            return ret;
-        }
-
-        if (len < 9) {
-            error_setg(errp,
-                       "CXL hybrid publish-ready payload too short: %u bytes",
-                       len);
-            return -EINVAL;
-        }
-
-        publish_ready_sent_at_ns = ldq_be_p(buf);
-        fault_primary = buf[8] & CXL_HYBRID_PUBLISH_READY_FLAG_PRIMARY;
-        ret = cxl_hybrid_publish_notify_decode(&notify, buf + 9, len - 9, errp);
-        if (ret) {
-            return ret;
-        }
-
-        publish_ready_recv_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-        if (fault_primary) {
-            if (publish_ready_recv_ns >= publish_ready_sent_at_ns) {
-                cxl_hybrid_record_publish_ready_recv_time(
-                    publish_ready_recv_ns - publish_ready_sent_at_ns);
-            } else {
-                cxl_hybrid_record_publish_ready_recv_time(0);
-            }
-        }
-
-        ret = cxl_hybrid_handle_publish_ready(&notify, fault_primary,
-                                              publish_ready_recv_ns, errp);
-        cxl_hybrid_publish_notify_cleanup(&notify);
         return ret;
     }
     }

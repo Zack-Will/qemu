@@ -157,9 +157,13 @@ static void test_header_reset_clears_visible_bitmap(void)
         .region_granule = 4096,
         .request_prod = 10,
         .request_cons = 9,
+        .active_enqueue_count = 4,
+        .active_request_count = 3,
         .ready_prod = 20,
         .ready_cons = 19,
         .source_write_count = 33,
+        .completed_generation = 99,
+        .completion_flags = CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE,
     };
     unsigned long visible_bitmap[2] = { ~0UL, ~0UL };
     unsigned long owned_bitmap[1] = { ~0UL };
@@ -189,9 +193,13 @@ static void test_header_reset_clears_visible_bitmap(void)
     g_assert_cmpuint(hdr.region_granule, ==, 64 * 1024);
     g_assert_cmpuint(hdr.request_prod, ==, 0);
     g_assert_cmpuint(hdr.request_cons, ==, 0);
+    g_assert_cmpuint(hdr.active_enqueue_count, ==, 0);
+    g_assert_cmpuint(hdr.active_request_count, ==, 0);
     g_assert_cmpuint(hdr.ready_prod, ==, 0);
     g_assert_cmpuint(hdr.ready_cons, ==, 0);
     g_assert_cmpuint(hdr.source_write_count, ==, 0);
+    g_assert_cmpuint(hdr.completed_generation, ==, 0);
+    g_assert_cmpuint(hdr.completion_flags, ==, 0);
     g_assert_cmphex(visible_bitmap[0], ==, 0);
     g_assert_cmphex(visible_bitmap[1], ==, 0);
     g_assert_cmphex(owned_bitmap[0], ==, 0);
