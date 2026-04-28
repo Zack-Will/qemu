@@ -70,8 +70,13 @@ static size_t cxl_global_page_index(RAMBlock *block, ram_addr_t block_offset);
 static size_t cxl_global_region_index(ram_addr_t global_offset);
 static uint64_t cxl_total_guest_pages(void);
 static uint64_t cxl_choose_remap_granule(uint64_t align, uint64_t total_ram);
-static int cxl_destination_staging_init(Error **errp);
-static void cxl_destination_staging_cleanup(void);
+static int cxl_destination_setup_init(Error **errp);
+static int cxl_destination_backing_open(QIOChannelCXL **ciocp, Error **errp);
+static int cxl_destination_control_and_region_init(QIOChannelCXL *cioc,
+                                                   Error **errp);
+static int cxl_destination_copy_staging_init(QIOChannelCXL *cioc,
+                                             Error **errp);
+static void cxl_destination_setup_cleanup(void);
 static int cxl_destination_region_state_init(int fd, uint64_t align,
                                              uint64_t map_size,
                                              Error **errp);
@@ -644,7 +649,7 @@ void cxl_hybrid_metadata_cleanup_incoming(void)
 {
     cxl_hybrid_metadata_cleanup(&cxl_incoming_meta_state.last_meta);
     cxl_incoming_meta_state.valid = false;
-    cxl_destination_staging_cleanup();
+    cxl_destination_setup_cleanup();
 }
 
 int cxl_hybrid_try_resolve_fault(MigrationIncomingState *mis, RAMBlock *rb,
@@ -1162,8 +1167,14 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
         ret = -EINVAL;
     }
     if (!ret) {
-        ret = cxl_hybrid_dst_staging_register_external_page(
-            ramblock, offset, cxl_offset, pagesize, errp);
+        if (!cxl_hybrid_dst_staging_is_active()) {
+            error_setg(errp,
+                       "CXL hybrid copy fault resolution requires destination staging");
+            ret = -EINVAL;
+        } else {
+            ret = cxl_hybrid_dst_staging_register_external_page(
+                ramblock, offset, cxl_offset, pagesize, errp);
+        }
     }
     wait_time_ns = cxl_now_ns() - wait_start_ns;
     qatomic_add(&cxl_state.fault_publish_wait_time_ns, wait_time_ns);
@@ -1200,20 +1211,19 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
     return 0;
 }
 
-static int cxl_destination_staging_init(Error **errp)
+static bool cxl_destination_copy_staging_needed(void)
+{
+    return migrate_cxl_fault_resolve_copy() ||
+           migrate_cxl_fault_resolve_region_remap_fallback_copy();
+}
+
+static int cxl_destination_backing_open(QIOChannelCXL **ciocp, Error **errp)
 {
     QIOChannelCXL *cioc;
-    int ret;
     const char *path = migrate_cxl_path();
-    uint64_t base_offset;
-    uint64_t total_capacity;
-
-    if (!migrate_cxl_hybrid()) {
-        return 0;
-    }
 
     if (!path) {
-        error_setg(errp, "CXL hybrid destination staging requires cxl-path");
+        error_setg(errp, "CXL hybrid destination setup requires cxl-path");
         return -EINVAL;
     }
 
@@ -1223,10 +1233,40 @@ static int cxl_destination_staging_init(Error **errp)
     }
 
     if (cioc->map_size == 0) {
-        error_setg(errp, "CXL hybrid destination staging size is unknown");
+        error_setg(errp, "CXL hybrid destination backing size is unknown");
         object_unref(OBJECT(cioc));
         return -EINVAL;
     }
+
+    *ciocp = cioc;
+    return 0;
+}
+
+static int cxl_destination_control_and_region_init(QIOChannelCXL *cioc,
+                                                   Error **errp)
+{
+    int ret;
+
+    ret = cxl_hybrid_control_init_destination(errp);
+    if (ret) {
+        return ret;
+    }
+
+    ret = cxl_destination_region_state_init(cioc->fd, cioc->align,
+                                            cioc->map_size, errp);
+    if (ret) {
+        cxl_hybrid_control_cleanup_destination();
+        return ret;
+    }
+
+    return 0;
+}
+
+static int cxl_destination_copy_staging_init(QIOChannelCXL *cioc, Error **errp)
+{
+    int ret;
+    uint64_t base_offset;
+    uint64_t total_capacity;
 
     total_capacity = cioc->map_size;
     base_offset = cxl_hybrid_reserved_region_bytes(cioc->align, true);
@@ -1235,7 +1275,6 @@ static int cxl_destination_staging_init(Error **errp)
                    "CXL hybrid destination staging has no free space after mapped-ram backing: "
                    "base=%" PRIu64 " capacity=%" PRIu64,
                    base_offset, total_capacity);
-        object_unref(OBJECT(cioc));
         return -ENOSPC;
     }
 
@@ -1246,15 +1285,6 @@ static int cxl_destination_staging_init(Error **errp)
                                                cioc->dev_size > 0,
                                                errp);
     if (ret) {
-        object_unref(OBJECT(cioc));
-        return ret;
-    }
-
-    ret = cxl_destination_region_state_init(cioc->fd, cioc->align,
-                                            cioc->map_size, errp);
-    object_unref(OBJECT(cioc));
-    if (ret) {
-        cxl_hybrid_dst_staging_cleanup();
         return ret;
     }
 
@@ -1262,7 +1292,6 @@ static int cxl_destination_staging_init(Error **errp)
         ret = cxl_hybrid_dst_staging_apply_metadata(
             &cxl_incoming_meta_state.last_meta, errp);
         if (ret) {
-            cxl_destination_region_state_cleanup();
             cxl_hybrid_dst_staging_cleanup();
             return ret;
         }
@@ -1271,7 +1300,41 @@ static int cxl_destination_staging_init(Error **errp)
     return 0;
 }
 
-static void cxl_destination_staging_cleanup(void)
+static int cxl_destination_setup_init(Error **errp)
+{
+    QIOChannelCXL *cioc = NULL;
+    int ret;
+
+    if (!migrate_cxl_hybrid()) {
+        return 0;
+    }
+
+    ret = cxl_destination_backing_open(&cioc, errp);
+    if (ret) {
+        return ret;
+    }
+
+    ret = cxl_destination_control_and_region_init(cioc, errp);
+    if (ret) {
+        cxl_destination_setup_cleanup();
+        object_unref(OBJECT(cioc));
+        return ret;
+    }
+
+    if (cxl_destination_copy_staging_needed()) {
+        ret = cxl_destination_copy_staging_init(cioc, errp);
+        if (ret) {
+            cxl_destination_setup_cleanup();
+            object_unref(OBJECT(cioc));
+            return ret;
+        }
+    }
+
+    object_unref(OBJECT(cioc));
+    return 0;
+}
+
+static void cxl_destination_setup_cleanup(void)
 {
     cxl_hybrid_control_cleanup_destination();
     cxl_destination_region_state_cleanup();
@@ -1294,13 +1357,8 @@ bool cxl_hybrid_init_destination(Error **errp)
                    "CXL hybrid postcopy requires x-cxl-shared-backing=true");
         return false;
     }
-    ret = cxl_destination_staging_init(errp);
+    ret = cxl_destination_setup_init(errp);
     if (ret) {
-        return false;
-    }
-    ret = cxl_hybrid_control_init_destination(errp);
-    if (ret) {
-        cxl_destination_staging_cleanup();
         return false;
     }
     return true;
