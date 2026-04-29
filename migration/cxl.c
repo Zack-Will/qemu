@@ -1465,7 +1465,13 @@ bool cxl_use_mapped_ram_backing(void)
 
 static uint64_t cxl_mapped_ram_pages_offset_alignment(uint64_t align)
 {
-    return MAX((uint64_t)CXL_MAPPED_RAM_FILE_OFFSET_ALIGNMENT, align);
+    bool use_region_remap = migrate_cxl_fault_resolve_uses_region();
+    uint64_t remap_granule = use_region_remap ?
+        cxl_choose_remap_granule(align, ram_bytes_total()) : 0;
+
+    return cxl_hybrid_mapped_ram_pages_offset_alignment(
+        CXL_MAPPED_RAM_FILE_OFFSET_ALIGNMENT, align, remap_granule,
+        use_region_remap);
 }
 
 uint64_t cxl_hybrid_mapped_ram_required_bytes(uint64_t align)
@@ -1506,6 +1512,11 @@ uint64_t cxl_hybrid_mapped_ram_required_bytes(uint64_t align)
 uint64_t cxl_mapped_ram_alignment(void)
 {
     return cxl_state.align ? cxl_state.align : CXL_BACKING_ALIGN_FALLBACK;
+}
+
+uint64_t cxl_mapped_ram_pages_alignment(void)
+{
+    return cxl_mapped_ram_pages_offset_alignment(cxl_mapped_ram_alignment());
 }
 
 uint64_t cxl_hybrid_reserved_region_bytes(uint64_t align,

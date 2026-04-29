@@ -3279,8 +3279,7 @@ static uint64_t mapped_ram_pages_offset_alignment(void)
         return MAPPED_RAM_FILE_OFFSET_ALIGNMENT;
     }
 
-    return MAX((uint64_t)MAPPED_RAM_FILE_OFFSET_ALIGNMENT,
-               cxl_mapped_ram_alignment());
+    return cxl_mapped_ram_pages_alignment();
 }
 
 static QEMUFile *mapped_ram_save_file(QEMUFile *file)

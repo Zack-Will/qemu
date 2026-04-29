@@ -213,6 +213,14 @@ static void test_region_copy_poison_blocks_remap_reservation(void)
     cxl_hybrid_dst_region_state_destroy_for_test(&state);
 }
 
+static void test_mapped_ram_pages_alignment_includes_region_granule(void)
+{
+    g_assert_cmpuint(cxl_hybrid_mapped_ram_pages_offset_alignment(
+                         1 * MiB, 4 * KiB, 2 * MiB, true), ==, 2 * MiB);
+    g_assert_cmpuint(cxl_hybrid_mapped_ram_pages_offset_alignment(
+                         1 * MiB, 4 * KiB, 2 * MiB, false), ==, 1 * MiB);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -244,5 +252,7 @@ int main(int argc, char **argv)
                     test_region_remap_reservation_blocks_copy_poison);
     g_test_add_func("/cxl/region/copy-poison-blocks-remap-reservation",
                     test_region_copy_poison_blocks_remap_reservation);
+    g_test_add_func("/cxl/region/mapped-ram-pages-alignment",
+                    test_mapped_ram_pages_alignment_includes_region_granule);
     return g_test_run();
 }

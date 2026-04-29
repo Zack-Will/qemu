@@ -19,6 +19,21 @@ bool cxl_hybrid_fault_resolve_mode_emits_burst(
     return mode == CXL_HYBRID_FAULT_RESOLVE_MODE_COPY;
 }
 
+uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
+    uint64_t file_align,
+    uint64_t dax_align,
+    uint64_t remap_granule,
+    bool use_region_remap)
+{
+    uint64_t align = MAX(file_align, dax_align);
+
+    if (use_region_remap) {
+        align = MAX(align, remap_granule);
+    }
+
+    return align;
+}
+
 static bool cxl_hybrid_dst_region_index_valid(
     const CXLHybridDstRegionState *state,
     uint64_t region_index)

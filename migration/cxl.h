@@ -225,6 +225,11 @@ int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
                                     uint64_t target_page_size,
                                     CXLHybridFaultRegionGeometry *out,
                                     Error **errp);
+uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
+    uint64_t file_align,
+    uint64_t dax_align,
+    uint64_t remap_granule,
+    bool use_region_remap);
 void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,
                                                uint64_t total_regions);
 void cxl_hybrid_dst_region_state_destroy_for_test(
@@ -267,6 +272,7 @@ QIOChannel *cxl_open_mapped_ram_outgoing(Error **errp);
 QIOChannel *cxl_open_mapped_ram_incoming(Error **errp);
 bool cxl_create_incoming_mapped_ram_channels(Error **errp);
 uint64_t cxl_mapped_ram_alignment(void);
+uint64_t cxl_mapped_ram_pages_alignment(void);
 void cxl_populate_migration_info(MigrationInfo *info);
 uint64_t cxl_hybrid_align_mapping_bytes(uint64_t bytes, uint64_t align);
 uint64_t cxl_hybrid_fault_control_region_allocation_bytes(uint64_t align);
