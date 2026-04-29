@@ -551,6 +551,12 @@
 # @region-publish-time-ns: cumulative nanoseconds spent handling
 #     source-side full-region publish requests
 #
+# @publish-memcpy-bytes: bytes copied by source-side CXL publish
+#     memcpy operations
+#
+# @publish-memcpy-time-ns: cumulative nanoseconds spent inside
+#     source-side CXL publish memcpy operations
+#
 # @fault-publish-primary-samples: number of source-side primary fault
 #     publish measurements recorded before any burst work
 #
@@ -622,6 +628,7 @@
 #     @fault-publish-wait-time-ns,
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
+#     @publish-memcpy-bytes, @publish-memcpy-time-ns,
 #     @fault-publish-primary-samples,
 #     @fault-publish-primary-time-ns,
 #     @max-fault-publish-primary-time-ns,
@@ -745,6 +752,10 @@
             'region-publish-pages': { 'type': 'uint64',
                                       'features': [ 'unstable' ] },
             'region-publish-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'publish-memcpy-bytes': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'publish-memcpy-time-ns': { 'type': 'uint64',
                                         'features': [ 'unstable' ] },
             'fault-publish-primary-samples': { 'type': 'uint64',
                                                'features': [ 'unstable' ] },

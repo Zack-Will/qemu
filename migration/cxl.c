@@ -190,6 +190,8 @@ static struct CXLMigrationState {
     uint64_t region_publish_requests;
     uint64_t region_publish_pages;
     uint64_t region_publish_time_ns;
+    uint64_t publish_memcpy_bytes;
+    uint64_t publish_memcpy_time_ns;
     uint64_t dst_region_map_attempts;
     uint64_t dst_region_map_successes;
     uint64_t dst_region_map_failures;
@@ -1648,6 +1650,10 @@ void cxl_populate_migration_info(MigrationInfo *info)
         qatomic_read(&cxl_state.region_publish_pages);
     info->x_cxl->region_publish_time_ns =
         qatomic_read(&cxl_state.region_publish_time_ns);
+    info->x_cxl->publish_memcpy_bytes =
+        qatomic_read(&cxl_state.publish_memcpy_bytes);
+    info->x_cxl->publish_memcpy_time_ns =
+        qatomic_read(&cxl_state.publish_memcpy_time_ns);
     info->x_cxl->fault_publish_primary_samples =
         qatomic_read(&cxl_state.fault_publish_primary_samples);
     info->x_cxl->fault_publish_primary_time_ns =
@@ -2262,6 +2268,7 @@ static int cxl_hybrid_copy_page_to_stable_cxl(RAMBlock *block,
 {
     uint8_t *src;
     uint8_t *dst;
+    uint64_t start_ns;
 
     if (!page_len || !QEMU_IS_ALIGNED(page_len, TARGET_PAGE_SIZE)) {
         error_setg(errp,
@@ -2281,7 +2288,10 @@ static int cxl_hybrid_copy_page_to_stable_cxl(RAMBlock *block,
 
     src = block->host + guest_offset;
     dst = (uint8_t *)cxl_state.mmap_base + cxl_offset;
+    start_ns = cxl_now_ns();
     memcpy(dst, src, page_len);
+    qatomic_add(&cxl_state.publish_memcpy_time_ns, cxl_now_ns() - start_ns);
+    qatomic_add(&cxl_state.publish_memcpy_bytes, page_len);
     return 0;
 }
 
