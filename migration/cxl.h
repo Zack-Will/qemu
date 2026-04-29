@@ -18,7 +18,7 @@
 
 #define CXL_HYBRID_METADATA_VERSION 1
 #define CXL_HYBRID_CTRL_MAGIC 0x43584c48U
-#define CXL_HYBRID_CTRL_VERSION 4
+#define CXL_HYBRID_CTRL_VERSION 5
 #define CXL_HYBRID_CTRL_REQUEST_ORDER 10
 #define CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE (1U << 0)
 #define CXL_REMAP_GRANULE_DEFAULT (64 * 1024)
@@ -55,8 +55,10 @@ typedef struct CXLHybridControlHeader {
     uint32_t request_ring_order;
     uint32_t generation;
     uint32_t visible_page_words;
+    uint32_t visible_region_words;
     uint32_t owned_region_words;
     uint32_t region_granule_shift;
+    uint32_t target_page_shift;
     uint64_t total_pages;
     uint64_t total_regions;
     uint64_t region_granule;
@@ -329,6 +331,8 @@ void cxl_hybrid_control_cleanup_destination(void);
 uint64_t cxl_hybrid_fault_control_region_bytes(void);
 size_t cxl_hybrid_control_visible_bitmap_words(uint64_t pages);
 size_t cxl_hybrid_control_visible_bitmap_bytes(uint64_t pages);
+size_t cxl_hybrid_control_visible_region_bitmap_words(uint64_t regions);
+size_t cxl_hybrid_control_visible_region_bitmap_bytes(uint64_t regions);
 size_t cxl_hybrid_control_owned_region_bitmap_words(uint64_t regions);
 size_t cxl_hybrid_control_owned_region_bitmap_bytes(uint64_t regions);
 uint32_t cxl_hybrid_control_region_granule_shift(uint64_t region_granule);
@@ -357,6 +361,7 @@ bool cxl_hybrid_control_page_visible(const CXLHybridControlHeader *hdr,
                                      uint32_t generation);
 bool cxl_hybrid_control_region_visible(const CXLHybridControlHeader *hdr,
                                        const unsigned long *visible_bitmap,
+                                       const unsigned long *visible_region_bitmap,
                                        uint64_t first_page,
                                        uint32_t nr_pages,
                                        uint32_t generation);
@@ -366,12 +371,18 @@ void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
 void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
                                            unsigned long *visible_bitmap,
                                            uint64_t page_index);
+void cxl_hybrid_control_mark_region_visible(const CXLHybridControlHeader *hdr,
+                                            unsigned long *visible_region_bitmap,
+                                            uint64_t region_index);
 void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
                                         unsigned long *visible_bitmap,
                                         uint64_t visible_pages,
+                                        unsigned long *visible_region_bitmap,
+                                        uint64_t visible_regions,
                                         unsigned long *owned_region_bitmap,
                                         uint64_t total_regions,
                                         uint64_t region_granule,
+                                        uint32_t target_page_shift,
                                         uint32_t generation);
 void cxl_hybrid_control_reset_header_for_run(CXLHybridControlHeader *hdr,
                                              uint32_t generation);
@@ -397,6 +408,9 @@ int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
 bool cxl_hybrid_ctrl_region_visible(uint64_t first_page,
                                     uint32_t nr_pages,
                                     uint32_t generation);
+void cxl_hybrid_ctrl_set_region_visible(uint64_t first_page,
+                                        uint32_t nr_pages,
+                                        uint32_t generation);
 int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
                                         uint32_t nr_pages,
                                         uint32_t generation,
