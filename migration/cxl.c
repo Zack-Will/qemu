@@ -156,6 +156,9 @@ static struct CXLMigrationState {
     uint64_t dirty_sync_time_ns;
     uint64_t dirty_clear_time_ns;
     uint64_t phase_transitions;
+    /* Fault-control generation stays stable after postcopy run setup. */
+    uint32_t source_run_generation;
+    uint32_t source_run_generation_valid;
     uint64_t switch_iteration;
     uint64_t source_heat_updates;
     uint64_t source_warm_queue_pages;
@@ -539,7 +542,7 @@ int cxl_hybrid_metadata_snapshot_source(CXLHybridMetadata *meta, Error **errp)
 {
     CXLHybridMetadata snapshot = {
         .version = CXL_HYBRID_METADATA_VERSION,
-        .generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions),
+        .generation = cxl_hybrid_fault_publish_generation(),
     };
     RAMBlock *block;
 
@@ -721,11 +724,27 @@ int cxl_hybrid_try_resolve_fault(MigrationIncomingState *mis, RAMBlock *rb,
 
 uint32_t cxl_hybrid_fault_publish_generation(void)
 {
-    if (cxl_incoming_meta_state.valid) {
-        return cxl_incoming_meta_state.last_meta.generation;
-    }
+    return cxl_hybrid_select_fault_publish_generation(
+        cxl_incoming_meta_state.valid,
+        cxl_incoming_meta_state.last_meta.generation,
+        qatomic_read(&cxl_state.source_run_generation_valid) != 0,
+        qatomic_read(&cxl_state.source_run_generation),
+        qatomic_read(&cxl_state.phase_transitions));
+}
 
-    return (uint32_t)qatomic_read(&cxl_state.phase_transitions);
+uint32_t cxl_hybrid_fault_publish_generation_begin_source_run(void)
+{
+    uint32_t generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions);
+
+    qatomic_set(&cxl_state.source_run_generation, generation);
+    qatomic_set(&cxl_state.source_run_generation_valid, 1);
+    return generation;
+}
+
+void cxl_hybrid_fault_publish_generation_end_source_run(void)
+{
+    qatomic_set(&cxl_state.source_run_generation_valid, 0);
+    qatomic_set(&cxl_state.source_run_generation, 0);
 }
 
 static bool cxl_hybrid_mark_region_fault_requested(MigrationIncomingState *mis,
@@ -1756,7 +1775,7 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
         return 0;
     }
 
-    generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions);
+    generation = cxl_hybrid_fault_publish_generation();
     ret = cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,
                                          TARGET_PAGE_SIZE, generation,
                                          CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH,
@@ -1812,7 +1831,7 @@ static int cxl_hybrid_completion_publish_remaining_page(
         return 0;
     }
 
-    generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions);
+    generation = cxl_hybrid_fault_publish_generation();
     ret = cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,
                                          TARGET_PAGE_SIZE, generation,
                                          CXL_HYBRID_PUBLISH_SOURCE_COMPLETION,
@@ -2955,7 +2974,7 @@ static void cxl_mark_pages_remapped(size_t first_page, size_t npages)
     if (cxl_state.publish_mutex_ready) {
         qemu_mutex_lock(&cxl_state.publish_mutex);
     }
-    generation = (uint32_t)qatomic_read(&cxl_state.phase_transitions);
+    generation = cxl_hybrid_fault_publish_generation();
     for (page = 0; page < npages; page++) {
         size_t page_idx = first_page + page;
         CXLHybridPublishedPageEntry *entry =
@@ -3102,6 +3121,7 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
     cxl_state.switch_reason = CXL_MIGRATION_SWITCH_REASON_NONE;
     cxl_state.switch_iteration = 0;
     cxl_state.phase_transitions = cxl_state.hybrid_enabled ? 1 : 0;
+    cxl_hybrid_fault_publish_generation_end_source_run();
     cxl_hybrid_ensure_publish_mutex();
 
     if (!cxl_write_redirect_enabled()) {
@@ -3675,6 +3695,7 @@ void cxl_hybrid_enter_phase(CXLHybridPhase phase,
 void cxl_hybrid_cleanup_source(void)
 {
     cxl_hybrid_control_cleanup_source();
+    cxl_hybrid_fault_publish_generation_end_source_run();
     cxl_cleanup_outgoing_migration();
 }
 

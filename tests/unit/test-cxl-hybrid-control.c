@@ -396,6 +396,18 @@ static void test_region_resolution_rejects_hole(void)
     g_assert_cmpuint(unresolved_page, ==, 12);
 }
 
+static void test_fault_generation_uses_stable_source_run(void)
+{
+    g_assert_cmpuint(cxl_hybrid_select_fault_publish_generation(
+                         false, 0, false, 0, 5), ==, 5);
+
+    g_assert_cmpuint(cxl_hybrid_select_fault_publish_generation(
+                         false, 0, true, 2, 3), ==, 2);
+
+    g_assert_cmpuint(cxl_hybrid_select_fault_publish_generation(
+                         true, 7, true, 2, 3), ==, 7);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -431,5 +443,7 @@ int main(int argc, char **argv)
                     test_region_visibility_requires_all_pages);
     g_test_add_func("/cxl-hybrid-control/region-resolution-rejects-hole",
                     test_region_resolution_rejects_hole);
+    g_test_add_func("/cxl-hybrid-control/fault-generation-uses-stable-source-run",
+                    test_fault_generation_uses_stable_source_run);
     return g_test_run();
 }

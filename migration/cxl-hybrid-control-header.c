@@ -63,6 +63,23 @@ bool cxl_hybrid_control_abort_generation(CXLHybridControlHeader *hdr,
            generation;
 }
 
+uint32_t cxl_hybrid_select_fault_publish_generation(bool incoming_valid,
+                                                    uint32_t incoming_generation,
+                                                    bool source_run_valid,
+                                                    uint32_t source_run_generation,
+                                                    uint64_t phase_transitions)
+{
+    if (incoming_valid) {
+        return incoming_generation;
+    }
+
+    if (source_run_valid) {
+        return source_run_generation;
+    }
+
+    return (uint32_t)phase_transitions;
+}
+
 uint64_t cxl_hybrid_control_source_write_count(
     const CXLHybridControlHeader *hdr)
 {

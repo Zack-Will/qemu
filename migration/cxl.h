@@ -211,6 +211,8 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
                                                         RAMBlock *rb),
                                       Error **errp);
 uint32_t cxl_hybrid_fault_publish_generation(void);
+uint32_t cxl_hybrid_fault_publish_generation_begin_source_run(void);
+void cxl_hybrid_fault_publish_generation_end_source_run(void);
 bool cxl_hybrid_fault_resolve_mode_emits_burst(
     CXLHybridFaultResolveMode mode);
 int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
@@ -335,6 +337,11 @@ bool cxl_hybrid_control_generation_matches(const CXLHybridControlHeader *hdr,
                                            uint32_t generation);
 bool cxl_hybrid_control_abort_generation(CXLHybridControlHeader *hdr,
                                          uint32_t generation);
+uint32_t cxl_hybrid_select_fault_publish_generation(bool incoming_valid,
+                                                    uint32_t incoming_generation,
+                                                    bool source_run_valid,
+                                                    uint32_t source_run_generation,
+                                                    uint64_t phase_transitions);
 uint64_t cxl_hybrid_control_source_write_count(
     const CXLHybridControlHeader *hdr);
 uint64_t cxl_hybrid_control_source_write_begin(CXLHybridControlHeader *hdr);

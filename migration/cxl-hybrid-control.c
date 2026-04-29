@@ -779,7 +779,7 @@ int cxl_hybrid_control_begin_source_run(Error **errp)
         return ret;
     }
 
-    generation = cxl_hybrid_fault_publish_generation();
+    generation = cxl_hybrid_fault_publish_generation_begin_source_run();
     owned_region_bitmap = cxl_hybrid_control_source.owned_region_bitmap;
     cxl_hybrid_control_reset_run_state(cxl_hybrid_control_source.hdr,
                                        cxl_hybrid_control_source.visible_bitmap,
