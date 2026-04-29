@@ -2751,6 +2751,7 @@ static int postcopy_start(MigrationState *ms, Error **errp)
     }
 
     if (migrate_cxl_hybrid()) {
+        cxl_hybrid_prefault_wait_before_postcopy();
         if (!cxl_hybrid_init_source()) {
             error_setg(errp,
                        "Failed to initialize CXL hybrid source fault control");

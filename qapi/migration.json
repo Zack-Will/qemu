@@ -441,6 +441,17 @@
 # @dirty-clear-time-ns: cumulative nanoseconds spent clearing dirty
 #     bits for already-remapped pages
 #
+# @prefault-bytes: bytes covered by source-side CXL page-data
+#     write-prefault operations
+#
+# @prefault-time-ns: cumulative nanoseconds spent in source-side
+#     CXL page-data write-prefault work
+#
+# @prefault-wait-time-ns: cumulative nanoseconds spent waiting for
+#     source-side CXL write-prefault completion before postcopy
+#
+# @prefault-errors: number of source-side CXL write-prefault errors
+#
 # @phase: current experimental CXL hybrid phase
 #
 # @phase-transitions: number of recorded CXL hybrid phase transitions
@@ -626,6 +637,8 @@
 #     @last-iterate-fault-burst-pages, @last-iterate-phase,
 #     @fault-publish-requests, @fault-publish-waits,
 #     @fault-publish-wait-time-ns,
+#     @prefault-bytes, @prefault-time-ns,
+#     @prefault-wait-time-ns, @prefault-errors,
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
 #     @publish-memcpy-bytes, @publish-memcpy-time-ns,
@@ -679,6 +692,14 @@
             'dirty-sync-calls': 'uint64',
             'dirty-sync-time-ns': 'uint64',
             'dirty-clear-time-ns': 'uint64',
+            'prefault-bytes': { 'type': 'uint64',
+                                'features': [ 'unstable' ] },
+            'prefault-time-ns': { 'type': 'uint64',
+                                  'features': [ 'unstable' ] },
+            'prefault-wait-time-ns': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'prefault-errors': { 'type': 'uint64',
+                                 'features': [ 'unstable' ] },
             'phase': { 'type': 'CXLMigrationPhase',
                        'features': [ 'unstable' ] },
             'phase-transitions': { 'type': 'uint64',

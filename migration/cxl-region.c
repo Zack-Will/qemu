@@ -34,6 +34,41 @@ uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
     return align;
 }
 
+bool cxl_hybrid_mapped_ram_layout_next(uint64_t *offsetp,
+                                       uint64_t used_length,
+                                       uint64_t pages_align,
+                                       uint64_t target_page_size,
+                                       uint64_t *pages_offsetp,
+                                       uint64_t *pages_lenp)
+{
+    uint64_t num_pages;
+    uint64_t bitmap_size;
+    uint64_t pages_offset;
+
+    if (!offsetp || !pages_offsetp || !pages_lenp || !pages_align ||
+        !target_page_size || !is_power_of_2(pages_align) ||
+        !is_power_of_2(target_page_size) ||
+        used_length % target_page_size) {
+        return false;
+    }
+
+    num_pages = used_length / target_page_size;
+    bitmap_size = (uint64_t)BITS_TO_LONGS(num_pages) * sizeof(unsigned long);
+
+    if (*offsetp > UINT64_MAX - bitmap_size) {
+        return false;
+    }
+    pages_offset = ROUND_UP(*offsetp + bitmap_size, pages_align);
+    if (pages_offset > UINT64_MAX - used_length) {
+        return false;
+    }
+
+    *pages_offsetp = pages_offset;
+    *pages_lenp = used_length;
+    *offsetp = pages_offset + used_length;
+    return true;
+}
+
 static bool cxl_hybrid_dst_region_index_valid(
     const CXLHybridDstRegionState *state,
     uint64_t region_index)

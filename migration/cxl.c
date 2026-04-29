@@ -12,6 +12,7 @@
 #include "qemu/error-report.h"
 #include "qemu/atomic.h"
 #include "qemu/main-loop.h"
+#include "qemu/madvise.h"
 #include "qemu/rcu.h"
 #include "qemu/timer.h"
 #include "qapi/clone-visitor.h"
@@ -65,11 +66,17 @@ typedef struct CXLHybridLastPublishWaitInfo {
     bool has_ret;
 } CXLHybridLastPublishWaitInfo;
 
+typedef struct CXLHybridPrefaultSpan {
+    uint64_t offset;
+    uint64_t length;
+} CXLHybridPrefaultSpan;
+
 static CXLIncomingMetadataState cxl_incoming_meta_state;
 static size_t cxl_global_page_index(RAMBlock *block, ram_addr_t block_offset);
 static size_t cxl_global_region_index(ram_addr_t global_offset);
 static uint64_t cxl_total_guest_pages(void);
 static uint64_t cxl_choose_remap_granule(uint64_t align, uint64_t total_ram);
+static void cxl_hybrid_prefault_start(void);
 static int cxl_destination_setup_init(Error **errp);
 static int cxl_destination_backing_open(QIOChannelCXL **ciocp, Error **errp);
 static int cxl_destination_control_and_region_init(QIOChannelCXL *cioc,
@@ -155,6 +162,16 @@ static struct CXLMigrationState {
     uint64_t dirty_sync_calls;
     uint64_t dirty_sync_time_ns;
     uint64_t dirty_clear_time_ns;
+    QemuThread prefault_thread;
+    bool prefault_thread_created;
+    bool prefault_done;
+    bool prefault_failed;
+    CXLHybridPrefaultSpan *prefault_spans;
+    size_t prefault_span_count;
+    uint64_t prefault_bytes;
+    uint64_t prefault_time_ns;
+    uint64_t prefault_wait_time_ns;
+    uint64_t prefault_errors;
     uint64_t phase_transitions;
     /* Fault-control generation stays stable after postcopy run setup. */
     uint32_t source_run_generation;
@@ -1487,18 +1504,18 @@ uint64_t cxl_hybrid_mapped_ram_required_bytes(uint64_t align)
      */
     RCU_READ_LOCK_GUARD();
     RAMBLOCK_FOREACH_MIGRATABLE(block) {
-        long num_pages;
-        uint64_t bitmap_size;
+        uint64_t pages_offset;
+        uint64_t pages_len;
 
         if (migrate_ram_is_ignored(block)) {
             continue;
         }
 
-        num_pages = block->used_length >> TARGET_PAGE_BITS;
-        bitmap_size = (uint64_t)BITS_TO_LONGS(num_pages) * sizeof(unsigned long);
-
-        offset = ROUND_UP(offset + bitmap_size, pages_align);
-        offset += block->used_length;
+        if (!cxl_hybrid_mapped_ram_layout_next(&offset, block->used_length,
+                                               pages_align, TARGET_PAGE_SIZE,
+                                               &pages_offset, &pages_len)) {
+            return 0;
+        }
     }
 
     /*
@@ -1517,6 +1534,116 @@ uint64_t cxl_mapped_ram_alignment(void)
 uint64_t cxl_mapped_ram_pages_alignment(void)
 {
     return cxl_mapped_ram_pages_offset_alignment(cxl_mapped_ram_alignment());
+}
+
+static void cxl_hybrid_prefault_reset(void)
+{
+    g_free(cxl_state.prefault_spans);
+    cxl_state.prefault_spans = NULL;
+    cxl_state.prefault_span_count = 0;
+    cxl_state.prefault_thread_created = false;
+    cxl_state.prefault_done = false;
+    cxl_state.prefault_failed = false;
+}
+
+static bool cxl_hybrid_prefault_build_spans(uint64_t pages_align)
+{
+    RAMBlock *block;
+    uint64_t layout_offset = 0;
+
+    RCU_READ_LOCK_GUARD();
+    RAMBLOCK_FOREACH_MIGRATABLE(block) {
+        uint64_t pages_offset;
+        uint64_t pages_len;
+
+        if (migrate_ram_is_ignored(block)) {
+            continue;
+        }
+
+        if (!cxl_hybrid_mapped_ram_layout_next(&layout_offset,
+                                               block->used_length,
+                                               pages_align,
+                                               TARGET_PAGE_SIZE,
+                                               &pages_offset, &pages_len)) {
+            qatomic_inc(&cxl_state.prefault_errors);
+            return false;
+        }
+        if (!pages_len) {
+            continue;
+        }
+        cxl_state.prefault_spans = g_renew(CXLHybridPrefaultSpan,
+                                           cxl_state.prefault_spans,
+                                           cxl_state.prefault_span_count + 1);
+        cxl_state.prefault_spans[cxl_state.prefault_span_count++] =
+            (CXLHybridPrefaultSpan) {
+                .offset = pages_offset,
+                .length = pages_len,
+            };
+    }
+
+    return true;
+}
+
+static void *cxl_hybrid_prefault_worker(void *opaque)
+{
+    uint64_t start_ns = cxl_now_ns();
+    size_t i;
+
+    (void)opaque;
+
+    for (i = 0; i < cxl_state.prefault_span_count; i++) {
+        CXLHybridPrefaultSpan *span = &cxl_state.prefault_spans[i];
+        uint8_t *addr = (uint8_t *)cxl_state.mmap_base + span->offset;
+
+        if (qemu_madvise(addr, span->length, QEMU_MADV_POPULATE_WRITE)) {
+            qatomic_inc(&cxl_state.prefault_errors);
+            cxl_state.prefault_failed = true;
+            break;
+        }
+        qatomic_add(&cxl_state.prefault_bytes, span->length);
+    }
+
+    qatomic_add(&cxl_state.prefault_time_ns, cxl_now_ns() - start_ns);
+    qatomic_set(&cxl_state.prefault_done, true);
+    return NULL;
+}
+
+static void cxl_hybrid_prefault_start(void)
+{
+    uint64_t pages_align;
+
+    if (!cxl_state.active || !cxl_state.hybrid_enabled ||
+        !cxl_state.mmap_base || cxl_state.prefault_thread_created) {
+        return;
+    }
+
+    pages_align = cxl_mapped_ram_pages_offset_alignment(cxl_state.align);
+    if (!cxl_hybrid_prefault_build_spans(pages_align) ||
+        !cxl_state.prefault_span_count) {
+        cxl_state.prefault_done = true;
+        return;
+    }
+
+    qemu_thread_create(&cxl_state.prefault_thread,
+                       "cxl-prefault",
+                       cxl_hybrid_prefault_worker,
+                       NULL,
+                       QEMU_THREAD_JOINABLE);
+    cxl_state.prefault_thread_created = true;
+}
+
+void cxl_hybrid_prefault_wait_before_postcopy(void)
+{
+    uint64_t start_ns;
+
+    if (!cxl_state.prefault_thread_created) {
+        return;
+    }
+
+    start_ns = cxl_now_ns();
+    qemu_thread_join(&cxl_state.prefault_thread);
+    qatomic_add(&cxl_state.prefault_wait_time_ns, cxl_now_ns() - start_ns);
+    cxl_state.prefault_thread_created = false;
 }
 
 uint64_t cxl_hybrid_reserved_region_bytes(uint64_t align,
@@ -1596,6 +1723,14 @@ void cxl_populate_migration_info(MigrationInfo *info)
         qatomic_read(&cxl_state.dirty_sync_time_ns);
     info->x_cxl->dirty_clear_time_ns =
         qatomic_read(&cxl_state.dirty_clear_time_ns);
+    info->x_cxl->prefault_bytes =
+        qatomic_read(&cxl_state.prefault_bytes);
+    info->x_cxl->prefault_time_ns =
+        qatomic_read(&cxl_state.prefault_time_ns);
+    info->x_cxl->prefault_wait_time_ns =
+        qatomic_read(&cxl_state.prefault_wait_time_ns);
+    info->x_cxl->prefault_errors =
+        qatomic_read(&cxl_state.prefault_errors);
     info->x_cxl->phase = cxl_state.active ? cxl_state.phase :
                          CXL_HYBRID_PHASE_DISABLED;
     info->x_cxl->phase_transitions =
@@ -3358,6 +3493,7 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
     qemu_cond_init(&cxl_state.sender_sync_cond);
     cxl_state.sender_sync_ready = true;
     cxl_state.active = true;
+    cxl_hybrid_prefault_start();
 }
 
 static void cxl_remap_state_cleanup(void)
@@ -3370,6 +3506,7 @@ static void cxl_remap_state_cleanup(void)
 
     cxl_state.phase = CXL_HYBRID_PHASE_CLEANUP;
 
+    cxl_hybrid_prefault_wait_before_postcopy();
     cxl_sender_access_shutdown();
 
     if (cxl_state.active) {
@@ -3456,6 +3593,7 @@ static void cxl_remap_state_cleanup(void)
     g_free(cxl_state.remapped_bmap);
     g_free(cxl_state.remapped_pages_bmap);
     g_free(cxl_state.published_page_state);
+    cxl_hybrid_prefault_reset();
     memset(&cxl_state, 0, sizeof(cxl_state));
     cxl_state.fd = -1;
 }
