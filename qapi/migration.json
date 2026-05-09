@@ -568,6 +568,43 @@
 # @publish-memcpy-time-ns: cumulative nanoseconds spent inside
 #     source-side CXL publish memcpy operations
 #
+# @stream-publish-ranges: number of mapped-RAM background publish
+#     ranges made visible in the CXL control plane
+#
+# @stream-publish-pages: number of pages covered by mapped-RAM
+#     background publish ranges
+#
+# @stream-publish-time-ns: cumulative nanoseconds spent accounting
+#     mapped-RAM background publish ranges
+#
+# @stream-publish-local-bitmap-time-ns: cumulative nanoseconds spent
+#     updating source-local mapped-RAM publish bitmaps
+#
+# @stream-publish-shared-visible-time-ns: cumulative nanoseconds spent
+#     updating the shared CXL visible bitmap for mapped-RAM background
+#     publish ranges
+#
+# @stream-write-calls: number of postcopy mapped-RAM background writes
+#     issued to the CXL backing before publishing visibility
+#
+# @stream-write-bytes: number of bytes written by postcopy mapped-RAM
+#     background writes before publishing visibility
+#
+# @stream-write-max-bytes: maximum bytes written by one postcopy
+#     mapped-RAM background write before publishing visibility
+#
+# @stream-write-time-ns: cumulative nanoseconds spent in postcopy
+#     mapped-RAM background writes before publishing visibility
+#
+# @stream-fault-pause-calls: number of times the mapped-RAM background
+#     stream paused because CXL fault requests were pending or active
+#
+# @stream-fault-pause-time-ns: cumulative nanoseconds spent pausing
+#     mapped-RAM background stream for CXL fault pressure
+#
+# @stream-fault-pause-max-time-ns: maximum nanoseconds spent in one
+#     mapped-RAM background stream pause for CXL fault pressure
+#
 # @fault-publish-primary-samples: number of source-side primary fault
 #     publish measurements recorded before any burst work
 #
@@ -642,6 +679,13 @@
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
 #     @publish-memcpy-bytes, @publish-memcpy-time-ns,
+#     @stream-publish-ranges, @stream-publish-pages,
+#     @stream-publish-time-ns, @stream-publish-local-bitmap-time-ns,
+#     @stream-publish-shared-visible-time-ns,
+#     @stream-write-calls, @stream-write-bytes,
+#     @stream-write-max-bytes, @stream-write-time-ns,
+#     @stream-fault-pause-calls, @stream-fault-pause-time-ns,
+#     @stream-fault-pause-max-time-ns,
 #     @fault-publish-primary-samples,
 #     @fault-publish-primary-time-ns,
 #     @max-fault-publish-primary-time-ns,
@@ -778,6 +822,32 @@
                                       'features': [ 'unstable' ] },
             'publish-memcpy-time-ns': { 'type': 'uint64',
                                         'features': [ 'unstable' ] },
+            'stream-publish-ranges': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'stream-publish-pages': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'stream-publish-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'stream-publish-local-bitmap-time-ns': {
+                'type': 'uint64',
+                'features': [ 'unstable' ] },
+            'stream-publish-shared-visible-time-ns': {
+                'type': 'uint64',
+                'features': [ 'unstable' ] },
+            'stream-write-calls': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'stream-write-bytes': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'stream-write-max-bytes': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'stream-write-time-ns': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'stream-fault-pause-calls': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'stream-fault-pause-time-ns': { 'type': 'uint64',
+                                            'features': [ 'unstable' ] },
+            'stream-fault-pause-max-time-ns': { 'type': 'uint64',
+                                                'features': [ 'unstable' ] },
             'fault-publish-primary-samples': { 'type': 'uint64',
                                                'features': [ 'unstable' ] },
             'fault-publish-primary-time-ns': { 'type': 'uint64',

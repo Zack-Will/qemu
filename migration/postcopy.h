@@ -11,6 +11,12 @@
 
 #include "migration/migration.h"
 
+typedef enum MigrationPostcopyCXLRAMStreamWriteAction {
+    MIGRATION_POSTCOPY_CXL_RAM_STREAM_ALLOW,
+    MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE,
+    MIGRATION_POSTCOPY_CXL_RAM_STREAM_ERROR,
+} MigrationPostcopyCXLRAMStreamWriteAction;
+
 bool migration_postcopy_device_should_wait_for_package_loaded(
     MigrationStatus state,
     bool hybrid_mode,
@@ -21,5 +27,9 @@ bool migration_postcopy_ram_stream_should_publish_cxl_visible(
     bool mapped_ram,
     bool cxl_backing,
     bool data_saved);
+MigrationPostcopyCXLRAMStreamWriteAction
+migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
+                                               bool source_remapped,
+                                               bool page_visible);
 
 #endif /* QEMU_MIGRATION_POSTCOPY_H */

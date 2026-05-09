@@ -83,7 +83,7 @@
 #define DEFAULT_MIGRATE_X_CXL_DST_CACHE_SIZE 0
 #define DEFAULT_MIGRATE_X_CXL_SHARED_BACKING false
 #define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
-    CXL_HYBRID_FAULT_RESOLVE_MODE_COPY
+    CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP
 
 /*
  * Parameters for self_announce_delay giving a stream of RARP/ARP
@@ -1517,16 +1517,6 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         CXL_HYBRID_FAULT_RESOLVE_MODE__MAX) {
         error_setg(errp, "Invalid x-cxl-fault-resolve-mode value %d",
                    params->x_cxl_fault_resolve_mode);
-        return false;
-    }
-
-    if (params->x_cxl_fault_resolve_mode !=
-            CXL_HYBRID_FAULT_RESOLVE_MODE_COPY &&
-        !params->x_cxl_shared_backing) {
-        error_setg(errp,
-                   "x-cxl-fault-resolve-mode=%s requires x-cxl-shared-backing=true",
-                   CXLHybridFaultResolveMode_str(
-                       params->x_cxl_fault_resolve_mode));
         return false;
     }
 

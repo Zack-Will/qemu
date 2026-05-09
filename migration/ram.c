@@ -32,6 +32,7 @@
 #include "qemu/bitmap.h"
 #include "qemu/madvise.h"
 #include "qemu/main-loop.h"
+#include "qemu/timer.h"
 #include "xbzrle.h"
 #include "ram.h"
 #include "migration.h"
@@ -66,6 +67,7 @@
 #include "system/dirtylimit.h"
 #include "system/kvm.h"
 #include "cxl.h"
+#include "postcopy.h"
 
 #include "hw/core/boards.h" /* for machine_dump_guest_core() */
 
@@ -126,6 +128,20 @@ struct PageLocationHint {
 };
 typedef struct PageLocationHint PageLocationHint;
 
+typedef enum RAMCXLHybridPublishSpanKind {
+    RAM_CXL_HYBRID_PUBLISH_SPAN_WRITTEN,
+    RAM_CXL_HYBRID_PUBLISH_SPAN_ALREADY_VISIBLE,
+} RAMCXLHybridPublishSpanKind;
+
+typedef struct RAMCXLHybridPublishSpan {
+    RAMBlock *block;
+    ram_addr_t start;
+    ram_addr_t len;
+    uint32_t generation;
+    RAMCXLHybridPublishSpanKind kind;
+    bool active;
+} RAMCXLHybridPublishSpan;
+
 /* used by the search for pages to send */
 struct PageSearchStatus {
     /* The migration channel used for a specific host page */
@@ -143,6 +159,7 @@ struct PageSearchStatus {
     /* The start/end of current host page.  Invalid if host_page_sending==false */
     unsigned long host_page_start;
     unsigned long host_page_end;
+    RAMCXLHybridPublishSpan cxl_publish_span;
 };
 typedef struct PageSearchStatus PageSearchStatus;
 
@@ -494,6 +511,13 @@ void ram_transferred_add(uint64_t bytes)
 }
 
 static int ram_save_host_page_urgent(PageSearchStatus *pss);
+static void ram_cxl_hybrid_publish_span_flush(
+    RAMCXLHybridPublishSpan *span);
+static bool ram_cxl_hybrid_page_visible(RAMBlock *block, ram_addr_t offset,
+                                        uint32_t generation);
+static void ram_cxl_hybrid_set_owned_invisible_error(QEMUFile *file,
+                                                     RAMBlock *block,
+                                                     ram_addr_t offset);
 
 /* NOTE: page is the PFN not real ram_addr_t. */
 static void pss_init(PageSearchStatus *pss, RAMBlock *rb, ram_addr_t page)
@@ -1250,6 +1274,127 @@ static bool ram_cxl_hybrid_should_publish_saved_page(QEMUFile *file)
         data_saved);
 }
 
+static ram_addr_t ram_cxl_hybrid_publish_span_max_len(void)
+{
+    uint64_t granule = cxl_hybrid_fault_region_granule();
+
+    if (granule && QEMU_IS_ALIGNED(granule, TARGET_PAGE_SIZE)) {
+        return granule;
+    }
+
+    return 2 * 1024 * 1024;
+}
+
+static void ram_cxl_hybrid_publish_span_reset(RAMCXLHybridPublishSpan *span)
+{
+    span->block = NULL;
+    span->start = 0;
+    span->len = 0;
+    span->generation = 0;
+    span->kind = RAM_CXL_HYBRID_PUBLISH_SPAN_WRITTEN;
+    span->active = false;
+}
+
+static void ram_cxl_hybrid_publish_span_flush(
+    RAMCXLHybridPublishSpan *span)
+{
+    if (!span || !span->active) {
+        return;
+    }
+
+    if (span->len) {
+        cxl_hybrid_account_dst_pages_sent(span->block, span->start,
+                                          span->len, span->generation);
+        trace_cxl_hybrid_ram_stream_publish_span(
+            span->block->idstr, span->start, span->len, span->generation);
+    }
+
+    ram_cxl_hybrid_publish_span_reset(span);
+}
+
+static void ram_cxl_hybrid_pause_for_fault_pressure(
+    RAMCXLHybridPublishSpan *span,
+    QEMUFile *file)
+{
+    uint64_t elapsed_ns;
+
+    if (!ram_cxl_hybrid_should_publish_saved_page(file) ||
+        !cxl_hybrid_fault_pressure_active()) {
+        return;
+    }
+
+    ram_cxl_hybrid_publish_span_flush(span);
+    elapsed_ns = cxl_hybrid_wait_fault_pressure_clear();
+    if (elapsed_ns) {
+        trace_cxl_hybrid_ram_stream_fault_pause(elapsed_ns);
+    }
+}
+
+static bool ram_cxl_hybrid_publish_span_mergeable(
+    const RAMCXLHybridPublishSpan *span,
+    RAMBlock *block,
+    ram_addr_t offset,
+    uint32_t generation,
+    RAMCXLHybridPublishSpanKind kind,
+    ram_addr_t max_len)
+{
+    ram_addr_t global_start;
+    ram_addr_t global_offset;
+    ram_addr_t region_size = cxl_hybrid_fault_region_granule();
+
+    if (!span->active || !span->len) {
+        return false;
+    }
+    if (span->block != block || span->generation != generation ||
+        span->kind != kind) {
+        return false;
+    }
+    if (offset != span->start + span->len) {
+        return false;
+    }
+    if (span->len + TARGET_PAGE_SIZE > max_len) {
+        return false;
+    }
+    if (!cxl_hybrid_global_page_offset(block, span->start, TARGET_PAGE_SIZE,
+                                       &global_start) ||
+        !cxl_hybrid_global_page_offset(block, offset, TARGET_PAGE_SIZE,
+                                       &global_offset)) {
+        return false;
+    }
+    if (region_size &&
+        global_start / region_size != global_offset / region_size) {
+        return false;
+    }
+
+    return true;
+}
+
+static void ram_cxl_hybrid_publish_span_append(
+    RAMCXLHybridPublishSpan *span,
+    RAMBlock *block,
+    ram_addr_t offset,
+    uint32_t generation,
+    RAMCXLHybridPublishSpanKind kind)
+{
+    ram_addr_t max_len = ram_cxl_hybrid_publish_span_max_len();
+
+    if (!ram_cxl_hybrid_publish_span_mergeable(span, block, offset,
+                                               generation, kind, max_len)) {
+        ram_cxl_hybrid_publish_span_flush(span);
+        span->block = block;
+        span->start = offset;
+        span->len = 0;
+        span->generation = generation;
+        span->kind = kind;
+        span->active = true;
+    }
+
+    span->len += TARGET_PAGE_SIZE;
+    if (span->len >= max_len) {
+        ram_cxl_hybrid_publish_span_flush(span);
+    }
+}
+
 static void ram_cxl_hybrid_publish_saved_page(RAMBlock *block,
                                               ram_addr_t offset,
                                               QEMUFile *file)
@@ -1259,6 +1404,37 @@ static void ram_cxl_hybrid_publish_saved_page(RAMBlock *block,
     }
 
     cxl_hybrid_account_dst_page_sent(block->idstr, offset, TARGET_PAGE_SIZE);
+}
+
+static void ram_cxl_hybrid_publish_saved_page_batched(
+    PageSearchStatus *pss,
+    RAMBlock *block,
+    ram_addr_t offset,
+    QEMUFile *file)
+{
+    if (!ram_cxl_hybrid_should_publish_saved_page(file)) {
+        return;
+    }
+
+    ram_cxl_hybrid_publish_span_append(&pss->cxl_publish_span, block, offset,
+                                       cxl_hybrid_fault_publish_generation(),
+                                       RAM_CXL_HYBRID_PUBLISH_SPAN_WRITTEN);
+}
+
+static void ram_cxl_hybrid_publish_visible_page_batched(
+    PageSearchStatus *pss,
+    RAMBlock *block,
+    ram_addr_t offset,
+    QEMUFile *file)
+{
+    if (!ram_cxl_hybrid_should_publish_saved_page(file)) {
+        return;
+    }
+
+    ram_cxl_hybrid_publish_span_append(
+        &pss->cxl_publish_span, block, offset,
+        cxl_hybrid_fault_publish_generation(),
+        RAM_CXL_HYBRID_PUBLISH_SPAN_ALREADY_VISIBLE);
 }
 
 typedef enum RAMCXLHybridRegionWriteStatus {
@@ -1304,6 +1480,10 @@ ram_cxl_hybrid_begin_region_write(RAMBlock *block,
                                   bool *started)
 {
     uint32_t generation;
+    bool destination_owned;
+    bool source_remapped;
+    bool page_visible;
+    MigrationPostcopyCXLRAMStreamWriteAction action;
 
     *started = false;
     if (!migrate_cxl_fault_resolve_uses_region()) {
@@ -1311,9 +1491,14 @@ ram_cxl_hybrid_begin_region_write(RAMBlock *block,
     }
 
     generation = cxl_hybrid_fault_publish_generation();
-    if (cxl_hybrid_source_region_owned_by_destination_generation(
-            block, offset, generation)) {
-        return ram_cxl_hybrid_page_visible(block, offset, generation) ?
+    source_remapped = cxl_page_is_remapped(block->offset + offset);
+    destination_owned = cxl_hybrid_source_region_owned_by_destination_generation(
+        block, offset, generation);
+    page_visible = ram_cxl_hybrid_page_visible(block, offset, generation);
+    action = migration_postcopy_cxl_ram_stream_write_action(
+        destination_owned, source_remapped, page_visible);
+    if (action != MIGRATION_POSTCOPY_CXL_RAM_STREAM_ALLOW) {
+        return action == MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE ?
             RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED :
             RAM_CXL_HYBRID_REGION_WRITE_ERROR;
     }
@@ -1321,11 +1506,15 @@ ram_cxl_hybrid_begin_region_write(RAMBlock *block,
     cxl_hybrid_ctrl_source_write_begin();
     *started = true;
 
-    if (cxl_hybrid_source_region_owned_by_destination_generation(
-            block, offset, generation)) {
+    destination_owned = cxl_hybrid_source_region_owned_by_destination_generation(
+        block, offset, generation);
+    page_visible = ram_cxl_hybrid_page_visible(block, offset, generation);
+    action = migration_postcopy_cxl_ram_stream_write_action(
+        destination_owned, source_remapped, page_visible);
+    if (action != MIGRATION_POSTCOPY_CXL_RAM_STREAM_ALLOW) {
         cxl_hybrid_ctrl_source_write_end();
         *started = false;
-        return ram_cxl_hybrid_page_visible(block, offset, generation) ?
+        return action == MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE ?
             RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED :
             RAM_CXL_HYBRID_REGION_WRITE_ERROR;
     }
@@ -1416,16 +1605,19 @@ static int save_zero_page(RAMState *rs, PageSearchStatus *pss,
         bool cxl_region_write_started = false;
         RAMCXLHybridRegionWriteStatus cxl_region_write_status;
 
+        ram_cxl_hybrid_pause_for_fault_pressure(&pss->cxl_publish_span, file);
         cxl_region_write_status = ram_cxl_hybrid_begin_region_write(
             pss->block, offset, &cxl_region_write_started);
         if (cxl_region_write_status ==
             RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED) {
-            trace_cxl_hybrid_ram_stream_skip_dst_owned(pss->block->idstr,
-                                                       offset);
-            ram_cxl_hybrid_publish_saved_page(pss->block, offset, file);
+            trace_cxl_hybrid_ram_stream_skip_visible(pss->block->idstr,
+                                                     offset);
+            ram_cxl_hybrid_publish_visible_page_batched(
+                pss, pss->block, offset, file);
             return 1;
         } else if (cxl_region_write_status ==
                    RAM_CXL_HYBRID_REGION_WRITE_ERROR) {
+            ram_cxl_hybrid_publish_span_flush(&pss->cxl_publish_span);
             ram_cxl_hybrid_set_owned_invisible_error(file, pss->block, offset);
             return -EACCES;
         }
@@ -1433,18 +1625,27 @@ static int save_zero_page(RAMState *rs, PageSearchStatus *pss,
         mapped_file = mapped_ram_save_file(file);
 
         if (ram_cxl_hybrid_should_publish_saved_page(file)) {
+            uint64_t write_start_ns;
+            uint64_t write_elapsed_ns;
+
             /*
              * Hybrid skips destination-side load_all_mapped_ram(), so a CXL
              * visible zero page must be materialized in the shared backing.
              */
+            write_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
             qemu_put_buffer_at(mapped_file, rs->mapped_ram_zero_page,
                                TARGET_PAGE_SIZE,
                                pss->block->pages_offset + offset);
+            write_elapsed_ns =
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - write_start_ns;
             ram_cxl_hybrid_end_region_write(cxl_region_write_started);
             if (!qemu_file_get_error(mapped_file)) {
+                cxl_hybrid_account_stream_write(TARGET_PAGE_SIZE,
+                                                write_elapsed_ns);
                 set_bit(offset >> TARGET_PAGE_BITS, pss->block->file_bmap);
                 ram_transferred_add(TARGET_PAGE_SIZE);
-                ram_cxl_hybrid_publish_saved_page(pss->block, offset, file);
+                ram_cxl_hybrid_publish_saved_page_batched(
+                    pss, pss->block, offset, file);
             }
         } else {
             ram_cxl_hybrid_end_region_write(cxl_region_write_started);
@@ -1494,28 +1695,45 @@ static int save_normal_page(PageSearchStatus *pss, RAMBlock *block,
         bool cxl_region_write_started = false;
         RAMCXLHybridRegionWriteStatus cxl_region_write_status;
 
+        ram_cxl_hybrid_pause_for_fault_pressure(&pss->cxl_publish_span, file);
         cxl_region_write_status = ram_cxl_hybrid_begin_region_write(
             block, offset, &cxl_region_write_started);
         if (cxl_region_write_status ==
             RAM_CXL_HYBRID_REGION_WRITE_SKIP_VISIBLE_OWNED) {
-            trace_cxl_hybrid_ram_stream_skip_dst_owned(block->idstr, offset);
-            ram_cxl_hybrid_publish_saved_page(block, offset, file);
+            trace_cxl_hybrid_ram_stream_skip_visible(block->idstr, offset);
+            ram_cxl_hybrid_publish_visible_page_batched(pss, block, offset,
+                                                        file);
             return 1;
         } else if (cxl_region_write_status ==
                    RAM_CXL_HYBRID_REGION_WRITE_ERROR) {
+            ram_cxl_hybrid_publish_span_flush(&pss->cxl_publish_span);
             ram_cxl_hybrid_set_owned_invisible_error(file, block, offset);
             return -EACCES;
         }
 
         mapped_file = mapped_ram_save_file(file);
 
+        uint64_t write_start_ns;
+        uint64_t write_elapsed_ns;
+        bool cxl_stream_write = ram_cxl_hybrid_should_publish_saved_page(file);
+
+        write_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         qemu_put_buffer_at(mapped_file, buf, TARGET_PAGE_SIZE,
                            block->pages_offset + offset);
+        write_elapsed_ns =
+            qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - write_start_ns;
         ram_cxl_hybrid_end_region_write(cxl_region_write_started);
         if (!qemu_file_get_error(mapped_file)) {
+            if (cxl_stream_write) {
+                cxl_hybrid_account_stream_write(TARGET_PAGE_SIZE,
+                                                write_elapsed_ns);
+            }
             set_bit(offset >> TARGET_PAGE_BITS, block->file_bmap);
+            ram_cxl_hybrid_publish_saved_page_batched(pss, block, offset,
+                                                      file);
         }
     } else {
+        ram_cxl_hybrid_publish_span_flush(&pss->cxl_publish_span);
         ram_transferred_add(save_page_header(pss, pss->pss_channel, block,
                                              offset | RAM_SAVE_FLAG_PAGE));
         if (async) {
@@ -1526,7 +1744,9 @@ static int save_normal_page(PageSearchStatus *pss, RAMBlock *block,
             qemu_put_buffer(file, buf, TARGET_PAGE_SIZE);
         }
     }
-    ram_cxl_hybrid_publish_saved_page(block, offset, file);
+    if (!migrate_mapped_ram()) {
+        ram_cxl_hybrid_publish_saved_page(block, offset, file);
+    }
     ram_transferred_add(TARGET_PAGE_SIZE);
     qatomic_add(&mig_stats.normal_pages, 1);
     return 1;
@@ -2293,6 +2513,7 @@ static int ram_save_target_page(RAMState *rs, PageSearchStatus *pss)
 
     /* Hand over to RDMA first */
     if (migrate_rdma()) {
+        ram_cxl_hybrid_publish_span_flush(&pss->cxl_publish_span);
         res = rdma_control_save_page(pss->pss_channel, pss->block->offset,
                                      offset, TARGET_PAGE_SIZE);
 
@@ -2311,6 +2532,7 @@ static int ram_save_target_page(RAMState *rs, PageSearchStatus *pss)
     }
 
     if (migrate_multifd() && !migration_in_postcopy()) {
+        ram_cxl_hybrid_publish_span_flush(&pss->cxl_publish_span);
         return ram_save_multifd_page(pss->block, offset);
     }
 
@@ -2428,6 +2650,7 @@ static int ram_save_host_page_urgent(PageSearchStatus *pss)
         pss_find_next_dirty(pss);
     } while (pss_within_range(pss));
 out:
+    ram_cxl_hybrid_publish_span_flush(&pss->cxl_publish_span);
     pss_host_page_finish(pss);
     /* For urgent requests, flush immediately if sent */
     if (sent) {
@@ -2507,6 +2730,7 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
         }
 
         if (tmppages < 0) {
+            ram_cxl_hybrid_publish_span_flush(&pss->cxl_publish_span);
             pss_host_page_finish(pss);
             return tmppages;
         }
@@ -2517,7 +2741,12 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     pss_host_page_finish(pss);
 
     res = ram_save_release_protection(rs, pss, start_page);
-    return (res < 0 ? res : pages);
+    if (res < 0) {
+        ram_cxl_hybrid_publish_span_flush(&pss->cxl_publish_span);
+        return res;
+    }
+
+    return pages;
 }
 
 static bool ram_page_hint_valid(RAMState *rs)
@@ -2737,6 +2966,13 @@ static void ram_state_reset(RAMState *rs)
 
     for (i = 0; i < RAM_CHANNEL_MAX; i++) {
         rs->pss[i].last_sent_block = NULL;
+        rs->pss[i].cxl_publish_span.block = NULL;
+        rs->pss[i].cxl_publish_span.start = 0;
+        rs->pss[i].cxl_publish_span.len = 0;
+        rs->pss[i].cxl_publish_span.generation = 0;
+        rs->pss[i].cxl_publish_span.kind =
+            RAM_CXL_HYBRID_PUBLISH_SPAN_WRITTEN;
+        rs->pss[i].cxl_publish_span.active = false;
     }
 
     rs->last_seen_block = NULL;
@@ -3616,6 +3852,8 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     }
 
 out:
+    ram_cxl_hybrid_publish_span_flush(
+        &rs->pss[RAM_CHANNEL_PRECOPY].cxl_publish_span);
     if (ret >= 0 && migration_is_running()) {
         if (multifd_ram_sync_per_section()) {
             ret = multifd_ram_flush_and_sync(f);
@@ -3663,6 +3901,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
         ret = rdma_registration_start(f, RAM_CONTROL_FINISH);
         if (ret < 0) {
             qemu_file_set_error(f, ret);
+            ram_cxl_hybrid_publish_span_flush(
+                &rs->pss[RAM_CHANNEL_PRECOPY].cxl_publish_span);
             return ret;
         }
 
@@ -3680,14 +3920,20 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
             }
             if (pages < 0) {
                 qemu_mutex_unlock(&rs->bitmap_mutex);
+                ram_cxl_hybrid_publish_span_flush(
+                    &rs->pss[RAM_CHANNEL_PRECOPY].cxl_publish_span);
                 return pages;
             }
         }
         qemu_mutex_unlock(&rs->bitmap_mutex);
+        ram_cxl_hybrid_publish_span_flush(
+            &rs->pss[RAM_CHANNEL_PRECOPY].cxl_publish_span);
 
         ret = rdma_registration_stop(f, RAM_CONTROL_FINISH);
         if (ret < 0) {
             qemu_file_set_error(f, ret);
+            ram_cxl_hybrid_publish_span_flush(
+                &rs->pss[RAM_CHANNEL_PRECOPY].cxl_publish_span);
             return ret;
         }
     }
@@ -3699,6 +3945,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
          */
         ret = multifd_ram_flush_and_sync(f);
         if (ret < 0) {
+            ram_cxl_hybrid_publish_span_flush(
+                &rs->pss[RAM_CHANNEL_PRECOPY].cxl_publish_span);
             return ret;
         }
     }
@@ -3712,6 +3960,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
             Error *local_err = NULL;
             int err = qemu_file_get_error_obj(mapped_file, &local_err);
 
+            ram_cxl_hybrid_publish_span_flush(
+                &rs->pss[RAM_CHANNEL_PRECOPY].cxl_publish_span);
             error_reportf_err(local_err, "Failed to write bitmap to file: ");
             return -err;
         }

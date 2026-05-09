@@ -19,6 +19,46 @@ bool cxl_hybrid_fault_resolve_mode_emits_burst(
     return mode == CXL_HYBRID_FAULT_RESOLVE_MODE_COPY;
 }
 
+uint64_t cxl_hybrid_choose_fault_region_granule(uint64_t align,
+                                                uint64_t configured,
+                                                uint64_t total_ram)
+{
+    uint64_t granule;
+
+    if (!align || !is_power_of_2(align)) {
+        return 0;
+    }
+
+    granule = configured ? configured : CXL_REMAP_GRANULE_DEFAULT;
+    granule = MAX(align, granule);
+    granule = ROUND_UP(granule, align);
+    if (total_ram > 0) {
+        granule = MIN(granule, ROUND_UP(total_ram, align));
+    }
+
+    return granule;
+}
+
+uint64_t cxl_hybrid_choose_source_remap_granule(uint64_t min_align,
+                                                uint64_t configured,
+                                                uint64_t total_ram)
+{
+    uint64_t granule;
+
+    if (!min_align || !is_power_of_2(min_align)) {
+        return 0;
+    }
+
+    granule = configured ? configured : CXL_REMAP_GRANULE_DEFAULT;
+    granule = MAX(min_align, granule);
+    granule = ROUND_UP(granule, min_align);
+    if (total_ram > 0) {
+        granule = MIN(granule, ROUND_UP(total_ram, min_align));
+    }
+
+    return granule;
+}
+
 uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
     uint64_t file_align,
     uint64_t dax_align,

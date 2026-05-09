@@ -29,3 +29,21 @@ bool migration_postcopy_ram_stream_should_publish_cxl_visible(
     return in_postcopy && hybrid_mode && mapped_ram && cxl_backing &&
            data_saved;
 }
+
+MigrationPostcopyCXLRAMStreamWriteAction
+migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
+                                               bool source_remapped,
+                                               bool page_visible)
+{
+    if (source_remapped) {
+        return MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE;
+    }
+
+    if (destination_owned) {
+        return page_visible ?
+            MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE :
+            MIGRATION_POSTCOPY_CXL_RAM_STREAM_ERROR;
+    }
+
+    return MIGRATION_POSTCOPY_CXL_RAM_STREAM_ALLOW;
+}

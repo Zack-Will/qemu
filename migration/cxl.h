@@ -225,6 +225,12 @@ int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
                                     uint64_t target_page_size,
                                     CXLHybridFaultRegionGeometry *out,
                                     Error **errp);
+uint64_t cxl_hybrid_choose_fault_region_granule(uint64_t align,
+                                                uint64_t configured,
+                                                uint64_t total_ram);
+uint64_t cxl_hybrid_choose_source_remap_granule(uint64_t min_align,
+                                                uint64_t configured,
+                                                uint64_t total_ram);
 uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
     uint64_t file_align,
     uint64_t dax_align,
@@ -279,6 +285,7 @@ QIOChannel *cxl_open_mapped_ram_incoming(Error **errp);
 bool cxl_create_incoming_mapped_ram_channels(Error **errp);
 uint64_t cxl_mapped_ram_alignment(void);
 uint64_t cxl_mapped_ram_pages_alignment(void);
+uint64_t cxl_hybrid_fault_region_granule(void);
 void cxl_hybrid_prefault_wait_before_postcopy(void);
 void cxl_populate_migration_info(MigrationInfo *info);
 uint64_t cxl_hybrid_align_mapping_bytes(uint64_t bytes, uint64_t align);
@@ -309,6 +316,13 @@ void cxl_hybrid_account_warm_dirty(const char *rbname, ram_addr_t offset,
                                    ram_addr_t len);
 void cxl_hybrid_account_dst_page_sent(const char *rbname, ram_addr_t offset,
                                       ram_addr_t len);
+void cxl_hybrid_account_dst_pages_sent(RAMBlock *block, ram_addr_t offset,
+                                       ram_addr_t len, uint32_t generation);
+void cxl_hybrid_account_stream_write(uint64_t bytes, uint64_t elapsed_ns);
+bool cxl_hybrid_fault_pressure_active(void);
+uint64_t cxl_hybrid_wait_fault_pressure_clear(void);
+bool cxl_hybrid_source_page_visible(RAMBlock *block, ram_addr_t offset,
+                                    uint32_t generation);
 void cxl_hybrid_warm_stats(CXLHybridWarmStats *stats);
 bool cxl_hybrid_start_warm_push(MigrationState *s);
 void cxl_hybrid_stop_warm_push(void);
@@ -323,6 +337,7 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
                                    CXLHybridPublishSource source,
                                    uint64_t *cxl_offsetp,
                                    Error **errp);
+int cxl_hybrid_begin_source_run_with_precopy_remaps(Error **errp);
 void cxl_hybrid_iteration_snapshot_begin(uint64_t ram_pages);
 void cxl_hybrid_iteration_snapshot_end(uint64_t ram_pages);
 bool cxl_hybrid_global_page_offset(const RAMBlock *block,
@@ -363,11 +378,20 @@ uint64_t cxl_hybrid_control_source_write_count(
     const CXLHybridControlHeader *hdr);
 uint64_t cxl_hybrid_control_source_write_begin(CXLHybridControlHeader *hdr);
 uint64_t cxl_hybrid_control_source_write_end(CXLHybridControlHeader *hdr);
+bool cxl_hybrid_control_fault_pressure(const CXLHybridControlHeader *hdr,
+                                       uint32_t generation);
 bool cxl_hybrid_control_page_range_resolved(uint64_t first_page,
                                             uint32_t nr_pages,
                                             CXLHybridPageResolveFunc resolve,
                                             void *opaque,
                                             uint64_t *unresolved_page);
+bool cxl_hybrid_control_region_span_index(const CXLHybridControlHeader *hdr,
+                                          uint64_t first_page,
+                                          uint32_t nr_pages,
+                                          uint64_t *region_indexp);
+bool cxl_hybrid_control_region_span_valid(const CXLHybridControlHeader *hdr,
+                                          uint64_t first_page,
+                                          uint32_t nr_pages);
 bool cxl_hybrid_control_page_visible(const CXLHybridControlHeader *hdr,
                                      const unsigned long *visible_bitmap,
                                      uint64_t page_index,
@@ -378,15 +402,57 @@ bool cxl_hybrid_control_region_visible(const CXLHybridControlHeader *hdr,
                                        uint64_t first_page,
                                        uint32_t nr_pages,
                                        uint32_t generation);
+bool cxl_hybrid_control_region_bit_visible(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_region_bitmap,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation);
+bool cxl_hybrid_control_region_visible_or_synthesize(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    unsigned long *visible_region_bitmap,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation);
 void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
                                           unsigned long *visible_bitmap,
                                           uint64_t page_index);
+void cxl_hybrid_control_mark_page_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t page_index,
+    uint32_t generation);
+void cxl_hybrid_control_mark_pages_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t first_page,
+    uint64_t nr_pages,
+    uint32_t generation);
 void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
                                            unsigned long *visible_bitmap,
                                            uint64_t page_index);
 void cxl_hybrid_control_mark_region_visible(const CXLHybridControlHeader *hdr,
                                             unsigned long *visible_region_bitmap,
                                             uint64_t region_index);
+void cxl_hybrid_control_mark_region_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_region_bitmap,
+    uint64_t region_index,
+    uint32_t generation);
+bool cxl_hybrid_control_mark_region_visible_for_span_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_region_bitmap,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation);
+bool cxl_hybrid_control_mark_visible_region_span_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    unsigned long *visible_region_bitmap,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation);
 void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
                                         unsigned long *visible_bitmap,
                                         uint64_t visible_pages,
@@ -409,6 +475,9 @@ void cxl_hybrid_control_mark_region_owned(const CXLHybridControlHeader *hdr,
 bool cxl_hybrid_ctrl_page_visible(uint64_t page_index, uint32_t generation);
 void cxl_hybrid_ctrl_set_page_visible(uint64_t page_index,
                                       uint32_t generation);
+void cxl_hybrid_ctrl_set_pages_visible(uint64_t first_page,
+                                       uint64_t nr_pages,
+                                       uint32_t generation);
 void cxl_hybrid_ctrl_clear_page_visible(uint64_t page_index);
 int cxl_hybrid_ctrl_wait_page_visible(uint64_t page_index,
                                       uint32_t generation,
@@ -421,9 +490,15 @@ int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
 bool cxl_hybrid_ctrl_region_visible(uint64_t first_page,
                                     uint32_t nr_pages,
                                     uint32_t generation);
+bool cxl_hybrid_ctrl_region_bit_visible(uint64_t first_page,
+                                        uint32_t nr_pages,
+                                        uint32_t generation);
 void cxl_hybrid_ctrl_set_region_visible(uint64_t first_page,
                                         uint32_t nr_pages,
                                         uint32_t generation);
+bool cxl_hybrid_ctrl_synthesize_region_visible(uint64_t first_page,
+                                               uint32_t nr_pages,
+                                               uint32_t generation);
 int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
                                         uint32_t nr_pages,
                                         uint32_t generation,
@@ -438,6 +513,7 @@ bool cxl_hybrid_ctrl_region_owned(uint64_t region_index,
                                   uint32_t generation);
 void cxl_hybrid_ctrl_mark_region_owned(uint64_t region_index,
                                        uint32_t generation);
+bool cxl_hybrid_ctrl_fault_pressure(uint32_t generation);
 void cxl_hybrid_ctrl_source_write_begin(void);
 void cxl_hybrid_ctrl_source_write_end(void);
 bool cxl_hybrid_ctrl_dequeue_fault_request(CXLHybridFaultRequestRecord *record);

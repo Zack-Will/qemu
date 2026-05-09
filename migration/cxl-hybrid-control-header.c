@@ -107,6 +107,29 @@ uint64_t cxl_hybrid_control_source_write_end(CXLHybridControlHeader *hdr)
     return hdr ? qatomic_dec_fetch(&hdr->source_write_count) : 0;
 }
 
+bool cxl_hybrid_control_fault_pressure(const CXLHybridControlHeader *hdr,
+                                       uint32_t generation)
+{
+    uint64_t prod;
+    uint64_t cons;
+
+    if (!cxl_hybrid_control_generation_matches(hdr, generation)) {
+        return false;
+    }
+
+    prod = qatomic_load_acquire(&hdr->request_prod);
+    cons = qatomic_load_acquire(&hdr->request_cons);
+    if (prod != cons) {
+        return true;
+    }
+
+    if (qatomic_load_acquire(&hdr->active_request_count)) {
+        return true;
+    }
+
+    return qatomic_load_acquire(&hdr->active_enqueue_count) != 0;
+}
+
 bool cxl_hybrid_control_page_range_resolved(uint64_t first_page,
                                             uint32_t nr_pages,
                                             CXLHybridPageResolveFunc resolve,
@@ -168,11 +191,10 @@ static bool cxl_hybrid_control_page_range_in_range(
     return nr_pages <= hdr->total_pages - first_page;
 }
 
-static bool cxl_hybrid_control_region_span_index(
-    const CXLHybridControlHeader *hdr,
-    uint64_t first_page,
-    uint32_t nr_pages,
-    uint64_t *region_indexp)
+bool cxl_hybrid_control_region_span_index(const CXLHybridControlHeader *hdr,
+                                          uint64_t first_page,
+                                          uint32_t nr_pages,
+                                          uint64_t *region_indexp)
 {
     uint64_t pages_per_region;
     uint64_t expected_pages;
@@ -204,6 +226,14 @@ static bool cxl_hybrid_control_region_span_index(
         *region_indexp = region_index;
     }
     return true;
+}
+
+bool cxl_hybrid_control_region_span_valid(const CXLHybridControlHeader *hdr,
+                                          uint64_t first_page,
+                                          uint32_t nr_pages)
+{
+    return cxl_hybrid_control_region_span_index(hdr, first_page, nr_pages,
+                                                NULL);
 }
 
 bool cxl_hybrid_control_page_visible(const CXLHybridControlHeader *hdr,
@@ -263,6 +293,66 @@ bool cxl_hybrid_control_region_visible(const CXLHybridControlHeader *hdr,
     return true;
 }
 
+bool cxl_hybrid_control_region_bit_visible(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_region_bitmap,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation)
+{
+    uint64_t region_index = UINT64_MAX;
+
+    if (!hdr || !visible_region_bitmap || !nr_pages ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_range_in_range(hdr, first_page, nr_pages) ||
+        !cxl_hybrid_control_region_span_index(hdr, first_page, nr_pages,
+                                              &region_index)) {
+        return false;
+    }
+
+    if (!test_bit(region_index, visible_region_bitmap)) {
+        return false;
+    }
+
+    smp_rmb();
+    return true;
+}
+
+bool cxl_hybrid_control_region_visible_or_synthesize(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    unsigned long *visible_region_bitmap,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation)
+{
+    uint64_t region_index = UINT64_MAX;
+    uint64_t page;
+
+    if (cxl_hybrid_control_region_bit_visible(hdr, visible_region_bitmap,
+                                              first_page, nr_pages,
+                                              generation)) {
+        return true;
+    }
+    if (!hdr || !visible_bitmap || !visible_region_bitmap ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_region_span_index(hdr, first_page, nr_pages,
+                                              &region_index)) {
+        return false;
+    }
+
+    for (page = 0; page < nr_pages; page++) {
+        if (!test_bit(first_page + page, visible_bitmap)) {
+            return false;
+        }
+    }
+
+    cxl_hybrid_control_mark_region_visible(hdr, visible_region_bitmap,
+                                           region_index);
+    smp_rmb();
+    return true;
+}
+
 void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
                                           unsigned long *visible_bitmap,
                                           uint64_t page_index)
@@ -275,6 +365,40 @@ void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
     /* Publish page data before making the visibility bit observable. */
     smp_mb_release();
     set_bit_atomic(page_index, visible_bitmap);
+}
+
+void cxl_hybrid_control_mark_page_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t page_index,
+    uint32_t generation)
+{
+    if (!cxl_hybrid_control_generation_matches(hdr, generation)) {
+        return;
+    }
+
+    cxl_hybrid_control_mark_page_visible(hdr, visible_bitmap, page_index);
+}
+
+void cxl_hybrid_control_mark_pages_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t first_page,
+    uint64_t nr_pages,
+    uint32_t generation)
+{
+    if (!visible_bitmap || !nr_pages ||
+        nr_pages > LONG_MAX ||
+        first_page > LONG_MAX ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        first_page >= hdr->total_pages ||
+        nr_pages > hdr->total_pages - first_page) {
+        return;
+    }
+
+    /* Publish page data before making the visibility range observable. */
+    smp_mb_release();
+    bitmap_set_atomic(visible_bitmap, first_page, nr_pages);
 }
 
 void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
@@ -301,6 +425,65 @@ void cxl_hybrid_control_mark_region_visible(const CXLHybridControlHeader *hdr,
     /* Publish region data before making the region visibility bit observable. */
     smp_mb_release();
     set_bit_atomic(region_index, visible_region_bitmap);
+}
+
+void cxl_hybrid_control_mark_region_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_region_bitmap,
+    uint64_t region_index,
+    uint32_t generation)
+{
+    if (!cxl_hybrid_control_generation_matches(hdr, generation)) {
+        return;
+    }
+
+    cxl_hybrid_control_mark_region_visible(hdr, visible_region_bitmap,
+                                           region_index);
+}
+
+bool cxl_hybrid_control_mark_region_visible_for_span_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_region_bitmap,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation)
+{
+    uint64_t region_index = UINT64_MAX;
+
+    if (!visible_region_bitmap ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_region_span_index(hdr, first_page, nr_pages,
+                                              &region_index)) {
+        return false;
+    }
+
+    cxl_hybrid_control_mark_region_visible(hdr, visible_region_bitmap,
+                                           region_index);
+    return true;
+}
+
+bool cxl_hybrid_control_mark_visible_region_span_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    unsigned long *visible_region_bitmap,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation)
+{
+    uint64_t region_index = UINT64_MAX;
+
+    if (!visible_bitmap || !visible_region_bitmap ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_region_span_index(hdr, first_page, nr_pages,
+                                              &region_index)) {
+        return false;
+    }
+
+    cxl_hybrid_control_mark_pages_visible_generation(
+        hdr, visible_bitmap, first_page, nr_pages, generation);
+    cxl_hybrid_control_mark_region_visible(hdr, visible_region_bitmap,
+                                           region_index);
+    return true;
 }
 
 void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,

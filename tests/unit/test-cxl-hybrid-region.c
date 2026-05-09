@@ -221,6 +221,24 @@ static void test_mapped_ram_pages_alignment_includes_region_granule(void)
                          1 * MiB, 4 * KiB, 2 * MiB, false), ==, 1 * MiB);
 }
 
+static void test_source_remap_granule_is_independent_from_fault_region(void)
+{
+    uint64_t fault_granule;
+    uint64_t source_granule;
+    uint64_t pages_align;
+
+    fault_granule = cxl_hybrid_choose_fault_region_granule(
+        2 * MiB, 0, 64 * MiB);
+    source_granule = cxl_hybrid_choose_source_remap_granule(
+        TEST_TARGET_PAGE_SIZE, 256 * KiB, 64 * MiB);
+    pages_align = cxl_hybrid_mapped_ram_pages_offset_alignment(
+        1 * MiB, 2 * MiB, fault_granule, true);
+
+    g_assert_cmpuint(fault_granule, ==, 2 * MiB);
+    g_assert_cmpuint(source_granule, ==, 256 * KiB);
+    g_assert_cmpuint(pages_align, ==, 2 * MiB);
+}
+
 static void test_mapped_ram_layout_returns_page_data_spans(void)
 {
     uint64_t offset = 0;
@@ -275,6 +293,8 @@ int main(int argc, char **argv)
                     test_region_copy_poison_blocks_remap_reservation);
     g_test_add_func("/cxl/region/mapped-ram-pages-alignment",
                     test_mapped_ram_pages_alignment_includes_region_granule);
+    g_test_add_func("/cxl/region/source-remap-independent-from-fault-region",
+                    test_source_remap_granule_is_independent_from_fault_region);
     g_test_add_func("/cxl/region/mapped-ram-layout-page-spans",
                     test_mapped_ram_layout_returns_page_data_spans);
     return g_test_run();

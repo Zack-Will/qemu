@@ -2762,7 +2762,7 @@ static int postcopy_start(MigrationState *ms, Error **errp)
                                CXL_MIGRATION_SWITCH_REASON_NONE :
                                CXL_MIGRATION_SWITCH_REASON_MANUAL,
                                ms->cxl_hybrid_iteration);
-        if (cxl_hybrid_control_begin_source_run(errp)) {
+        if (cxl_hybrid_begin_source_run_with_precopy_remaps(errp)) {
             error_prepend(errp,
                           "Failed to publish CXL hybrid source run state: ");
             return -1;
@@ -4338,6 +4338,12 @@ static bool migration_object_check(MigrationState *ms, Error **errp)
     if (migrate_cxl_hybrid()) {
         if (!migrate_cxl_path_enabled()) {
             error_setg(errp, "x-cxl-hybrid requires cxl-path");
+            return false;
+        }
+
+        if (!migrate_cxl_shared_backing()) {
+            error_setg(errp,
+                       "x-cxl-hybrid requires x-cxl-shared-backing=true");
             return false;
         }
 
