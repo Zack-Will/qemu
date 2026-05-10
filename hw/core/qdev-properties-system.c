@@ -702,6 +702,20 @@ const PropertyInfo qdev_prop_mig_mode = {
     .set_default_value = qdev_propinfo_set_default_value_enum,
 };
 
+/* --- CXLHybridFaultResolveMode --- */
+
+QEMU_BUILD_BUG_ON(sizeof(CXLHybridFaultResolveMode) != sizeof(int));
+
+const PropertyInfo qdev_prop_cxl_hybrid_fault_resolve_mode = {
+    .type = "CXLHybridFaultResolveMode",
+    .description = "CXL hybrid fault resolve mode"
+                   " (copy/region-remap/region-remap-fallback-copy)",
+    .enum_table = &CXLHybridFaultResolveMode_lookup,
+    .get = qdev_propinfo_get_enum,
+    .set = qdev_propinfo_set_enum,
+    .set_default_value = qdev_propinfo_set_default_value_enum,
+};
+
 /* --- GranuleMode --- */
 
 QEMU_BUILD_BUG_ON(sizeof(GranuleMode) != sizeof(int));

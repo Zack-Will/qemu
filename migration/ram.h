@@ -94,6 +94,14 @@ void ram_handle_zero(void *host, uint64_t size);
 
 void ram_transferred_add(uint64_t bytes);
 void ram_release_page(const char *rbname, uint64_t offset);
+int ram_cxl_hybrid_walk_unsent(MigrationState *s,
+                               int (*cb)(MigrationState *s,
+                                         RAMBlock *block,
+                                         ram_addr_t offset,
+                                         void *opaque,
+                                         Error **errp),
+                               void *opaque,
+                               Error **errp);
 
 int ramblock_recv_bitmap_test(RAMBlock *rb, void *host_addr);
 bool ramblock_recv_bitmap_test_byte_offset(RAMBlock *rb, uint64_t byte_offset);

@@ -188,6 +188,101 @@
             'colo', 'pre-switchover', 'device', 'wait-unplug' ] }
 
 ##
+# @CXLMigrationPhase:
+#
+# Experimental phase tracking for CXL-assisted hybrid migration.
+#
+# @disabled: CXL hybrid logic is disabled
+#
+# @precopy-bulk: bulk precopy is active
+#
+# @precopy-brake: source-side brake/remap phase is active
+#
+# @switching: switchover into postcopy is in progress
+#
+# @postcopy-warm: postcopy is active with hybrid warm mode enabled
+#
+# @cleanup: CXL hybrid state is cleaning up
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLMigrationPhase',
+  'data': [ { 'name': 'disabled', 'features': [ 'unstable' ] },
+            { 'name': 'precopy-bulk', 'features': [ 'unstable' ] },
+            { 'name': 'precopy-brake', 'features': [ 'unstable' ] },
+            { 'name': 'switching', 'features': [ 'unstable' ] },
+            { 'name': 'postcopy-warm', 'features': [ 'unstable' ] },
+            { 'name': 'cleanup', 'features': [ 'unstable' ] } ] }
+
+##
+# @CXLMigrationSwitchReason:
+#
+# Experimental reason tracking for CXL-assisted hybrid migration
+# switchover decisions.
+#
+# @none: no hybrid switchover reason recorded yet
+#
+# @dirty-rate-high: dirty-rate threshold triggered
+#
+# @max-iters: maximum bulk precopy iterations reached
+#
+# @remaining-small: remaining dirty bytes dropped below threshold
+#
+# @precopy-time-cap: elapsed bulk precopy time reached the configured
+#     hard limit
+#
+# @gain-collapsed: recent iteration gain fell below threshold
+#
+# @manual: manual postcopy request was used
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLMigrationSwitchReason',
+  'data': [ { 'name': 'none', 'features': [ 'unstable' ] },
+            { 'name': 'dirty-rate-high', 'features': [ 'unstable' ] },
+            { 'name': 'max-iters', 'features': [ 'unstable' ] },
+            { 'name': 'remaining-small', 'features': [ 'unstable' ] },
+            { 'name': 'precopy-time-cap', 'features': [ 'unstable' ] },
+            { 'name': 'gain-collapsed', 'features': [ 'unstable' ] },
+            { 'name': 'manual', 'features': [ 'unstable' ] } ] }
+
+##
+# @CXLHybridFaultResolveMode:
+#
+# Experimental destination fault resolution policy for CXL hybrid
+# postcopy.
+#
+# @copy: resolve each CXL hybrid fault by reading one CXL page and
+#     placing it with UFFDIO_COPY
+#
+# @region-remap: wait for the full DAX-aligned region and resolve by
+#     MAP_FIXED|MAP_SHARED remap
+#
+# @region-remap-fallback-copy: remap only if the full region is
+#     already visible; otherwise resolve the current fault with the
+#     copy path and keep the region copy-owned for the rest of the run
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLHybridFaultResolveMode',
+  'data': [ { 'name': 'copy', 'features': [ 'unstable' ] },
+            { 'name': 'region-remap', 'features': [ 'unstable' ] },
+            { 'name': 'region-remap-fallback-copy',
+              'features': [ 'unstable' ] } ] }
+
+##
 # @VfioStats:
 #
 # Detailed VFIO devices migration statistics
@@ -199,6 +294,593 @@
 ##
 { 'struct': 'VfioStats',
   'data': {'transferred': 'int' } }
+
+##
+# @CXLMigrationPublishRequestInfo:
+#
+# Most recent source-side publish-request observed for diagnostics.
+#
+# @count: running count of source-side publish-request messages
+#     received when this event was recorded
+#
+# @ramblock: guest RAMBlock name for the requested page
+#
+# @guest-offset: guest page offset within @ramblock
+#
+# @generation: publish generation associated with the page
+#
+# Since: 11.0
+##
+{ 'struct': 'CXLMigrationPublishRequestInfo',
+  'data': { 'count': 'uint64',
+            'ramblock': 'str',
+            'guest-offset': 'uint64',
+            'generation': 'uint32' } }
+
+##
+# @CXLMigrationPublishWaitInfo:
+#
+# Most recent destination-side publish wait event observed for
+# diagnostics.
+#
+# @count: running count of destination-side publish wait events of the
+#     corresponding kind when this event was recorded
+#
+# @ramblock: guest RAMBlock name for the waited page
+#
+# @guest-offset: guest page offset within @ramblock
+#
+# @generation: publish generation associated with the page
+#
+# @wait-time-ns: wait duration in nanoseconds, when this records a
+#     completed wait
+#
+# @ret: completion status returned by the wait path, when this records
+#     a completed wait
+#
+# Since: 11.0
+##
+{ 'struct': 'CXLMigrationPublishWaitInfo',
+  'data': { 'count': 'uint64',
+            'ramblock': 'str',
+            'guest-offset': 'uint64',
+            'generation': 'uint32',
+            '*wait-time-ns': 'uint64',
+            '*ret': 'int' } }
+
+##
+# @CXLMigrationStats:
+#
+# Experimental statistics for CXL mapped-ram backing and
+# write-redirect.
+#
+# @active: whether write-redirect is currently active on the source
+#
+# @align: backing device alignment in bytes
+#
+# @remap-granule: logical remap granule in bytes; it is always a
+#     multiple of @align
+#
+# @total-regions: number of logical remap regions covering guest RAM
+#
+# @remapped-regions: number of regions currently remapped to CXL
+#
+# @remap-attempts: number of region remap attempts
+#
+# @remap-successes: number of successful region remaps
+#
+# @remap-failures: number of failed region remaps
+#
+# @skip-out-of-range: number of remap skips because the region
+#     index falls outside tracked guest RAM
+#
+# @skip-already-remapped: number of remap skips because the region
+#     had already been remapped to CXL
+#
+# @skip-misaligned: number of remap skips because the write offset
+#     was not aligned to a whole DAX remap region
+#
+# @skip-partial-region: number of remap skips because the write
+#     covered only part of a DAX remap region in the RAMBlock
+#
+# @skip-not-fully-migrated: number of remap skips because not all
+#     pages in the region had reached CXL yet
+#
+# @dirty-clear-calls: number of dirty-bitmap cleanup passes
+#     over remapped regions
+#
+# @dirty-cleared-pages: number of guest pages whose dirty bits
+#     were cleared because the source region had already been
+#     remapped to CXL
+#
+# @backing-write-calls: number of page-copy write calls issued to
+#     the CXL backing channel
+#
+# @backing-write-bytes: number of bytes written to the CXL backing
+#     channel by the migration thread
+#
+# @backing-write-time-ns: cumulative nanoseconds spent in backing
+#     channel writes
+#
+# @migrated-bitmap-time-ns: cumulative nanoseconds spent marking
+#     pages as already copied to CXL
+#
+# @remap-scan-calls: number of remap-range scans triggered after
+#     backing writes
+#
+# @remap-scan-time-ns: cumulative nanoseconds spent scanning covered
+#     ranges for remap candidates
+#
+# @remap-page-check-calls: number of "all pages migrated?" region
+#     checks executed before attempting remap
+#
+# @remap-page-check-time-ns: cumulative nanoseconds spent checking
+#     whether all pages in a region had already reached CXL
+#
+# @remap-syscall-time-ns: cumulative nanoseconds spent inside the
+#     `mmap(MAP_FIXED)` remap syscall
+#
+# @remap-copy-bytes: total bytes copied back into the shared backing
+#     while the source guest was paused immediately before remap
+#
+# @remap-copy-time-ns: cumulative nanoseconds spent refreshing backing
+#     contents immediately before remap
+#
+# @remap-pause-calls: number of short source-guest pauses taken to
+#     refresh backing contents and install remaps safely
+#
+# @remap-pause-time-ns: cumulative nanoseconds spent with the source
+#     guest paused for safe remap installation
+#
+# @dirty-sync-calls: number of dirty-log sync passes timed while CXL
+#     mapped-ram backing was enabled
+#
+# @dirty-sync-time-ns: cumulative nanoseconds spent in
+#     `memory_global_dirty_log_sync()`
+#
+# @dirty-clear-time-ns: cumulative nanoseconds spent clearing dirty
+#     bits for already-remapped pages
+#
+# @prefault-bytes: bytes covered by source-side CXL page-data
+#     write-prefault operations
+#
+# @prefault-time-ns: cumulative nanoseconds spent in source-side
+#     CXL page-data write-prefault work
+#
+# @prefault-wait-time-ns: cumulative nanoseconds spent waiting for
+#     source-side CXL write-prefault completion before postcopy
+#
+# @prefault-errors: number of source-side CXL write-prefault errors
+#
+# @phase: current experimental CXL hybrid phase
+#
+# @phase-transitions: number of recorded CXL hybrid phase transitions
+#
+# @switch-reason: most recent experimental hybrid switchover reason
+#
+# @switch-iteration: bulk precopy iteration at which hybrid switchover
+#     policy was selected
+#
+# @dst-stage-capacity-bytes: configured destination-local CXL staging
+#     capacity, in bytes
+#
+# @dst-stage-slots: number of destination staging slots
+#     described by the latest hybrid metadata snapshot
+#
+# @dst-stage-present-slots: number of destination staging slots
+#     already populated with staged page data
+#
+# @dst-fault-hits: number of postcopy faults resolved from destination
+#     local CXL staging
+#
+# @dst-fault-misses: number of postcopy faults that missed in
+#     destination local CXL staging and fell back to remote fetch
+#
+# @dst-fault-read-bytes: total bytes read from destination local CXL
+#     staging while resolving postcopy faults
+#
+# @dst-fault-read-time-ns: cumulative nanoseconds spent reading staged
+#     pages from destination local CXL storage
+#
+# @dst-fault-place-successes: number of successful guest RAM
+#     placements after reading a page from destination local CXL
+#     staging
+#
+# @dst-fault-place-failures: number of failed guest RAM placements
+#     after reading a page from destination local CXL staging
+#
+# @dst-region-map-attempts: number of destination-side region remap
+#     attempts while resolving CXL hybrid faults
+#
+# @dst-region-map-successes: number of successful destination-side
+#     region remaps while resolving CXL hybrid faults
+#
+# @dst-region-map-failures: number of failed destination-side region
+#     remap attempts
+#
+# @dst-region-map-time-ns: cumulative nanoseconds spent in
+#     destination-side region `mmap(MAP_FIXED)` calls
+#
+# @dst-region-wake-failures: number of failures while marking a
+#     remapped destination region received and waking fault waiters
+#
+# @dst-region-wait-samples: number of destination-side region-visible
+#     waits measured while resolving CXL hybrid faults
+#
+# @dst-region-wait-time-ns: cumulative nanoseconds spent waiting for
+#     full region visibility before destination remap
+#
+# @max-dst-region-wait-time-ns: maximum nanoseconds observed in a
+#     single destination-side region-visible wait
+#
+# @dst-region-fallback-copies: number of faults that poisoned a region
+#     for copy fallback in region-remap-fallback-copy mode
+#
+# @staged-pages: number of guest pages known to be staged in the
+#     source-side CXL backing
+#
+# @staged-pages-percent: percentage of tracked guest pages currently
+#     marked staged in source-side CXL backing
+#
+# @warm-publish-pages: number of warm-publish operations that copied
+#     pages into shared CXL backing and marked them visible
+#
+# @last-iterate-ram-pages: RAM pages transferred during the
+#     most recent migration main-loop iteration
+#
+# @last-iterate-staged-pages-delta: delta in @staged-pages across the
+#     most recent migration main-loop iteration
+#
+# @last-iterate-warm-push-pages: warm-push publish pages issued during
+#     the most recent migration main-loop iteration
+#
+# @last-iterate-fault-primary-pages: primary fault-publish pages
+#     issued during the most recent migration main-loop iteration
+#
+# @last-iterate-fault-burst-pages: neighbor fault-burst pages issued
+#     during the most recent migration main-loop iteration
+#
+# @last-iterate-phase: CXL hybrid phase observed at the
+#     beginning of the most recent migration main-loop iteration
+#
+# @fault-publish-requests: number of destination fault handlers that
+#     requested warm-publish processing
+#
+# @fault-publish-waits: number of destination fault handlers that had
+#     to wait for warm-publish completion
+#
+# @fault-publish-wait-time-ns: cumulative nanoseconds spent
+#     waiting for warm-publish completion in destination
+#     fault handling
+#
+# @region-publish-requests: number of source-side full-region publish
+#     requests handled for strict region-remap faults
+#
+# @region-publish-pages: number of pages requested by source-side
+#     full-region publish handling
+#
+# @region-publish-time-ns: cumulative nanoseconds spent handling
+#     source-side full-region publish requests
+#
+# @publish-memcpy-bytes: bytes copied by source-side CXL publish
+#     memcpy operations
+#
+# @publish-memcpy-time-ns: cumulative nanoseconds spent inside
+#     source-side CXL publish memcpy operations
+#
+# @stream-publish-ranges: number of mapped-RAM background publish
+#     ranges made visible in the CXL control plane
+#
+# @stream-publish-pages: number of pages covered by mapped-RAM
+#     background publish ranges
+#
+# @stream-publish-time-ns: cumulative nanoseconds spent accounting
+#     mapped-RAM background publish ranges
+#
+# @stream-publish-local-bitmap-time-ns: cumulative nanoseconds spent
+#     updating source-local mapped-RAM publish bitmaps
+#
+# @stream-publish-shared-visible-time-ns: cumulative nanoseconds spent
+#     updating the shared CXL visible bitmap for mapped-RAM background
+#     publish ranges
+#
+# @stream-write-calls: number of postcopy mapped-RAM background writes
+#     issued to the CXL backing before publishing visibility
+#
+# @stream-write-bytes: number of bytes written by postcopy mapped-RAM
+#     background writes before publishing visibility
+#
+# @stream-write-max-bytes: maximum bytes written by one postcopy
+#     mapped-RAM background write before publishing visibility
+#
+# @stream-write-time-ns: cumulative nanoseconds spent in postcopy
+#     mapped-RAM background writes before publishing visibility
+#
+# @stream-fault-pause-calls: number of times the mapped-RAM background
+#     stream paused because CXL fault requests were pending or active
+#
+# @stream-fault-pause-time-ns: cumulative nanoseconds spent pausing
+#     mapped-RAM background stream for CXL fault pressure
+#
+# @stream-fault-pause-max-time-ns: maximum nanoseconds spent in one
+#     mapped-RAM background stream pause for CXL fault pressure
+#
+# @fault-publish-primary-samples: number of source-side primary fault
+#     publish measurements recorded before any burst work
+#
+# @fault-publish-primary-time-ns: cumulative nanoseconds spent
+#     publishing the primary fault page
+#
+# @max-fault-publish-primary-time-ns: maximum nanoseconds observed in
+#     a single source-side primary fault publish measurement
+#
+# @fault-publish-burst-samples: number of source-side fault-burst
+#     publish measurements recorded after the primary page was queued
+#
+# @fault-publish-burst-time-ns: cumulative nanoseconds spent in
+#     source-side neighbor-page burst publish work
+#
+# @max-fault-publish-burst-time-ns: maximum nanoseconds observed in a
+#     single source-side fault-burst publish measurement
+#
+# @fault-publish-req-recv-samples: number of source-side publish
+#     request receive-latency measurements recorded
+#
+# @fault-publish-req-recv-time-ns: cumulative nanoseconds from
+#     destination publish-request send until source return-path
+#     receive/decode
+#
+# @max-fault-publish-req-recv-time-ns: maximum nanoseconds observed in
+#     a single publish-request send-to-source-receive measurement
+#
+# @fault-publish-req-handle-samples: number of source-side publish
+#     request receive-to-primary-enqueue measurements recorded
+#
+# @fault-publish-req-handle-time-ns: cumulative nanoseconds from
+#     source receive of a publish request until the primary page was
+#     published
+#
+# @max-fault-publish-req-handle-time-ns: maximum nanoseconds observed
+#     in a single source-side publish request receive-to-primary-
+#     publish measurement
+#
+# @last-publish-request: most recent source-side publish-request
+#     received from destination fault handling
+#
+# @last-publish-wait-begin: most recent destination-side fault wait
+#     that began waiting for CXL visibility
+#
+# @last-publish-wait-complete: most recent destination-side fault wait
+#     that completed waiting for CXL visibility
+#
+# Features:
+#
+# @unstable: Members @phase, @phase-transitions, @switch-reason,
+#     @switch-iteration, @dst-stage-capacity-bytes,
+#     @dst-stage-slots, @dst-stage-present-slots,
+#     @dst-fault-hits, @dst-fault-misses,
+#     @dst-fault-read-bytes, @dst-fault-read-time-ns,
+#     @dst-fault-place-successes,
+#     @dst-fault-place-failures,
+#     @dst-region-map-attempts, @dst-region-map-successes,
+#     @dst-region-map-failures, @dst-region-map-time-ns,
+#     @dst-region-wake-failures, @dst-region-wait-samples,
+#     @dst-region-wait-time-ns, @max-dst-region-wait-time-ns,
+#     @dst-region-fallback-copies, @staged-pages,
+#     @staged-pages-percent, @warm-publish-pages,
+#     @last-iterate-ram-pages, @last-iterate-staged-pages-delta,
+#     @last-iterate-warm-push-pages,
+#     @last-iterate-fault-primary-pages,
+#     @last-iterate-fault-burst-pages, @last-iterate-phase,
+#     @fault-publish-requests, @fault-publish-waits,
+#     @fault-publish-wait-time-ns,
+#     @prefault-bytes, @prefault-time-ns,
+#     @prefault-wait-time-ns, @prefault-errors,
+#     @region-publish-requests, @region-publish-pages,
+#     @region-publish-time-ns,
+#     @publish-memcpy-bytes, @publish-memcpy-time-ns,
+#     @stream-publish-ranges, @stream-publish-pages,
+#     @stream-publish-time-ns, @stream-publish-local-bitmap-time-ns,
+#     @stream-publish-shared-visible-time-ns,
+#     @stream-write-calls, @stream-write-bytes,
+#     @stream-write-max-bytes, @stream-write-time-ns,
+#     @stream-fault-pause-calls, @stream-fault-pause-time-ns,
+#     @stream-fault-pause-max-time-ns,
+#     @fault-publish-primary-samples,
+#     @fault-publish-primary-time-ns,
+#     @max-fault-publish-primary-time-ns,
+#     @fault-publish-burst-samples,
+#     @fault-publish-burst-time-ns,
+#     @max-fault-publish-burst-time-ns,
+#     @fault-publish-req-recv-samples,
+#     @fault-publish-req-recv-time-ns,
+#     @max-fault-publish-req-recv-time-ns,
+#     @fault-publish-req-handle-samples,
+#     @fault-publish-req-handle-time-ns,
+#     @max-fault-publish-req-handle-time-ns,
+#     @last-publish-request,
+#     @last-publish-wait-begin, and @last-publish-wait-complete are
+#     experimental.
+#
+# Since: 11.0
+##
+{ 'struct': 'CXLMigrationStats',
+  'data': { 'active': 'bool',
+            'align': 'uint64',
+            'remap-granule': 'uint64',
+            'total-regions': 'uint64',
+            'remapped-regions': 'uint64',
+            'remap-attempts': 'uint64',
+            'remap-successes': 'uint64',
+            'remap-failures': 'uint64',
+            'skip-out-of-range': 'uint64',
+            'skip-already-remapped': 'uint64',
+            'skip-misaligned': 'uint64',
+            'skip-partial-region': 'uint64',
+            'skip-not-fully-migrated': 'uint64',
+            'dirty-clear-calls': 'uint64',
+            'dirty-cleared-pages': 'uint64',
+            'backing-write-calls': 'uint64',
+            'backing-write-bytes': 'uint64',
+            'backing-write-time-ns': 'uint64',
+            'migrated-bitmap-time-ns': 'uint64',
+            'remap-scan-calls': 'uint64',
+            'remap-scan-time-ns': 'uint64',
+            'remap-page-check-calls': 'uint64',
+            'remap-page-check-time-ns': 'uint64',
+            'remap-syscall-time-ns': 'uint64',
+            'remap-copy-bytes': 'uint64',
+            'remap-copy-time-ns': 'uint64',
+            'remap-pause-calls': 'uint64',
+            'remap-pause-time-ns': 'uint64',
+            'dirty-sync-calls': 'uint64',
+            'dirty-sync-time-ns': 'uint64',
+            'dirty-clear-time-ns': 'uint64',
+            'prefault-bytes': { 'type': 'uint64',
+                                'features': [ 'unstable' ] },
+            'prefault-time-ns': { 'type': 'uint64',
+                                  'features': [ 'unstable' ] },
+            'prefault-wait-time-ns': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'prefault-errors': { 'type': 'uint64',
+                                 'features': [ 'unstable' ] },
+            'phase': { 'type': 'CXLMigrationPhase',
+                       'features': [ 'unstable' ] },
+            'phase-transitions': { 'type': 'uint64',
+                                   'features': [ 'unstable' ] },
+            'switch-reason': { 'type': 'CXLMigrationSwitchReason',
+                               'features': [ 'unstable' ] },
+            'switch-iteration': { 'type': 'uint64',
+                                  'features': [ 'unstable' ] },
+            'dst-stage-capacity-bytes': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'dst-stage-slots': { 'type': 'uint64',
+                                 'features': [ 'unstable' ] },
+            'dst-stage-present-slots': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'dst-fault-hits': { 'type': 'uint64',
+                                'features': [ 'unstable' ] },
+            'dst-fault-misses': { 'type': 'uint64',
+                                  'features': [ 'unstable' ] },
+            'dst-fault-read-bytes': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'dst-fault-read-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'dst-fault-place-successes': { 'type': 'uint64',
+                                           'features': [ 'unstable' ] },
+            'dst-fault-place-failures': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'dst-region-map-attempts': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'dst-region-map-successes': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'dst-region-map-failures': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'dst-region-map-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'dst-region-wake-failures': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'dst-region-wait-samples': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'dst-region-wait-time-ns': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'max-dst-region-wait-time-ns': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'dst-region-fallback-copies': { 'type': 'uint64',
+                                            'features': [ 'unstable' ] },
+            'staged-pages': { 'type': 'uint64',
+                              'features': [ 'unstable' ] },
+            'staged-pages-percent': { 'type': 'number',
+                                      'features': [ 'unstable' ] },
+            'warm-publish-pages': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'last-iterate-ram-pages': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'last-iterate-staged-pages-delta': { 'type': 'uint64',
+                                                 'features': [ 'unstable' ] },
+            'last-iterate-warm-push-pages': { 'type': 'uint64',
+                                              'features': [ 'unstable' ] },
+            'last-iterate-fault-primary-pages': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'last-iterate-fault-burst-pages': { 'type': 'uint64',
+                                                'features': [ 'unstable' ] },
+            'last-iterate-phase': { 'type': 'CXLMigrationPhase',
+                                    'features': [ 'unstable' ] },
+            'fault-publish-requests': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'fault-publish-waits': { 'type': 'uint64',
+                                     'features': [ 'unstable' ] },
+            'fault-publish-wait-time-ns': { 'type': 'uint64',
+                                            'features': [ 'unstable' ] },
+            'region-publish-requests': { 'type': 'uint64',
+                                         'features': [ 'unstable' ] },
+            'region-publish-pages': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'region-publish-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'publish-memcpy-bytes': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'publish-memcpy-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'stream-publish-ranges': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'stream-publish-pages': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'stream-publish-time-ns': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'stream-publish-local-bitmap-time-ns': {
+                'type': 'uint64',
+                'features': [ 'unstable' ] },
+            'stream-publish-shared-visible-time-ns': {
+                'type': 'uint64',
+                'features': [ 'unstable' ] },
+            'stream-write-calls': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'stream-write-bytes': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'stream-write-max-bytes': { 'type': 'uint64',
+                                        'features': [ 'unstable' ] },
+            'stream-write-time-ns': { 'type': 'uint64',
+                                      'features': [ 'unstable' ] },
+            'stream-fault-pause-calls': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'stream-fault-pause-time-ns': { 'type': 'uint64',
+                                            'features': [ 'unstable' ] },
+            'stream-fault-pause-max-time-ns': { 'type': 'uint64',
+                                                'features': [ 'unstable' ] },
+            'fault-publish-primary-samples': { 'type': 'uint64',
+                                               'features': [ 'unstable' ] },
+            'fault-publish-primary-time-ns': { 'type': 'uint64',
+                                               'features': [ 'unstable' ] },
+            'max-fault-publish-primary-time-ns': { 'type': 'uint64',
+                                                   'features': [ 'unstable' ] },
+            'fault-publish-burst-samples': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'fault-publish-burst-time-ns': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'max-fault-publish-burst-time-ns': { 'type': 'uint64',
+                                                 'features': [ 'unstable' ] },
+            'fault-publish-req-recv-samples': { 'type': 'uint64',
+                                                'features': [ 'unstable' ] },
+            'fault-publish-req-recv-time-ns': { 'type': 'uint64',
+                                                'features': [ 'unstable' ] },
+            'max-fault-publish-req-recv-time-ns': { 'type': 'uint64',
+                                                    'features': [ 'unstable' ] },
+            'fault-publish-req-handle-samples': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'fault-publish-req-handle-time-ns': { 'type': 'uint64',
+                                                  'features': [ 'unstable' ] },
+            'max-fault-publish-req-handle-time-ns': { 'type': 'uint64',
+                                                      'features': [ 'unstable' ] },
+            '*last-publish-request': {
+                'type': 'CXLMigrationPublishRequestInfo',
+                'features': [ 'unstable' ] },
+            '*last-publish-wait-begin': {
+                'type': 'CXLMigrationPublishWaitInfo',
+                'features': [ 'unstable' ] },
+            '*last-publish-wait-complete': {
+                'type': 'CXLMigrationPublishWaitInfo',
+                'features': [ 'unstable' ] } } }
 
 ##
 # @MigrationInfo:
@@ -226,6 +908,12 @@
 # @expected-downtime: only present while migration is active expected
 #     downtime in milliseconds for the guest in last walk of the dirty
 #     bitmap.  (since 1.3)
+#
+# @stop-to-start-time: only present after the source observes the
+#     destination VM-start acknowledgement on the return path.
+#     This is the elapsed milliseconds from source stop until that
+#     acknowledgement is received, and is a tighter handoff metric
+#     than legacy @downtime for postcopy.  (since 11.0)
 #
 # @setup-time: amount of setup time in milliseconds *before* the
 #     iterations begin but *after* the QMP command is issued.  This is
@@ -284,6 +972,10 @@
 #     is supported by all VFIO devices and status is 'active' or
 #     'completed' (since 5.2)
 #
+# @x-cxl: `CXLMigrationStats` containing experimental CXL backing and
+#     write-redirect statistics, only returned if `cxl-path` backed
+#     mapped-ram migration is enabled on the source.  (Since 11.0)
+#
 # @blocked-reasons: A list of reasons an outgoing migration is
 #     blocked.  Present and non-empty when migration is blocked.
 #     (since 6.0)
@@ -311,10 +1003,12 @@
 { 'struct': 'MigrationInfo',
   'data': {'*status': 'MigrationStatus', '*ram': 'MigrationStats',
            '*vfio': 'VfioStats',
+           '*x-cxl': 'CXLMigrationStats',
            '*xbzrle-cache': 'XBZRLECacheStats',
            '*total-time': 'int',
            '*expected-downtime': 'int',
            '*downtime': 'int',
+           '*stop-to-start-time': 'int',
            '*setup-time': 'int',
            '*cpu-throttle-percentage': 'int',
            '*error-desc': 'str',
@@ -523,9 +1217,16 @@
 #     each RAM page.  Requires a migration URI that supports seeking,
 #     such as a file.  (since 9.0)
 #
+# @x-cxl-hybrid: Enable experimental CXL-assisted hybrid
+#     precopy/postcopy migration controls.  This feature is only a
+#     policy and control-plane enablement flag; the actual migration
+#     still depends on compatible capabilities and parameters being
+#     set.  (Since 11.0)
+#
 # Features:
 #
-# @unstable: Members @x-colo and @x-ignore-shared are experimental.
+# @unstable: Members @x-colo, @x-ignore-shared, and @x-cxl-hybrid are
+#     experimental.
 #
 # Since: 1.2
 ##
@@ -539,7 +1240,8 @@
            { 'name': 'x-ignore-shared', 'features': [ 'unstable' ] },
            'validate-uuid', 'background-snapshot',
            'zero-copy-send', 'postcopy-preempt', 'switchover-ack',
-           'dirty-limit', 'mapped-ram'] }
+           'dirty-limit', 'mapped-ram',
+           { 'name': 'x-cxl-hybrid', 'features': [ 'unstable' ] }] }
 
 ##
 # @MigrationCapabilityStatus:
@@ -806,8 +1508,15 @@
 #
 # Features:
 #
-# @unstable: Members @x-checkpoint-delay and
-#     @x-vcpu-dirty-limit-period are experimental.
+# @unstable: Members @x-checkpoint-delay,
+#     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
+#     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
+#     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
+#     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
+#     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
+#     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
+#     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
+#     experimental.
 #
 # Since: 2.4
 ##
@@ -831,6 +1540,33 @@
            'mode',
            'zero-page-detection',
            'direct-io',
+           'cxl-path',
+           { 'name': 'x-cxl-switch-dirty-threshold',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-max-iters',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-max-precopy-ms',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-min-remaining',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-gain-floor',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-brake-enable',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-brake-remap-granule',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-prefetch-rate',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-prefetch-heat-window-ms',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-prefetch-batch-pages',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-dst-cache-size',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-shared-backing',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-fault-resolve-mode',
+             'features': [ 'unstable' ] },
            'cpr-exec-command'] }
 
 ##
@@ -999,9 +1735,68 @@
 #     description in `ZeroPageDetection`.  Default is 'multifd'.
 #     (since 9.0)
 #
-# @direct-io: Open migration files with O_DIRECT when possible.  This
-#     only has effect if the @mapped-ram capability is enabled.
-#     (Since 9.1)
+# @direct-io: Use direct I/O for mapped-ram multifd channels when the
+#     backing store supports it.  Default is false.  (Since 11.0)
+#
+# @cxl-path: Path to a CXL DAX device used as mapped-ram backing
+#     storage.
+#     Empty string disables CXL backing.  This only has effect if the
+#     @mapped-ram capability is enabled.  (Since 11.0)
+#
+# @x-cxl-switch-dirty-threshold: Dirty page rate threshold, in pages
+#     per second, above which hybrid migration may stop pursuing
+#     further pure precopy convergence and prepare for brake/switch
+#     logic.  Zero disables this threshold.  (Since 11.0)
+#
+# @x-cxl-switch-max-iters: Maximum number of precopy iterations before
+#     hybrid migration may switch away from bulk precopy.  Zero means
+#     no explicit iteration limit.  (Since 11.0)
+#
+# @x-cxl-switch-max-precopy-ms: Hard upper bound, in milliseconds, on
+#     elapsed hybrid bulk precopy time before hybrid migration may
+#     switch away from bulk precopy.  Zero disables this limit.
+#     (Since 11.0)
+#
+# @x-cxl-switch-min-remaining: Remaining migration payload threshold,
+#     in bytes, below which hybrid migration may switch away from
+#     bulk precopy.  Zero disables this threshold.  (Since 11.0)
+#
+# @x-cxl-switch-gain-floor: Minimum per-iteration progress, in bytes,
+#     required to justify another bulk precopy round.  Zero disables
+#     this threshold.  (Since 11.0)
+#
+# @x-cxl-brake-enable: Enable the hybrid brake phase that keeps
+#     source-side CXL write redirection active before postcopy
+#     switchover.  Default is false.  (Since 11.0)
+#
+# @x-cxl-brake-remap-granule: Override for the hybrid brake remap
+#     granule, in bytes.  Zero means automatic selection.  (Since
+#     11.0)
+#
+# @x-cxl-prefetch-rate: Maximum rate, in bytes per second, for
+#     background hybrid warm push into destination CXL staging.  Zero
+#     means no explicit hybrid-prefetch cap.  (Since 11.0)
+#
+# @x-cxl-prefetch-heat-window-ms: Heat accounting window, in
+#     milliseconds, used by hybrid warm-push policy.  Zero means
+#     implementation default.  (Since 11.0)
+#
+# @x-cxl-prefetch-batch-pages: Maximum number of pages issued per
+#     hybrid warm-push batch.  Zero means implementation default.
+#     (Since 11.0)
+#
+# @x-cxl-dst-cache-size: Destination CXL staging capacity target, in
+#     bytes, used by the hybrid control plane.  Zero means automatic
+#     or device-sized behavior.  (Since 11.0)
+#
+# @x-cxl-shared-backing: Confirm that source and destination
+#     @cxl-path resolve the same interconnect-visible or otherwise
+#     explicitly shared CXL backing, allowing published CXL contents
+#     and visibility state to be observed consistently across
+#     endpoints.  Default is false.  (Since 11.0)
+#
+# @x-cxl-fault-resolve-mode: Experimental destination fault
+#     resolution policy for CXL hybrid postcopy.  (Since 11.0)
 #
 # @cpr-exec-command: Command to start the new QEMU process when @mode
 #     is @cpr-exec.  The first list element is the program's filename,
@@ -1009,8 +1804,15 @@
 #
 # Features:
 #
-# @unstable: Members @x-checkpoint-delay and
-#     @x-vcpu-dirty-limit-period are experimental.
+# @unstable: Members @x-checkpoint-delay,
+#     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
+#     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
+#     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
+#     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
+#     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
+#     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
+#     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
+#     experimental.
 #
 # Since: 2.4
 ##
@@ -1046,6 +1848,34 @@
             '*mode': 'MigMode',
             '*zero-page-detection': 'ZeroPageDetection',
             '*direct-io': 'bool',
+            '*cxl-path': 'StrOrNull',
+            '*x-cxl-switch-dirty-threshold': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-max-iters': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-max-precopy-ms': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-min-remaining': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-gain-floor': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-brake-enable': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-brake-remap-granule': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-prefetch-rate': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-prefetch-heat-window-ms': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            '*x-cxl-prefetch-batch-pages': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            '*x-cxl-dst-cache-size': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-shared-backing': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-fault-resolve-mode': {
+                'type': 'CXLHybridFaultResolveMode',
+                'features': [ 'unstable' ] },
             '*cpr-exec-command': [ 'str' ]} }
 
 ##

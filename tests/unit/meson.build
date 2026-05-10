@@ -124,8 +124,12 @@ endif
 
 if have_system
   tests += {
+    'test-cxl-hybrid-control': [migration],
+    'test-cxl-hybrid-region': [migration],
+    'test-migration-postcopy': [migration],
     'ptimer-test': ['ptimer-test-stubs.c', meson.project_source_root() / 'hw/core/ptimer.c'],
     'test-iov': [],
+    'test-migration-downtime': [migration],
     'test-opts-visitor': [testqapi],
     'test-xs-node': [qom],
     'test-virtio-dmabuf': [meson.project_source_root() / 'hw/display/virtio-dmabuf.c'],
@@ -157,6 +161,12 @@ if have_system
     }
   endif
   tests += {'test-qdev': [qom, hwcore]}
+endif
+
+if host_os == 'linux'
+  tests += {
+    'test-cxl-region-remap-uffd': [migration, io, qom, util],
+  }
 endif
 
 if have_ga and host_os == 'linux'

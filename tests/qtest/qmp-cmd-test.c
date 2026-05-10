@@ -343,6 +343,115 @@ static void test_object_add_failure_modes(void)
     qtest_quit(qts);
 }
 
+static void test_migrate_set_parameters_cxl_switch_max_precopy_ms(void)
+{
+    QTestState *qts;
+    QDict *resp;
+    QDict *ret;
+
+    qts = qtest_init(common_args);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': { 'x-cxl-switch-max-precopy-ms': 420 } }");
+    g_assert_nonnull(resp);
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'query-migrate-parameters' }");
+    g_assert_nonnull(resp);
+    ret = qdict_get_qdict(resp, "return");
+    g_assert_nonnull(ret);
+    g_assert_cmpint(qdict_get_int(ret, "x-cxl-switch-max-precopy-ms"), ==,
+                    420);
+    qobject_unref(resp);
+
+    qtest_quit(qts);
+}
+
+static void assert_schema_object_has_member(SchemaInfo *type,
+                                            const char *member_name)
+{
+    SchemaInfoObjectMemberList *tail;
+
+    g_assert_nonnull(type);
+    g_assert_cmpint(type->meta_type, ==, SCHEMA_META_TYPE_OBJECT);
+
+    for (tail = type->u.object.members; tail; tail = tail->next) {
+        if (!g_strcmp0(tail->value->name, member_name)) {
+            return;
+        }
+    }
+
+    g_assert_not_reached();
+}
+
+static SchemaInfoObjectMember *schema_object_member(SchemaInfo *type,
+                                                    const char *member_name)
+{
+    SchemaInfoObjectMemberList *tail;
+
+    g_assert_nonnull(type);
+    g_assert_cmpint(type->meta_type, ==, SCHEMA_META_TYPE_OBJECT);
+
+    for (tail = type->u.object.members; tail; tail = tail->next) {
+        if (!g_strcmp0(tail->value->name, member_name)) {
+            return tail->value;
+        }
+    }
+
+    return NULL;
+}
+
+static void test_query_migrate_cxl_schema_loop_stats(void)
+{
+    QmpSchema schema;
+    SchemaInfo *cmd;
+    SchemaInfo *ret_type;
+    SchemaInfo *cxl_type;
+    SchemaInfoObjectMember *member;
+
+    qmp_schema_init(&schema);
+
+    cmd = qmp_schema_lookup(&schema, "query-migrate");
+    g_assert_nonnull(cmd);
+    g_assert_cmpint(cmd->meta_type, ==, SCHEMA_META_TYPE_COMMAND);
+
+    ret_type = qmp_schema_lookup(&schema, cmd->u.command.ret_type);
+    member = schema_object_member(ret_type, "x-cxl");
+    g_assert_nonnull(member);
+
+    cxl_type = qmp_schema_lookup(&schema, member->type);
+    assert_schema_object_has_member(cxl_type, "last-iterate-ram-pages");
+    assert_schema_object_has_member(cxl_type, "last-iterate-staged-pages-delta");
+    assert_schema_object_has_member(cxl_type, "last-iterate-warm-push-pages");
+    assert_schema_object_has_member(cxl_type, "last-iterate-fault-primary-pages");
+    assert_schema_object_has_member(cxl_type, "last-iterate-fault-burst-pages");
+    assert_schema_object_has_member(cxl_type, "last-iterate-phase");
+    assert_schema_object_has_member(cxl_type, "staged-pages-percent");
+
+    qmp_schema_cleanup(&schema);
+}
+
+static void test_query_migrate_stop_to_start_schema(void)
+{
+    QmpSchema schema;
+    SchemaInfo *cmd;
+    SchemaInfo *ret_type;
+    SchemaInfoObjectMember *member;
+
+    qmp_schema_init(&schema);
+
+    cmd = qmp_schema_lookup(&schema, "query-migrate");
+    g_assert_nonnull(cmd);
+    g_assert_cmpint(cmd->meta_type, ==, SCHEMA_META_TYPE_COMMAND);
+
+    ret_type = qmp_schema_lookup(&schema, cmd->u.command.ret_type);
+    member = schema_object_member(ret_type, "stop-to-start-time");
+    g_assert_nonnull(member);
+
+    qmp_schema_cleanup(&schema);
+}
+
 int main(int argc, char *argv[])
 {
     QmpSchema schema;
@@ -355,6 +464,12 @@ int main(int argc, char *argv[])
 
     qtest_add_func("qmp/object-add-failure-modes",
                    test_object_add_failure_modes);
+    qtest_add_func("qmp/migrate-set-parameters/cxl-switch-max-precopy-ms",
+                   test_migrate_set_parameters_cxl_switch_max_precopy_ms);
+    qtest_add_func("qmp/query-migrate/cxl-schema-loop-stats",
+                   test_query_migrate_cxl_schema_loop_stats);
+    qtest_add_func("qmp/query-migrate/stop-to-start-schema",
+                   test_query_migrate_stop_to_start_schema);
 
     ret = g_test_run();
 

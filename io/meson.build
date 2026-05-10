@@ -2,6 +2,7 @@ io_ss.add(genh)
 io_ss.add(files(
   'channel-buffer.c',
   'channel-command.c',
+  'channel-cxl.c',
   'channel-file.c',
   'channel-null.c',
   'channel-socket.c',

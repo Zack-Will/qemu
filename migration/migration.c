@@ -18,6 +18,7 @@
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "migration/blocker.h"
+#include "cxl.h"
 #include "exec.h"
 #include "file.h"
 #include "system/runstate.h"
@@ -27,6 +28,7 @@
 #include "migration/cpr.h"
 #include "migration/global_state.h"
 #include "migration/misc.h"
+#include "migration/postcopy.h"
 #include "migration.h"
 #include "migration-stats.h"
 #include "savevm.h"
@@ -68,6 +70,7 @@
     [elem] = NOTIFIER_WITH_RETURN_LIST_INITIALIZER((array)[elem])
 
 #define INMIGRATE_DEFAULT_EXIT_ON_ERROR true
+#define POSTCOPY_PACKAGE_WAIT_POLL_MS 1
 
 static GSList *migration_state_notifiers[MIG_MODE__MAX];
 
@@ -81,6 +84,7 @@ enum mig_rp_message_type {
     MIG_RP_MSG_REQ_PAGES,    /* data (start: be64, len: be32) */
     MIG_RP_MSG_RECV_BITMAP,  /* send recved_bitmap back to source */
     MIG_RP_MSG_RESUME_ACK,   /* tell source that we are ready to resume */
+    MIG_RP_MSG_DST_STARTED,  /* tell source that destination vm_start() ran */
     MIG_RP_MSG_SWITCHOVER_ACK, /* Tell source it's OK to do switchover */
 
     MIG_RP_MSG_MAX
@@ -100,6 +104,117 @@ static bool migration_switchover_start(MigrationState *s, Error **errp);
 static bool stop_return_path_thread_on_source(MigrationState *s);
 static void migration_release_dst_files(MigrationState *ms);
 static void migration_completion_end(MigrationState *s);
+static int migration_completion_prepare_cxl_postcopy(MigrationState *ms,
+                                                     Error **errp);
+
+static void migration_request_postcopy(MigrationState *s,
+                                       bool automatic,
+                                       CXLMigrationSwitchReason reason)
+{
+    qatomic_set(&s->start_postcopy, true);
+    s->start_postcopy_auto = automatic;
+    if (automatic && migrate_cxl_hybrid()) {
+        cxl_hybrid_enter_phase(CXL_HYBRID_PHASE_SWITCHING, reason,
+                               s->cxl_hybrid_iteration);
+    }
+}
+
+static void migration_trace_postcopy_timeline(MigrationState *s,
+                                              const char *stage,
+                                              uint64_t pending_size)
+{
+    trace_migration_postcopy_timeline(stage,
+                                      qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                                      s ? s->state : 0,
+                                      s ? s->cxl_hybrid_iteration : 0,
+                                      pending_size,
+                                      s ? s->postcopy_package_loaded : false);
+}
+
+static bool migration_cxl_hybrid_should_start_postcopy(MigrationState *s,
+                                                       uint64_t pending_size)
+{
+    int64_t now_ms;
+    uint64_t elapsed_ms;
+    uint64_t dirty_rate;
+    uint64_t remaining_threshold;
+    uint64_t dirty_threshold;
+    uint64_t gain_floor;
+    uint64_t max_precopy_ms;
+    uint32_t max_iters;
+    uint64_t previous_remaining;
+    uint64_t gain;
+    bool dirty_trigger;
+    bool max_iters_trigger;
+    bool gain_trigger;
+    bool remaining_trigger;
+    bool time_cap_trigger;
+    CXLMigrationSwitchReason reason = CXL_MIGRATION_SWITCH_REASON_NONE;
+
+    if (!migrate_cxl_hybrid() || qatomic_read(&s->start_postcopy)) {
+        return false;
+    }
+
+    now_ms = qemu_clock_get_ms(QEMU_CLOCK_HOST);
+    if (s->cxl_hybrid_precopy_start_ms < 0) {
+        s->cxl_hybrid_precopy_start_ms = now_ms;
+    }
+
+    s->cxl_hybrid_iteration++;
+    elapsed_ms = now_ms - s->cxl_hybrid_precopy_start_ms;
+    dirty_rate = qatomic_read(&mig_stats.dirty_pages_rate);
+    remaining_threshold = migrate_cxl_switch_min_remaining();
+    dirty_threshold = migrate_cxl_switch_dirty_threshold();
+    gain_floor = migrate_cxl_switch_gain_floor();
+    max_precopy_ms = migrate_cxl_switch_max_precopy_ms();
+    max_iters = migrate_cxl_switch_max_iters();
+    previous_remaining = s->cxl_hybrid_prev_remaining;
+    gain = previous_remaining > pending_size ? previous_remaining - pending_size : 0;
+    s->cxl_hybrid_prev_remaining = pending_size;
+    dirty_trigger = dirty_threshold && dirty_rate >= dirty_threshold;
+    max_iters_trigger = max_iters && s->cxl_hybrid_iteration >= max_iters;
+    gain_trigger = gain_floor && previous_remaining && gain <= gain_floor;
+    remaining_trigger = remaining_threshold && pending_size <= remaining_threshold;
+    time_cap_trigger = max_precopy_ms && elapsed_ms >= max_precopy_ms;
+
+    if (cxl_hybrid_phase() == CXL_HYBRID_PHASE_PRECOPY_BULK &&
+        migrate_cxl_brake_enable() &&
+        !remaining_trigger && !time_cap_trigger &&
+        (dirty_trigger || gain_trigger || max_iters_trigger)) {
+        cxl_hybrid_enter_phase(CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+                               CXL_MIGRATION_SWITCH_REASON_NONE,
+                               s->cxl_hybrid_iteration);
+        return false;
+    }
+
+    if (remaining_trigger) {
+        reason = CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL;
+    } else if (time_cap_trigger) {
+        reason = CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP;
+    } else if (dirty_trigger && !migrate_cxl_brake_enable()) {
+        reason = CXL_MIGRATION_SWITCH_REASON_DIRTY_RATE_HIGH;
+    } else if (max_iters_trigger) {
+        reason = CXL_MIGRATION_SWITCH_REASON_MAX_ITERS;
+    } else if (gain_trigger) {
+        reason = CXL_MIGRATION_SWITCH_REASON_GAIN_COLLAPSED;
+    }
+
+    if (reason == CXL_MIGRATION_SWITCH_REASON_NONE) {
+        return false;
+    }
+
+    if (migrate_cxl_brake_enable() &&
+        cxl_hybrid_phase() == CXL_HYBRID_PHASE_PRECOPY_BRAKE &&
+        reason != CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL &&
+        reason != CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP &&
+        reason != CXL_MIGRATION_SWITCH_REASON_MAX_ITERS &&
+        reason != CXL_MIGRATION_SWITCH_REASON_GAIN_COLLAPSED) {
+        return false;
+    }
+
+    migration_request_postcopy(s, true, reason);
+    return true;
+}
 
 static void migration_downtime_start(MigrationState *s)
 {
@@ -136,8 +251,8 @@ static void migration_downtime_end(MigrationState *s)
      * If downtime already set, should mean that postcopy already set it,
      * then that should be the real downtime already.
      */
-    if (!s->downtime) {
-        s->downtime = now - s->downtime_start;
+    if (!s->downtime_set) {
+        migration_record_downtime(s, now - s->downtime_start);
         trace_vmstate_downtime_checkpoint("src-downtime-end");
     }
 }
@@ -155,7 +270,8 @@ static void precopy_notify_complete(void)
 
 static bool migration_needs_multiple_sockets(void)
 {
-    return migrate_multifd() || migrate_postcopy_preempt();
+    return (migrate_multifd() && !cxl_use_mapped_ram_backing()) ||
+           migrate_postcopy_preempt();
 }
 
 static RunState migration_get_target_runstate(void)
@@ -190,7 +306,7 @@ static bool transport_supports_multi_channels(MigrationAddress *addr)
 
 static bool migration_needs_seekable_channel(void)
 {
-    return migrate_mapped_ram();
+    return migrate_mapped_ram() && !cxl_use_mapped_ram_backing();
 }
 
 static bool migration_needs_extra_fds(void)
@@ -200,21 +316,60 @@ static bool migration_needs_extra_fds(void)
      * non-duplicated file descriptors so we can use one of them for
      * unaligned IO.
      */
-    return migrate_multifd() && migrate_direct_io();
+    return migrate_multifd() && migrate_direct_io() &&
+           !cxl_use_mapped_ram_backing();
+}
+
+static int migration_setup_outgoing_ram_backing(MigrationState *s,
+                                                Error **errp)
+{
+    g_autoptr(QIOChannel) ioc = NULL;
+
+    if (!cxl_use_mapped_ram_backing() || s->mapped_ram_file) {
+        return 0;
+    }
+
+    ioc = cxl_open_mapped_ram_outgoing(errp);
+    if (!ioc) {
+        return -1;
+    }
+
+    s->mapped_ram_file = qemu_file_new_output(ioc);
+    return 0;
+}
+
+static int migration_setup_incoming_ram_backing(MigrationIncomingState *mis,
+                                                Error **errp)
+{
+    g_autoptr(QIOChannel) ioc = NULL;
+
+    if (!cxl_use_mapped_ram_backing() || mis->mapped_ram_file) {
+        return 0;
+    }
+
+    ioc = cxl_open_mapped_ram_incoming(errp);
+    if (!ioc) {
+        return -1;
+    }
+
+    mis->mapped_ram_file = qemu_file_new_input(ioc);
+
+    if (migrate_multifd() && !cxl_create_incoming_mapped_ram_channels(errp)) {
+        qemu_fclose(mis->mapped_ram_file);
+        mis->mapped_ram_file = NULL;
+        return -1;
+    }
+
+    return 0;
 }
 
 static bool transport_supports_seeking(MigrationAddress *addr)
 {
-    if (addr->transport == MIGRATION_ADDRESS_TYPE_FILE) {
-        return true;
-    }
-
-    return false;
+    return addr->transport == MIGRATION_ADDRESS_TYPE_FILE;
 }
 
 static bool transport_supports_extra_fds(MigrationAddress *addr)
 {
-    /* file: works because QEMU can open it multiple times */
     return addr->transport == MIGRATION_ADDRESS_TYPE_FILE;
 }
 
@@ -279,6 +434,8 @@ static int migration_stop_vm(MigrationState *s, RunState state)
 {
     int ret;
 
+    migration_downtime_reset(s);
+    migration_stop_to_start_reset(s);
     migration_downtime_start(s);
 
     s->vm_old_state = runstate_get();
@@ -472,6 +629,10 @@ void migration_incoming_state_destroy(void)
         qemu_fclose(mis->from_src_file);
         mis->from_src_file = NULL;
     }
+    if (mis->mapped_ram_file) {
+        qemu_fclose(mis->mapped_ram_file);
+        mis->mapped_ram_file = NULL;
+    }
     if (mis->postcopy_remote_fds) {
         g_array_free(mis->postcopy_remote_fds, TRUE);
         mis->postcopy_remote_fds = NULL;
@@ -506,14 +667,11 @@ static void migrate_generate_event(MigrationStatus new_state)
  * Send a message on the return channel back to the source
  * of the migration.
  */
-static int migrate_send_rp_message(MigrationIncomingState *mis,
-                                   enum mig_rp_message_type message_type,
-                                   uint16_t len, void *data)
+static int migrate_send_rp_message_locked(MigrationIncomingState *mis,
+                                          enum mig_rp_message_type message_type,
+                                          uint16_t len, void *data)
 {
     int ret = 0;
-
-    trace_migrate_send_rp_message((int)message_type, len);
-    QEMU_LOCK_GUARD(&mis->rp_mutex);
 
     /*
      * It's possible that the file handle got lost due to network
@@ -528,6 +686,18 @@ static int migrate_send_rp_message(MigrationIncomingState *mis,
     qemu_put_be16(mis->to_src_file, len);
     qemu_put_buffer(mis->to_src_file, data, len);
     return qemu_fflush(mis->to_src_file);
+}
+
+static int migrate_send_rp_message(MigrationIncomingState *mis,
+                                   enum mig_rp_message_type message_type,
+                                   uint16_t len, void *data)
+{
+    int ret;
+
+    trace_migrate_send_rp_message((int)message_type, len);
+    QEMU_LOCK_GUARD(&mis->rp_mutex);
+    ret = migrate_send_rp_message_locked(mis, message_type, len, data);
+    return ret;
 }
 
 /* Request one page from the source VM at the given start address.
@@ -678,6 +848,7 @@ static void qemu_setup_incoming_migration(const char *uri, bool has_channels,
 static void process_incoming_migration_bh(void *opaque)
 {
     MigrationIncomingState *mis = opaque;
+    bool vm_started = false;
 
     trace_vmstate_downtime_checkpoint("dst-precopy-bh-enter");
 
@@ -709,16 +880,21 @@ static void process_incoming_migration_bh(void *opaque)
              */
             if (migration_block_activate(NULL)) {
                 vm_start();
+                vm_started = true;
             }
         } else {
             runstate_set(RUN_STATE_PAUSED);
         }
     } else if (migrate_colo()) {
         vm_start();
+        vm_started = true;
     } else {
         runstate_set(global_state_get_runstate());
     }
     trace_vmstate_downtime_checkpoint("dst-precopy-bh-vm-started");
+    if (vm_started) {
+        migrate_send_rp_dst_started(mis);
+    }
     /*
      * This must happen after any state changes since as soon as an external
      * observer sees this event they might start to prod at the VM assuming
@@ -825,6 +1001,9 @@ bool migration_incoming_setup(QIOChannel *ioc, uint8_t channel, Error **errp)
         f = qemu_file_new_input(ioc);
         assert(!mis->from_src_file);
         mis->from_src_file = f;
+        if (migration_setup_incoming_ram_backing(mis, errp) != 0) {
+            return false;
+        }
         qemu_file_set_blocking(f, false, &error_abort);
         break;
 
@@ -984,6 +1163,11 @@ void migrate_send_rp_resume_ack(MigrationIncomingState *mis, uint32_t value)
     migrate_send_rp_message(mis, MIG_RP_MSG_RESUME_ACK, sizeof(buf), &buf);
 }
 
+void migrate_send_rp_dst_started(MigrationIncomingState *mis)
+{
+    migrate_send_rp_message(mis, MIG_RP_MSG_DST_STARTED, 0, NULL);
+}
+
 bool migration_is_running(void)
 {
     MigrationState *s = current_migration;
@@ -1047,6 +1231,11 @@ static void populate_time_info(MigrationInfo *info, MigrationState *s)
     } else {
         info->has_expected_downtime = true;
         info->expected_downtime = s->expected_downtime;
+    }
+
+    if (s->stop_to_start_time_set) {
+        info->has_stop_to_start_time = true;
+        info->stop_to_start_time = s->stop_to_start_time;
     }
 }
 
@@ -1133,7 +1322,7 @@ static void fill_source_migration_info(MigrationInfo *info)
     case MIGRATION_STATUS_NONE:
         /* no migration has happened ever */
         /* do not overwrite destination migration status */
-        return;
+        break;
     case MIGRATION_STATUS_SETUP:
         info->has_status = true;
         info->has_total_time = false;
@@ -1173,6 +1362,7 @@ static void fill_source_migration_info(MigrationInfo *info)
         break;
     }
     info->status = state;
+    cxl_populate_migration_info(info);
 
     QEMU_LOCK_GUARD(&s->error_mutex);
     if (s->error) {
@@ -1252,7 +1442,7 @@ void qmp_migrate_start_postcopy(Error **errp)
      * we don't error if migration has finished since that would be racy
      * with issuing this command.
      */
-    qatomic_set(&s->start_postcopy, true);
+    migration_request_postcopy(s, false, CXL_MIGRATION_SWITCH_REASON_MANUAL);
 }
 
 /* shared migration helpers */
@@ -1315,6 +1505,15 @@ static void migration_cleanup(MigrationState *s)
         multifd_send_shutdown();
         migration_ioc_unregister_yank_from_file(tmp);
         qemu_fclose(tmp);
+    }
+
+    if (s->mapped_ram_file) {
+        qemu_fclose(s->mapped_ram_file);
+        s->mapped_ram_file = NULL;
+    }
+
+    if (cxl_use_mapped_ram_backing()) {
+        cxl_cleanup_outgoing_migration();
     }
 
     assert(!migration_is_active());
@@ -1634,9 +1833,11 @@ int migrate_init(MigrationState *s, Error **errp)
     s->mbps = 0.0;
     s->pages_per_second = 0.0;
     s->downtime = 0;
+    s->stop_to_start_time = 0;
     s->expected_downtime = 0;
     s->setup_time = 0;
     s->start_postcopy = false;
+    s->start_postcopy_auto = false;
     s->migration_thread_running = false;
 
     migrate_error_free(s);
@@ -1652,6 +1853,9 @@ int migrate_init(MigrationState *s, Error **errp)
     s->vm_old_state = -1;
     s->iteration_initial_bytes = 0;
     s->threshold_size = 0;
+    s->cxl_hybrid_iteration = 0;
+    s->cxl_hybrid_prev_remaining = 0;
+    s->cxl_hybrid_precopy_start_ms = -1;
     s->switchover_acked = false;
     s->rdma_migration = false;
     /*
@@ -1662,6 +1866,8 @@ int migrate_init(MigrationState *s, Error **errp)
 
     s->postcopy_package_loaded = false;
     qemu_event_reset(&s->postcopy_package_loaded_event);
+    migration_downtime_reset(s);
+    migration_stop_to_start_reset(s);
 
     return 0;
 }
@@ -2138,6 +2344,7 @@ static struct rp_cmd_args {
     [MIG_RP_MSG_REQ_PAGES_ID]   = { .len = -1, .name = "REQ_PAGES_ID" },
     [MIG_RP_MSG_RECV_BITMAP]    = { .len = -1, .name = "RECV_BITMAP" },
     [MIG_RP_MSG_RESUME_ACK]     = { .len =  4, .name = "RESUME_ACK" },
+    [MIG_RP_MSG_DST_STARTED]    = { .len =  0, .name = "DST_STARTED" },
     [MIG_RP_MSG_SWITCHOVER_ACK] = { .len =  0, .name = "SWITCHOVER_ACK" },
     [MIG_RP_MSG_MAX]            = { .len = -1, .name = "MAX" },
 };
@@ -2164,6 +2371,10 @@ migrate_handle_rp_req_pages(MigrationState *ms, const char* rbname,
         error_setg(errp, "MIG_RP_MSG_REQ_PAGES: Misaligned page request, start:"
                    RAM_ADDR_FMT " len: %zd", start, len);
         return;
+    }
+
+    if (rbname) {
+        cxl_hybrid_record_warm_miss(rbname, start);
     }
 
     ram_save_queue_pages(rbname, start, len, errp);
@@ -2202,6 +2413,14 @@ static bool migrate_handle_rp_resume_ack(MigrationState *s,
     migration_rp_kick(s);
 
     return true;
+}
+
+static void migrate_handle_rp_dst_started(MigrationState *s)
+{
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    migration_record_stop_to_start(s, now - s->downtime_start);
+    trace_vmstate_downtime_checkpoint("src-dst-start-ack");
 }
 
 /*
@@ -2317,6 +2536,8 @@ static void *source_return_path_thread(void *opaque)
             if (tmp32 == QEMU_VM_PING_PACKAGED_LOADED) {
                 trace_source_return_path_thread_postcopy_package_loaded();
                 ms->postcopy_package_loaded = true;
+                migration_trace_postcopy_timeline(ms, "package-loaded",
+                                                  UINT64_MAX);
                 qemu_event_set(&ms->postcopy_package_loaded_event);
             }
             break;
@@ -2372,6 +2593,10 @@ static void *source_return_path_thread(void *opaque)
             }
             break;
 
+        case MIG_RP_MSG_DST_STARTED:
+            migrate_handle_rp_dst_started(ms);
+            break;
+
         case MIG_RP_MSG_SWITCHOVER_ACK:
             ms->switchover_acked = true;
             trace_source_return_path_thread_switchover_acked();
@@ -2402,6 +2627,7 @@ out:
         migration_rp_kick(ms);
     }
 
+    ms->rp_state.rp_thread_exited = true;
     trace_source_return_path_thread_end();
     rcu_unregister_thread();
 
@@ -2411,6 +2637,7 @@ out:
 static void open_return_path_on_source(MigrationState *ms)
 {
     ms->rp_state.from_dst_file = qemu_file_get_return_path(ms->to_dst_file);
+    ms->rp_state.rp_thread_exited = false;
 
     trace_open_return_path_on_source();
 
@@ -2444,10 +2671,41 @@ static bool stop_return_path_thread_on_source(MigrationState *ms)
 
     qemu_thread_join(&ms->rp_state.rp_thread);
     ms->rp_state.rp_thread_created = false;
+    ms->rp_state.rp_thread_exited = false;
     trace_migration_return_path_end_after();
 
     /* Return path will persist the error in MigrationState when quit */
     return migrate_has_error(ms);
+}
+
+static int migration_completion_prepare_cxl_postcopy(MigrationState *ms,
+                                                     Error **errp)
+{
+    int remaining_sent;
+    int ret;
+
+    if (!migrate_cxl_hybrid() ||
+        ms->state != MIGRATION_STATUS_POSTCOPY_ACTIVE ||
+        cxl_hybrid_phase() != CXL_HYBRID_PHASE_POSTCOPY_WARM) {
+        return 0;
+    }
+
+    trace_cxl_hybrid_completion_prepare_begin();
+    remaining_sent = cxl_hybrid_completion_publish_remaining_pages(ms, errp);
+    if (remaining_sent < 0) {
+        trace_cxl_hybrid_completion_prepare_end(remaining_sent,
+                                                remaining_sent);
+        return remaining_sent;
+    }
+
+    ret = cxl_hybrid_control_complete_source_run(errp);
+    if (ret < 0) {
+        trace_cxl_hybrid_completion_prepare_end(remaining_sent, ret);
+        return ret;
+    }
+
+    trace_cxl_hybrid_completion_prepare_end(remaining_sent, 0);
+    return 0;
 }
 
 static inline void
@@ -2492,7 +2750,27 @@ static int postcopy_start(MigrationState *ms, Error **errp)
         return -1;
     }
 
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_prefault_wait_before_postcopy();
+        if (!cxl_hybrid_init_source()) {
+            error_setg(errp,
+                       "Failed to initialize CXL hybrid source fault control");
+            return -1;
+        }
+        cxl_hybrid_enter_phase(CXL_HYBRID_PHASE_SWITCHING,
+                               ms->start_postcopy_auto ?
+                               CXL_MIGRATION_SWITCH_REASON_NONE :
+                               CXL_MIGRATION_SWITCH_REASON_MANUAL,
+                               ms->cxl_hybrid_iteration);
+        if (cxl_hybrid_begin_source_run_with_precopy_remaps(errp)) {
+            error_prepend(errp,
+                          "Failed to publish CXL hybrid source run state: ");
+            return -1;
+        }
+    }
+
     trace_postcopy_start();
+    migration_trace_postcopy_timeline(ms, "start", UINT64_MAX);
     bql_lock();
     trace_postcopy_start_set_run();
 
@@ -2524,6 +2802,14 @@ static int postcopy_start(MigrationState *ms, Error **errp)
      */
     if (migrate_postcopy_ram()) {
         ram_postcopy_send_discard_bitmap(ms);
+    }
+
+    if (migrate_cxl_hybrid()) {
+        ret = cxl_hybrid_metadata_send(ms->to_dst_file, errp);
+        if (ret) {
+            error_prepend(errp, "CXL hybrid metadata flush failed: ");
+            goto fail;
+        }
     }
 
     if (migrate_postcopy_ram()) {
@@ -2599,7 +2885,15 @@ static int postcopy_start(MigrationState *ms, Error **errp)
      */
     migration_call_notifiers(MIG_EVENT_POSTCOPY_START, NULL);
 
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_enter_phase(CXL_HYBRID_PHASE_POSTCOPY_WARM,
+                               CXL_MIGRATION_SWITCH_REASON_NONE,
+                               ms->cxl_hybrid_iteration);
+        cxl_hybrid_start_warm_push(ms);
+    }
+
     migration_downtime_end(ms);
+    migration_trace_postcopy_timeline(ms, "downtime-end", UINT64_MAX);
 
     if (migrate_postcopy_ram()) {
         /*
@@ -2634,6 +2928,11 @@ static int postcopy_start(MigrationState *ms, Error **errp)
                       ms->rp_state.rp_thread_created ?
                       MIGRATION_STATUS_POSTCOPY_DEVICE :
                       MIGRATION_STATUS_POSTCOPY_ACTIVE);
+    migration_trace_postcopy_timeline(
+        ms,
+        ms->rp_state.rp_thread_created ? "state-postcopy-device" :
+                                         "state-postcopy-active",
+        UINT64_MAX);
 
     bql_unlock();
 
@@ -2767,6 +3066,8 @@ out_unlock:
 static void migration_completion_postcopy(MigrationState *s)
 {
     trace_migration_completion_postcopy_end();
+    migration_trace_postcopy_timeline(s, "completion-postcopy-begin",
+                                      UINT64_MAX);
 
     bql_lock();
     qemu_savevm_state_complete_postcopy(s->to_dst_file);
@@ -2781,6 +3082,8 @@ static void migration_completion_postcopy(MigrationState *s)
     }
 
     trace_migration_completion_postcopy_end_after_complete();
+    migration_trace_postcopy_timeline(s, "completion-postcopy-done",
+                                      UINT64_MAX);
 }
 
 /**
@@ -2797,6 +3100,20 @@ static void migration_completion(MigrationState *s)
     if (s->state == MIGRATION_STATUS_ACTIVE) {
         ret = migration_completion_precopy(s);
     } else if (s->state == MIGRATION_STATUS_POSTCOPY_ACTIVE) {
+        migration_trace_postcopy_timeline(s, "completion-enter",
+                                          UINT64_MAX);
+        if (migrate_cxl_hybrid()) {
+            ret = migration_completion_prepare_cxl_postcopy(s, &local_err);
+            if (ret < 0) {
+                if (local_err) {
+                    migrate_error_propagate(s, error_copy(local_err));
+                    error_report_err(local_err);
+                }
+                goto fail;
+            }
+            migration_trace_postcopy_timeline(s, "completion-prepare-done",
+                                              UINT64_MAX);
+        }
         migration_completion_postcopy(s);
     } else {
         ret = -1;
@@ -3049,8 +3366,12 @@ static MigThrError migration_detect_error(MigrationState *s)
      * be NULL when postcopy preempt is not enabled.
      */
     ret = qemu_file_get_error_obj_any(s->to_dst_file,
-                                      s->postcopy_qemufile_src,
+                                      s->mapped_ram_file,
                                       &local_error);
+    if (!ret && s->postcopy_qemufile_src) {
+        ret = qemu_file_get_error_obj(s->postcopy_qemufile_src,
+                                      &local_error);
+    }
     if (!ret) {
         /* Everything is fine */
         assert(!local_error);
@@ -3102,6 +3423,7 @@ static void migration_completion_end(MigrationState *s)
 
     migrate_set_state(&s->state, s->state,
                       MIGRATION_STATUS_COMPLETED);
+    migration_trace_postcopy_timeline(s, "completed", UINT64_MAX);
     bql_unlock();
 }
 
@@ -3198,6 +3520,31 @@ typedef enum {
     MIG_ITERATE_BREAK,          /* Break the loop */
 } MigIterateState;
 
+static MigIterateState migration_wait_for_postcopy_package_loaded(
+    MigrationState *s, uint64_t pending_size)
+{
+    migration_trace_postcopy_timeline(s, "device-wait-early-resume",
+                                      pending_size);
+
+    while (!s->postcopy_package_loaded && !migrate_has_error(s)) {
+        qemu_sem_timedwait(&s->rp_state.rp_sem,
+                           POSTCOPY_PACKAGE_WAIT_POLL_MS);
+    }
+
+    if (!s->postcopy_package_loaded) {
+        return MIG_ITERATE_RESUME;
+    }
+
+    qemu_event_wait(&s->postcopy_package_loaded_event);
+    migration_trace_postcopy_timeline(s, "device-wait-done",
+                                      pending_size);
+    migrate_set_state(&s->state, MIGRATION_STATUS_POSTCOPY_DEVICE,
+                      MIGRATION_STATUS_POSTCOPY_ACTIVE);
+    migration_trace_postcopy_timeline(s, "state-postcopy-active",
+                                      pending_size);
+    return MIG_ITERATE_SKIP;
+}
+
 /*
  * Return true if continue to the next iteration directly, false
  * otherwise.
@@ -3206,10 +3553,16 @@ static MigIterateState migration_iteration_run(MigrationState *s)
 {
     uint64_t must_precopy, can_postcopy, pending_size;
     Error *local_err = NULL;
+    uint64_t iter_ram_pages_begin = ram_get_total_transferred_pages();
     bool in_postcopy = (s->state == MIGRATION_STATUS_POSTCOPY_DEVICE ||
                         s->state == MIGRATION_STATUS_POSTCOPY_ACTIVE);
     bool can_switchover = migration_can_switchover(s);
     bool complete_ready;
+    MigIterateState ret = MIG_ITERATE_RESUME;
+
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_iteration_snapshot_begin(iter_ram_pages_begin);
+    }
 
     /* Fast path - get the estimated amount of pending data */
     qemu_savevm_state_pending_estimate(&must_precopy, &can_postcopy);
@@ -3217,12 +3570,25 @@ static MigIterateState migration_iteration_run(MigrationState *s)
     trace_migrate_pending_estimate(pending_size, must_precopy, can_postcopy);
 
     if (in_postcopy) {
+        migration_trace_postcopy_timeline(s, "iterate", pending_size);
         /*
          * Iterate in postcopy until all pending data flushed.  Note that
          * postcopy completion doesn't rely on can_switchover, because when
          * POSTCOPY_ACTIVE it means switchover already happened.
          */
         complete_ready = !pending_size;
+        if (migration_postcopy_device_should_wait_for_package_loaded(
+                s->state, migrate_cxl_hybrid(),
+                s->postcopy_package_loaded)) {
+            ret = migration_wait_for_postcopy_package_loaded(s,
+                                                             pending_size);
+            if (ret != MIG_ITERATE_RESUME) {
+                goto out;
+            }
+        }
+        if (ret == MIG_ITERATE_RESUME && migrate_has_error(s)) {
+            goto out;
+        }
         if (s->state == MIGRATION_STATUS_POSTCOPY_DEVICE &&
             (s->postcopy_package_loaded || complete_ready)) {
             /*
@@ -3231,9 +3597,15 @@ static MigIterateState migration_iteration_run(MigrationState *s)
              * completion, we need to wait for destination to load the postcopy
              * package before actually completing.
              */
+            migration_trace_postcopy_timeline(s, "device-ready",
+                                              pending_size);
             qemu_event_wait(&s->postcopy_package_loaded_event);
+            migration_trace_postcopy_timeline(s, "device-wait-done",
+                                              pending_size);
             migrate_set_state(&s->state, MIGRATION_STATUS_POSTCOPY_DEVICE,
                               MIGRATION_STATUS_POSTCOPY_ACTIVE);
+            migration_trace_postcopy_timeline(s, "state-postcopy-active",
+                                              pending_size);
         }
     } else {
         /*
@@ -3249,6 +3621,8 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                                         can_postcopy);
         }
 
+        migration_cxl_hybrid_should_start_postcopy(s, pending_size);
+
         /* Should we switch to postcopy now? */
         if (must_precopy <= s->threshold_size &&
             can_switchover && qatomic_read(&s->start_postcopy)) {
@@ -3256,7 +3630,8 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                 migrate_error_propagate(s, error_copy(local_err));
                 error_report_err(local_err);
             }
-            return MIG_ITERATE_SKIP;
+            ret = MIG_ITERATE_SKIP;
+            goto out;
         }
 
         /*
@@ -3272,12 +3647,27 @@ static MigIterateState migration_iteration_run(MigrationState *s)
     if (complete_ready) {
         trace_migration_thread_low_pending(pending_size);
         migration_completion(s);
-        return MIG_ITERATE_BREAK;
+        ret = MIG_ITERATE_BREAK;
+        goto out;
     }
 
     /* Just another iteration step */
     qemu_savevm_state_iterate(s->to_dst_file, in_postcopy);
-    return MIG_ITERATE_RESUME;
+    if (in_postcopy && migrate_cxl_hybrid() &&
+        cxl_hybrid_phase() == CXL_HYBRID_PHASE_POSTCOPY_WARM) {
+        if (cxl_hybrid_warm_push_iteration(s, &local_err) < 0) {
+            migrate_error_propagate(s, error_copy(local_err));
+            error_report_err(local_err);
+            ret = MIG_ITERATE_BREAK;
+            goto out;
+        }
+    }
+
+out:
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_iteration_snapshot_end(ram_get_total_transferred_pages());
+    }
+    return ret;
 }
 
 static void migration_iteration_finish(MigrationState *s)
@@ -3412,6 +3802,36 @@ void migration_consume_urgent_request(void)
     qemu_sem_wait(&migrate_get_current()->rate_limit_sem);
 }
 
+void migration_mark_cxl_hybrid_ready_urgent(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    if (!s) {
+        return;
+    }
+
+    qatomic_set(&s->cxl_hybrid_ready_urgent, true);
+    migration_make_urgent_request();
+}
+
+bool migration_cxl_hybrid_ready_urgent(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s && qatomic_read(&s->cxl_hybrid_ready_urgent);
+}
+
+void migration_clear_cxl_hybrid_ready_urgent(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    if (!s) {
+        return;
+    }
+
+    qatomic_set(&s->cxl_hybrid_ready_urgent, false);
+}
+
 /* Returns true if the rate limiting was broken by an urgent request */
 bool migration_rate_limit(void)
 {
@@ -3501,6 +3921,11 @@ static void *migration_thread(void *opaque)
     rcu_register_thread();
 
     update_iteration_initial_status(s);
+
+    if (migration_setup_outgoing_ram_backing(s, &local_err) != 0) {
+        migrate_error_propagate(s, local_err);
+        goto out;
+    }
 
     if (!multifd_send_setup()) {
         goto out;
@@ -3648,6 +4073,10 @@ static void *bg_migration_thread(void *opaque)
     object_unref(OBJECT(s->bioc));
 
     update_iteration_initial_status(s);
+
+    if (migration_setup_outgoing_ram_backing(s, &local_err) != 0) {
+        goto fail;
+    }
 
     /*
      * Prepare for tracking memory writes with UFFD-WP - populate
@@ -3896,12 +4325,35 @@ static bool migration_object_check(MigrationState *ms, Error **errp)
 {
     /* Assuming all off */
     bool old_caps[MIGRATION_CAPABILITY__MAX] = { 0 };
+    MigrationIncomingState *mis = migration_incoming_get_current();
 
     if (!migrate_params_check(&ms->parameters, errp)) {
         return false;
     }
 
-    return migrate_caps_check(old_caps, ms->capabilities, errp);
+    if (!migrate_caps_check(old_caps, ms->capabilities, errp)) {
+        return false;
+    }
+
+    if (migrate_cxl_hybrid()) {
+        if (!migrate_cxl_path_enabled()) {
+            error_setg(errp, "x-cxl-hybrid requires cxl-path");
+            return false;
+        }
+
+        if (!migrate_cxl_shared_backing()) {
+            error_setg(errp,
+                       "x-cxl-hybrid requires x-cxl-shared-backing=true");
+            return false;
+        }
+
+        if (!postcopy_ram_supported_by_host(mis, errp)) {
+            error_prepend(errp, "x-cxl-hybrid requires postcopy support: ");
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static const TypeInfo migration_type = {

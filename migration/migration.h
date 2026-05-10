@@ -92,6 +92,11 @@ typedef enum {
 /* State for the incoming migration */
 struct MigrationIncomingState {
     QEMUFile *from_src_file;
+    /*
+     * Optional mapped-ram backing file. When NULL, mapped-ram uses the
+     * main migration stream directly.
+     */
+    QEMUFile *mapped_ram_file;
     /* Previously received RAM's RAMBlock pointer */
     RAMBlock *last_recv_block[RAM_CHANNEL_MAX];
     /* A hook to allow cleanup at the end of incoming migration */
@@ -280,6 +285,11 @@ struct MigrationState {
     QemuThread thread;
     /* Protected by qemu_file_lock */
     QEMUFile *to_dst_file;
+    /*
+     * Optional mapped-ram backing file. When NULL, mapped-ram uses the
+     * main migration stream directly.
+     */
+    QEMUFile *mapped_ram_file;
     /* Postcopy specific transfer channel */
     QEMUFile *postcopy_qemufile_src;
     /*
@@ -336,6 +346,8 @@ struct MigrationState {
          * be cleared in the rp_thread!
          */
         bool          rp_thread_created;
+        /* Set by the return-path thread immediately before it exits. */
+        bool          rp_thread_exited;
         /*
          * Used to synchronize between migration main thread and return
          * path thread.  The migration thread can wait() on this sem, while
@@ -359,6 +371,9 @@ struct MigrationState {
     /* Timestamp when VM is down (ms) to migrate the last stuff */
     int64_t downtime_start;
     int64_t downtime;
+    bool downtime_set;
+    int64_t stop_to_start_time;
+    bool stop_to_start_time_set;
     int64_t expected_downtime;
     bool capabilities[MIGRATION_CAPABILITY__MAX];
     int64_t setup_time;
@@ -373,6 +388,11 @@ struct MigrationState {
 
     /* Flag set once the migration has been asked to enter postcopy */
     bool start_postcopy;
+    /* Flag set when start_postcopy was requested by hybrid policy */
+    bool start_postcopy_auto;
+    uint64_t cxl_hybrid_iteration;
+    uint64_t cxl_hybrid_prev_remaining;
+    int64_t cxl_hybrid_precopy_start_ms;
 
     /* Flag set once the migration thread is running (and needs joining) */
     bool migration_thread_running;
@@ -508,6 +528,7 @@ struct MigrationState {
      * switchover has been received.
      */
     bool switchover_acked;
+    bool cxl_hybrid_ready_urgent;
     /* Is this a rdma migration */
     bool rdma_migration;
 
@@ -563,6 +584,7 @@ int migrate_send_rp_message_req_pages(MigrationIncomingState *mis,
 void migrate_send_rp_recv_bitmap(MigrationIncomingState *mis,
                                  char *block_name);
 void migrate_send_rp_resume_ack(MigrationIncomingState *mis, uint32_t value);
+void migrate_send_rp_dst_started(MigrationIncomingState *mis);
 int migrate_send_rp_switchover_ack(MigrationIncomingState *mis);
 
 void dirty_bitmap_mig_before_vm_start(void);
@@ -579,6 +601,14 @@ int foreach_not_ignored_block(RAMBlockIterFunc func, void *opaque);
 
 void migration_make_urgent_request(void);
 void migration_consume_urgent_request(void);
+void migration_mark_cxl_hybrid_ready_urgent(void);
+bool migration_cxl_hybrid_ready_urgent(void);
+void migration_clear_cxl_hybrid_ready_urgent(void);
+void migration_downtime_reset(MigrationState *s);
+void migration_record_downtime(MigrationState *s, int64_t downtime_ms);
+void migration_stop_to_start_reset(MigrationState *s);
+void migration_record_stop_to_start(MigrationState *s,
+                                    int64_t stop_to_start_ms);
 bool migration_rate_limit(void);
 void migration_bh_schedule(QEMUBHFunc *cb, void *opaque);
 void migration_cancel(void);

@@ -36,6 +36,7 @@ bool migrate_multifd(void);
 bool migrate_pause_before_switchover(void);
 bool migrate_postcopy_blocktime(void);
 bool migrate_postcopy_preempt(void);
+bool migrate_cxl_hybrid(void);
 bool migrate_rdma_pin_all(void);
 bool migrate_release_ram(void);
 bool migrate_return_path(void);
@@ -87,6 +88,26 @@ const char *migrate_tls_creds(void);
 const char *migrate_tls_hostname(void);
 uint64_t migrate_xbzrle_cache_size(void);
 ZeroPageDetection migrate_zero_page_detection(void);
+const char *migrate_cxl_path(void);
+bool migrate_cxl_path_enabled(void);
+uint64_t migrate_cxl_switch_dirty_threshold(void);
+uint32_t migrate_cxl_switch_max_iters(void);
+uint64_t migrate_cxl_switch_max_precopy_ms(void);
+uint64_t migrate_cxl_switch_min_remaining(void);
+uint64_t migrate_cxl_switch_gain_floor(void);
+bool migrate_cxl_brake_enable(void);
+uint64_t migrate_cxl_brake_remap_granule(void);
+uint64_t migrate_cxl_prefetch_rate(void);
+uint64_t migrate_cxl_prefetch_heat_window_ms(void);
+uint32_t migrate_cxl_prefetch_batch_pages(void);
+uint64_t migrate_cxl_dst_cache_size(void);
+bool migrate_cxl_shared_backing(void);
+bool migrate_cxl_shared_bitmap(void);
+CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void);
+bool migrate_cxl_fault_resolve_copy(void);
+bool migrate_cxl_fault_resolve_region_remap(void);
+bool migrate_cxl_fault_resolve_region_remap_fallback_copy(void);
+bool migrate_cxl_fault_resolve_uses_region(void);
 
 /* parameters helpers */
 

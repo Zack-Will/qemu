@@ -174,6 +174,10 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
                 monitor_printf(mon, ", down=%" PRIu64,
                                info->downtime);
             }
+            if (info->has_stop_to_start_time) {
+                monitor_printf(mon, ", stop_to_start=%" PRIu64,
+                               info->stop_to_start_time);
+            }
             monitor_printf(mon, "\n");
         }
     }
@@ -450,6 +454,12 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
                                MIGRATION_PARAMETER_DIRECT_IO),
                            params->direct_io ? "on" : "off");
         }
+
+        assert(params->has_x_cxl_fault_resolve_mode);
+        monitor_printf(mon, "%s: %s\n",
+            MigrationParameter_str(
+                MIGRATION_PARAMETER_X_CXL_FAULT_RESOLVE_MODE),
+            CXLHybridFaultResolveMode_str(params->x_cxl_fault_resolve_mode));
 
         assert(params->has_cpr_exec_command);
         monitor_print_cpr_exec_command(mon, params->cpr_exec_command);
@@ -733,6 +743,11 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
     case MIGRATION_PARAMETER_DIRECT_IO:
         p->has_direct_io = true;
         visit_type_bool(v, param, &p->direct_io, &err);
+        break;
+    case MIGRATION_PARAMETER_X_CXL_FAULT_RESOLVE_MODE:
+        p->has_x_cxl_fault_resolve_mode = true;
+        visit_type_CXLHybridFaultResolveMode(
+            v, param, &p->x_cxl_fault_resolve_mode, &err);
         break;
     case MIGRATION_PARAMETER_CPR_EXEC_COMMAND: {
         /*

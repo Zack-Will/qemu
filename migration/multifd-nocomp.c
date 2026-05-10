@@ -14,6 +14,7 @@
 #include "system/ramblock.h"
 #include "exec/target_page.h"
 #include "file.h"
+#include "cxl.h"
 #include "migration-stats.h"
 #include "multifd.h"
 #include "multifd-colo.h"
@@ -165,6 +166,9 @@ static int multifd_nocomp_recv(MultiFDRecvParams *p, Error **errp)
     uint32_t flags;
 
     if (migrate_mapped_ram()) {
+        if (cxl_use_mapped_ram_backing()) {
+            return multifd_cxl_recv_data(p, errp);
+        }
         return multifd_file_recv_data(p, errp);
     }
 

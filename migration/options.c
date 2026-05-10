@@ -70,6 +70,20 @@
  * that page requests can still exceed this limit.
  */
 #define DEFAULT_MIGRATE_MAX_POSTCOPY_BANDWIDTH 0
+#define DEFAULT_MIGRATE_X_CXL_SWITCH_DIRTY_THRESHOLD 0
+#define DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_ITERS 0
+#define DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_PRECOPY_MS 0
+#define DEFAULT_MIGRATE_X_CXL_SWITCH_MIN_REMAINING 0
+#define DEFAULT_MIGRATE_X_CXL_SWITCH_GAIN_FLOOR 0
+#define DEFAULT_MIGRATE_X_CXL_BRAKE_ENABLE false
+#define DEFAULT_MIGRATE_X_CXL_BRAKE_REMAP_GRANULE 0
+#define DEFAULT_MIGRATE_X_CXL_PREFETCH_RATE 0
+#define DEFAULT_MIGRATE_X_CXL_PREFETCH_HEAT_WINDOW_MS 0
+#define DEFAULT_MIGRATE_X_CXL_PREFETCH_BATCH_PAGES 0
+#define DEFAULT_MIGRATE_X_CXL_DST_CACHE_SIZE 0
+#define DEFAULT_MIGRATE_X_CXL_SHARED_BACKING false
+#define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
+    CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP
 
 /*
  * Parameters for self_announce_delay giving a stream of RARP/ARP
@@ -183,7 +197,46 @@ const Property migration_properties[] = {
     DEFINE_PROP_ZERO_PAGE_DETECTION("zero-page-detection", MigrationState,
                        parameters.zero_page_detection,
                        ZERO_PAGE_DETECTION_MULTIFD),
-
+    DEFINE_PROP_UINT64("x-cxl-switch-dirty-threshold", MigrationState,
+                      parameters.x_cxl_switch_dirty_threshold,
+                      DEFAULT_MIGRATE_X_CXL_SWITCH_DIRTY_THRESHOLD),
+    DEFINE_PROP_UINT32("x-cxl-switch-max-iters", MigrationState,
+                      parameters.x_cxl_switch_max_iters,
+                      DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_ITERS),
+    DEFINE_PROP_UINT64("x-cxl-switch-max-precopy-ms", MigrationState,
+                      parameters.x_cxl_switch_max_precopy_ms,
+                      DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_PRECOPY_MS),
+    DEFINE_PROP_SIZE("x-cxl-switch-min-remaining", MigrationState,
+                      parameters.x_cxl_switch_min_remaining,
+                      DEFAULT_MIGRATE_X_CXL_SWITCH_MIN_REMAINING),
+    DEFINE_PROP_SIZE("x-cxl-switch-gain-floor", MigrationState,
+                      parameters.x_cxl_switch_gain_floor,
+                      DEFAULT_MIGRATE_X_CXL_SWITCH_GAIN_FLOOR),
+    DEFINE_PROP_BOOL("x-cxl-brake-enable", MigrationState,
+                      parameters.x_cxl_brake_enable,
+                      DEFAULT_MIGRATE_X_CXL_BRAKE_ENABLE),
+    DEFINE_PROP_SIZE("x-cxl-brake-remap-granule", MigrationState,
+                      parameters.x_cxl_brake_remap_granule,
+                      DEFAULT_MIGRATE_X_CXL_BRAKE_REMAP_GRANULE),
+    DEFINE_PROP_SIZE("x-cxl-prefetch-rate", MigrationState,
+                      parameters.x_cxl_prefetch_rate,
+                      DEFAULT_MIGRATE_X_CXL_PREFETCH_RATE),
+    DEFINE_PROP_UINT64("x-cxl-prefetch-heat-window-ms", MigrationState,
+                      parameters.x_cxl_prefetch_heat_window_ms,
+                      DEFAULT_MIGRATE_X_CXL_PREFETCH_HEAT_WINDOW_MS),
+    DEFINE_PROP_UINT32("x-cxl-prefetch-batch-pages", MigrationState,
+                      parameters.x_cxl_prefetch_batch_pages,
+                      DEFAULT_MIGRATE_X_CXL_PREFETCH_BATCH_PAGES),
+    DEFINE_PROP_SIZE("x-cxl-dst-cache-size", MigrationState,
+                      parameters.x_cxl_dst_cache_size,
+                      DEFAULT_MIGRATE_X_CXL_DST_CACHE_SIZE),
+    DEFINE_PROP_BOOL("x-cxl-shared-backing", MigrationState,
+                      parameters.x_cxl_shared_backing,
+                      DEFAULT_MIGRATE_X_CXL_SHARED_BACKING),
+    DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE("x-cxl-fault-resolve-mode",
+                      MigrationState,
+                      parameters.x_cxl_fault_resolve_mode,
+                      DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE),
     /* Migration capabilities */
     DEFINE_PROP_MIG_CAP("x-xbzrle", MIGRATION_CAPABILITY_XBZRLE),
     DEFINE_PROP_MIG_CAP("x-rdma-pin-all", MIGRATION_CAPABILITY_RDMA_PIN_ALL),
@@ -208,6 +261,7 @@ const Property migration_properties[] = {
                         MIGRATION_CAPABILITY_SWITCHOVER_ACK),
     DEFINE_PROP_MIG_CAP("x-dirty-limit", MIGRATION_CAPABILITY_DIRTY_LIMIT),
     DEFINE_PROP_MIG_CAP("mapped-ram", MIGRATION_CAPABILITY_MAPPED_RAM),
+    DEFINE_PROP_MIG_CAP("x-cxl-hybrid", MIGRATION_CAPABILITY_X_CXL_HYBRID),
     DEFINE_PROP_MIG_CAP("x-ignore-shared",
                         MIGRATION_CAPABILITY_X_IGNORE_SHARED),
 };
@@ -385,6 +439,13 @@ bool migrate_postcopy_preempt(void)
     return s->capabilities[MIGRATION_CAPABILITY_POSTCOPY_PREEMPT];
 }
 
+bool migrate_cxl_hybrid(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->capabilities[MIGRATION_CAPABILITY_X_CXL_HYBRID];
+}
+
 bool migrate_postcopy_ram(void)
 {
     MigrationState *s = migrate_get_current();
@@ -439,6 +500,13 @@ bool migrate_zero_copy_send(void)
     MigrationState *s = migrate_get_current();
 
     return s->capabilities[MIGRATION_CAPABILITY_ZERO_COPY_SEND];
+}
+
+bool migrate_cxl_path_enabled(void)
+{
+    const char *path = migrate_cxl_path();
+
+    return path && *path;
 }
 
 /* pseudo capabilities */
@@ -723,9 +791,27 @@ bool migrate_caps_check(bool *old_caps, bool *new_caps, Error **errp)
             return false;
         }
 
-        if (new_caps[MIGRATION_CAPABILITY_POSTCOPY_RAM]) {
+        if (new_caps[MIGRATION_CAPABILITY_POSTCOPY_RAM] &&
+            !new_caps[MIGRATION_CAPABILITY_X_CXL_HYBRID]) {
             error_setg(errp,
                        "Mapped-ram migration is incompatible with postcopy");
+            return false;
+        }
+    }
+
+    if (new_caps[MIGRATION_CAPABILITY_X_CXL_HYBRID]) {
+        if (!new_caps[MIGRATION_CAPABILITY_MAPPED_RAM]) {
+            error_setg(errp, "x-cxl-hybrid requires mapped-ram");
+            return false;
+        }
+
+        if (!new_caps[MIGRATION_CAPABILITY_POSTCOPY_RAM]) {
+            error_setg(errp, "x-cxl-hybrid requires postcopy-ram");
+            return false;
+        }
+
+        if (new_caps[MIGRATION_CAPABILITY_X_IGNORE_SHARED]) {
+            error_setg(errp, "x-cxl-hybrid is not compatible with ignore-shared");
             return false;
         }
     }
@@ -881,6 +967,126 @@ uint64_t migrate_max_postcopy_bandwidth(void)
     return s->parameters.max_postcopy_bandwidth;
 }
 
+uint64_t migrate_cxl_switch_dirty_threshold(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_switch_dirty_threshold;
+}
+
+uint32_t migrate_cxl_switch_max_iters(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_switch_max_iters;
+}
+
+uint64_t migrate_cxl_switch_max_precopy_ms(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_switch_max_precopy_ms;
+}
+
+uint64_t migrate_cxl_switch_min_remaining(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_switch_min_remaining;
+}
+
+uint64_t migrate_cxl_switch_gain_floor(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_switch_gain_floor;
+}
+
+bool migrate_cxl_brake_enable(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_brake_enable;
+}
+
+uint64_t migrate_cxl_brake_remap_granule(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_brake_remap_granule;
+}
+
+uint64_t migrate_cxl_prefetch_rate(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_prefetch_rate;
+}
+
+uint64_t migrate_cxl_prefetch_heat_window_ms(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_prefetch_heat_window_ms;
+}
+
+uint32_t migrate_cxl_prefetch_batch_pages(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_prefetch_batch_pages;
+}
+
+uint64_t migrate_cxl_dst_cache_size(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_dst_cache_size;
+}
+
+bool migrate_cxl_shared_backing(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_shared_backing;
+}
+
+bool migrate_cxl_shared_bitmap(void)
+{
+    return migrate_cxl_shared_backing();
+}
+
+CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_fault_resolve_mode;
+}
+
+bool migrate_cxl_fault_resolve_copy(void)
+{
+    return migrate_cxl_fault_resolve_mode() ==
+           CXL_HYBRID_FAULT_RESOLVE_MODE_COPY;
+}
+
+bool migrate_cxl_fault_resolve_region_remap(void)
+{
+    return migrate_cxl_fault_resolve_mode() ==
+           CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP;
+}
+
+bool migrate_cxl_fault_resolve_region_remap_fallback_copy(void)
+{
+    return migrate_cxl_fault_resolve_mode() ==
+           CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP_FALLBACK_COPY;
+}
+
+bool migrate_cxl_fault_resolve_uses_region(void)
+{
+    return migrate_cxl_fault_resolve_region_remap() ||
+           migrate_cxl_fault_resolve_region_remap_fallback_copy();
+}
+
 MigMode migrate_mode(void)
 {
     MigMode mode = cpr_get_incoming_mode();
@@ -953,6 +1159,17 @@ const char *migrate_tls_creds(void)
 
     if (*s->parameters.tls_creds->u.s) {
         return s->parameters.tls_creds->u.s;
+    }
+
+    return NULL;
+}
+
+const char *migrate_cxl_path(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    if (*s->parameters.cxl_path->u.s) {
+        return s->parameters.cxl_path->u.s;
     }
 
     return NULL;
@@ -1048,7 +1265,7 @@ static void tls_opt_to_str(StrOrNull *opt)
  */
 static void migrate_mark_all_params_present(MigrationParameters *p)
 {
-    int len, n_str_args = 3; /* tls-creds, tls-hostname, tls-authz */
+    int len, n_str_args = 4; /* tls-*, cxl-path */
     bool *has_fields[] = {
         &p->has_throttle_trigger_threshold, &p->has_cpu_throttle_initial,
         &p->has_cpu_throttle_increment, &p->has_cpu_throttle_tailslow,
@@ -1062,6 +1279,19 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_announce_step, &p->has_block_bitmap_mapping,
         &p->has_x_vcpu_dirty_limit_period, &p->has_vcpu_dirty_limit,
         &p->has_mode, &p->has_zero_page_detection, &p->has_direct_io,
+        &p->has_x_cxl_switch_dirty_threshold,
+        &p->has_x_cxl_switch_max_iters,
+        &p->has_x_cxl_switch_max_precopy_ms,
+        &p->has_x_cxl_switch_min_remaining,
+        &p->has_x_cxl_switch_gain_floor,
+        &p->has_x_cxl_brake_enable,
+        &p->has_x_cxl_brake_remap_granule,
+        &p->has_x_cxl_prefetch_rate,
+        &p->has_x_cxl_prefetch_heat_window_ms,
+        &p->has_x_cxl_prefetch_batch_pages,
+        &p->has_x_cxl_dst_cache_size,
+        &p->has_x_cxl_shared_backing,
+        &p->has_x_cxl_fault_resolve_mode,
         &p->has_cpr_exec_command,
     };
 
@@ -1095,6 +1325,8 @@ MigrationParameters *qmp_query_migrate_parameters(Error **errp)
 
 void migrate_params_init(MigrationParameters *params)
 {
+    params->x_cxl_fault_resolve_mode =
+        DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
     migrate_mark_all_params_present(params);
 }
 
@@ -1273,6 +1505,21 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->x_cxl_prefetch_batch_pages > INT32_MAX) {
+        error_setg(errp,
+                   "Option x-cxl-prefetch-batch-pages expects a value no larger than %d",
+                   INT32_MAX);
+        return false;
+    }
+
+    if (params->x_cxl_fault_resolve_mode < 0 ||
+        params->x_cxl_fault_resolve_mode >=
+        CXL_HYBRID_FAULT_RESOLVE_MODE__MAX) {
+        error_setg(errp, "Invalid x-cxl-fault-resolve-mode value %d",
+                   params->x_cxl_fault_resolve_mode);
+        return false;
+    }
+
     return true;
 }
 
@@ -1396,6 +1643,58 @@ static void migrate_params_test_apply(MigrationParameters *params,
 
     if (params->has_direct_io) {
         dest->direct_io = params->direct_io;
+    }
+
+    if (params->cxl_path) {
+        dest->cxl_path = QAPI_CLONE(StrOrNull, params->cxl_path);
+    } else {
+        dest->cxl_path = NULL;
+    }
+
+    if (params->has_x_cxl_switch_dirty_threshold) {
+        dest->x_cxl_switch_dirty_threshold =
+            params->x_cxl_switch_dirty_threshold;
+    }
+    if (params->has_x_cxl_switch_max_iters) {
+        dest->x_cxl_switch_max_iters = params->x_cxl_switch_max_iters;
+    }
+    if (params->has_x_cxl_switch_max_precopy_ms) {
+        dest->x_cxl_switch_max_precopy_ms =
+            params->x_cxl_switch_max_precopy_ms;
+    }
+    if (params->has_x_cxl_switch_min_remaining) {
+        dest->x_cxl_switch_min_remaining =
+            params->x_cxl_switch_min_remaining;
+    }
+    if (params->has_x_cxl_switch_gain_floor) {
+        dest->x_cxl_switch_gain_floor = params->x_cxl_switch_gain_floor;
+    }
+    if (params->has_x_cxl_brake_enable) {
+        dest->x_cxl_brake_enable = params->x_cxl_brake_enable;
+    }
+    if (params->has_x_cxl_brake_remap_granule) {
+        dest->x_cxl_brake_remap_granule =
+            params->x_cxl_brake_remap_granule;
+    }
+    if (params->has_x_cxl_prefetch_rate) {
+        dest->x_cxl_prefetch_rate = params->x_cxl_prefetch_rate;
+    }
+    if (params->has_x_cxl_prefetch_heat_window_ms) {
+        dest->x_cxl_prefetch_heat_window_ms =
+            params->x_cxl_prefetch_heat_window_ms;
+    }
+    if (params->has_x_cxl_prefetch_batch_pages) {
+        dest->x_cxl_prefetch_batch_pages =
+            params->x_cxl_prefetch_batch_pages;
+    }
+    if (params->has_x_cxl_dst_cache_size) {
+        dest->x_cxl_dst_cache_size = params->x_cxl_dst_cache_size;
+    }
+    if (params->has_x_cxl_shared_backing) {
+        dest->x_cxl_shared_backing = params->x_cxl_shared_backing;
+    }
+    if (params->has_x_cxl_fault_resolve_mode) {
+        dest->x_cxl_fault_resolve_mode = params->x_cxl_fault_resolve_mode;
     }
 
     if (params->has_cpr_exec_command) {
@@ -1522,6 +1821,59 @@ static void migrate_params_apply(MigrationParameters *params)
 
     if (params->has_direct_io) {
         s->parameters.direct_io = params->direct_io;
+    }
+
+    if (params->cxl_path) {
+        qapi_free_StrOrNull(s->parameters.cxl_path);
+        s->parameters.cxl_path = QAPI_CLONE(StrOrNull, params->cxl_path);
+    }
+
+    if (params->has_x_cxl_switch_dirty_threshold) {
+        s->parameters.x_cxl_switch_dirty_threshold =
+            params->x_cxl_switch_dirty_threshold;
+    }
+    if (params->has_x_cxl_switch_max_iters) {
+        s->parameters.x_cxl_switch_max_iters = params->x_cxl_switch_max_iters;
+    }
+    if (params->has_x_cxl_switch_max_precopy_ms) {
+        s->parameters.x_cxl_switch_max_precopy_ms =
+            params->x_cxl_switch_max_precopy_ms;
+    }
+    if (params->has_x_cxl_switch_min_remaining) {
+        s->parameters.x_cxl_switch_min_remaining =
+            params->x_cxl_switch_min_remaining;
+    }
+    if (params->has_x_cxl_switch_gain_floor) {
+        s->parameters.x_cxl_switch_gain_floor =
+            params->x_cxl_switch_gain_floor;
+    }
+    if (params->has_x_cxl_brake_enable) {
+        s->parameters.x_cxl_brake_enable = params->x_cxl_brake_enable;
+    }
+    if (params->has_x_cxl_brake_remap_granule) {
+        s->parameters.x_cxl_brake_remap_granule =
+            params->x_cxl_brake_remap_granule;
+    }
+    if (params->has_x_cxl_prefetch_rate) {
+        s->parameters.x_cxl_prefetch_rate = params->x_cxl_prefetch_rate;
+    }
+    if (params->has_x_cxl_prefetch_heat_window_ms) {
+        s->parameters.x_cxl_prefetch_heat_window_ms =
+            params->x_cxl_prefetch_heat_window_ms;
+    }
+    if (params->has_x_cxl_prefetch_batch_pages) {
+        s->parameters.x_cxl_prefetch_batch_pages =
+            params->x_cxl_prefetch_batch_pages;
+    }
+    if (params->has_x_cxl_dst_cache_size) {
+        s->parameters.x_cxl_dst_cache_size = params->x_cxl_dst_cache_size;
+    }
+    if (params->has_x_cxl_shared_backing) {
+        s->parameters.x_cxl_shared_backing = params->x_cxl_shared_backing;
+    }
+    if (params->has_x_cxl_fault_resolve_mode) {
+        s->parameters.x_cxl_fault_resolve_mode =
+            params->x_cxl_fault_resolve_mode;
     }
 
     if (params->has_cpr_exec_command) {

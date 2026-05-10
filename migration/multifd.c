@@ -20,6 +20,7 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "file.h"
+#include "cxl.h"
 #include "migration/misc.h"
 #include "migration.h"
 #include "migration-stats.h"
@@ -479,6 +480,10 @@ static void multifd_send_terminate_threads(void)
      */
     qatomic_set(&multifd_send_state->exiting, 1);
 
+    if (cxl_use_mapped_ram_backing()) {
+        cxl_sender_access_shutdown();
+    }
+
     /*
      * Firstly, kick all threads out; no matter whether they are just idle,
      * or blocked in an IO system call.
@@ -555,7 +560,11 @@ static bool multifd_send_cleanup_channel(MultiFDSendParams *p, Error **errp)
 
 static void multifd_send_cleanup_state(void)
 {
-    file_cleanup_outgoing_migration();
+    if (cxl_use_mapped_ram_backing()) {
+        cxl_cleanup_outgoing_migration();
+    } else {
+        file_cleanup_outgoing_migration();
+    }
     socket_cleanup_outgoing_migration();
     multifd_device_state_send_cleanup();
     qemu_sem_destroy(&multifd_send_state->channels_created);
@@ -571,7 +580,7 @@ void multifd_send_shutdown(void)
 {
     int i;
 
-    if (!migrate_multifd()) {
+    if (!migrate_multifd() || !multifd_send_state) {
         return;
     }
 
@@ -658,6 +667,7 @@ static void *multifd_send_thread(void *opaque)
     Error *local_err = NULL;
     int ret = 0;
     bool use_packets = multifd_use_packets();
+    bool cxl_access_held = false;
 
     trace_multifd_send_thread_start(p->id);
     rcu_register_thread();
@@ -690,6 +700,14 @@ static void *multifd_send_thread(void *opaque)
             p->iovs_num = 0;
             assert(!multifd_payload_empty(p->data));
 
+            if (migrate_mapped_ram() && cxl_use_mapped_ram_backing() &&
+                !is_device_state) {
+                cxl_access_held = cxl_sender_access_begin();
+                if (!cxl_access_held && multifd_send_should_exit()) {
+                    break;
+                }
+            }
+
             if (is_device_state) {
                 multifd_device_state_send_prepare(p);
 
@@ -698,6 +716,10 @@ static void *multifd_send_thread(void *opaque)
             } else {
                 ret = multifd_send_state->ops->send_prepare(p, &local_err);
                 if (ret != 0) {
+                    if (cxl_access_held) {
+                        cxl_sender_access_end();
+                        cxl_access_held = false;
+                    }
                     break;
                 }
             }
@@ -712,8 +734,13 @@ static void *multifd_send_thread(void *opaque)
             if (migrate_mapped_ram()) {
                 assert(!is_device_state);
 
-                ret = file_write_ramblock_iov(p->c, p->iov, p->iovs_num,
-                                              &p->data->u.ram, &local_err);
+                if (cxl_use_mapped_ram_backing()) {
+                    ret = cxl_write_ramblock_iov(p->c, p->iov, p->iovs_num,
+                                                 &p->data->u.ram, &local_err);
+                } else {
+                    ret = file_write_ramblock_iov(p->c, p->iov, p->iovs_num,
+                                                  &p->data->u.ram, &local_err);
+                }
             } else {
                 ret = qio_channel_writev_full_all(p->c, p->iov, p->iovs_num,
                                                   NULL, 0,
@@ -722,7 +749,16 @@ static void *multifd_send_thread(void *opaque)
             }
 
             if (ret != 0) {
+                if (cxl_access_held) {
+                    cxl_sender_access_end();
+                    cxl_access_held = false;
+                }
                 break;
+            }
+
+            if (cxl_access_held) {
+                cxl_sender_access_end();
+                cxl_access_held = false;
             }
 
             qatomic_add(&mig_stats.multifd_bytes, total_size);
@@ -904,6 +940,9 @@ out:
 static bool multifd_new_send_channel_create(gpointer opaque, Error **errp)
 {
     if (!multifd_use_packets()) {
+        if (cxl_use_mapped_ram_backing()) {
+            return cxl_send_channel_create(opaque, errp);
+        }
         return file_send_channel_create(opaque, errp);
     }
 

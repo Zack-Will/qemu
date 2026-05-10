@@ -42,6 +42,7 @@
 #include "qemu-file.h"
 #include "savevm.h"
 #include "postcopy-ram.h"
+#include "cxl.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-migration.h"
 #include "qapi/clone-visitor.h"
@@ -94,6 +95,7 @@ enum qemu_vm_cmd {
     MIG_CMD_POSTCOPY_RESUME,   /* resume postcopy on dest */
     MIG_CMD_RECV_BITMAP,       /* Request for recved bitmap on dst */
     MIG_CMD_SWITCHOVER_START,  /* Switchover start notification */
+    MIG_CMD_CXL_HYBRID_METADATA, /* Hybrid CXL staging metadata snapshot */
     MIG_CMD_MAX
 };
 
@@ -114,6 +116,8 @@ static struct mig_cmd_args {
     [MIG_CMD_PACKAGED]         = { .len =  4, .name = "PACKAGED" },
     [MIG_CMD_RECV_BITMAP]      = { .len = -1, .name = "RECV_BITMAP" },
     [MIG_CMD_SWITCHOVER_START] = { .len =  0, .name = "SWITCHOVER_START" },
+    [MIG_CMD_CXL_HYBRID_METADATA] = { .len = -1,
+                                      .name = "CXL_HYBRID_METADATA" },
     [MIG_CMD_MAX]              = { .len = -1, .name = "MAX" },
 };
 
@@ -1261,6 +1265,18 @@ void qemu_savevm_maybe_send_switchover_start(QEMUFile *f)
     }
 }
 
+void qemu_savevm_send_cxl_hybrid_metadata(QEMUFile *f,
+                                          uint32_t generation,
+                                          uint32_t entries,
+                                          const uint8_t *buf,
+                                          size_t len)
+{
+    assert(len <= UINT16_MAX);
+    trace_savevm_send_cxl_hybrid_metadata(generation, entries, len);
+    qemu_savevm_command_send(f, MIG_CMD_CXL_HYBRID_METADATA, len,
+                             (uint8_t *)buf);
+}
+
 bool qemu_savevm_state_blocked(Error **errp)
 {
     SaveStateEntry *se;
@@ -1926,6 +1942,16 @@ enum LoadVMExitCodes {
     LOADVM_QUIT     =  1,
 };
 
+static void loadvm_trace_postcopy_timeline(MigrationIncomingState *mis,
+                                           const char *stage,
+                                           uint64_t value)
+{
+    trace_migration_postcopy_timeline(stage,
+                                      qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
+                                      mis ? mis->state : 0,
+                                      0, value, false);
+}
+
 /* ------ incoming postcopy messages ------ */
 /* 'advise' arrives before any transfers just to tell us that a postcopy
  * *might* happen - it might be skipped if precopy transferred everything
@@ -2008,6 +2034,17 @@ static int loadvm_postcopy_handle_advise(MigrationIncomingState *mis,
 
     if (postcopy_notify(POSTCOPY_NOTIFY_INBOUND_ADVISE, errp)) {
         return -1;
+    }
+
+    if (migrate_cxl_hybrid()) {
+        loadvm_trace_postcopy_timeline(
+            mis, "dst-postcopy-advise-cxl-init-begin", UINT64_MAX);
+        if (!cxl_hybrid_init_destination(errp)) {
+            error_prepend(errp, "CXL hybrid destination staging init failed: ");
+            return -1;
+        }
+        loadvm_trace_postcopy_timeline(
+            mis, "dst-postcopy-advise-cxl-init-done", UINT64_MAX);
     }
 
     if (ram_postcopy_incoming_init(mis, errp) < 0) {
@@ -2137,7 +2174,10 @@ static int loadvm_postcopy_handle_listen(MigrationIncomingState *mis,
 static void loadvm_postcopy_handle_run_bh(void *opaque)
 {
     MigrationIncomingState *mis = opaque;
+    bool vm_started = false;
 
+    loadvm_trace_postcopy_timeline(mis, "dst-postcopy-bh-enter",
+                                   UINT64_MAX);
     trace_vmstate_downtime_checkpoint("dst-postcopy-bh-enter");
 
     /* TODO we should move all of this lot into postcopy_ram.c or a shared code
@@ -2145,10 +2185,14 @@ static void loadvm_postcopy_handle_run_bh(void *opaque)
      */
     cpu_synchronize_all_post_init();
 
+    loadvm_trace_postcopy_timeline(mis, "dst-postcopy-bh-cpu-synced",
+                                   UINT64_MAX);
     trace_vmstate_downtime_checkpoint("dst-postcopy-bh-cpu-synced");
 
     qemu_announce_self(&mis->announce_timer, migrate_announce_params());
 
+    loadvm_trace_postcopy_timeline(mis, "dst-postcopy-bh-announced",
+                                   UINT64_MAX);
     trace_vmstate_downtime_checkpoint("dst-postcopy-bh-announced");
 
     dirty_bitmap_mig_before_vm_start();
@@ -2160,17 +2204,28 @@ static void loadvm_postcopy_handle_run_bh(void *opaque)
          */
         bool success = migration_block_activate(NULL);
 
+        loadvm_trace_postcopy_timeline(mis,
+                                       "dst-postcopy-bh-cache-invalidated",
+                                       UINT64_MAX);
         trace_vmstate_downtime_checkpoint("dst-postcopy-bh-cache-invalidated");
 
         if (success) {
             vm_start();
+            vm_started = true;
         }
     } else {
         /* leave it paused and let management decide when to start the CPU */
         runstate_set(RUN_STATE_PAUSED);
     }
 
+    loadvm_trace_postcopy_timeline(mis, "dst-postcopy-bh-vm-started",
+                                   UINT64_MAX);
     trace_vmstate_downtime_checkpoint("dst-postcopy-bh-vm-started");
+    if (vm_started) {
+        migrate_send_rp_dst_started(mis);
+        loadvm_trace_postcopy_timeline(mis, "dst-postcopy-bh-ack-sent",
+                                       UINT64_MAX);
+    }
 }
 
 /* After all discards we can start running and asking for pages */
@@ -2179,6 +2234,8 @@ static int loadvm_postcopy_handle_run(MigrationIncomingState *mis, Error **errp)
     PostcopyState ps = postcopy_state_get();
 
     trace_loadvm_postcopy_handle_run();
+    loadvm_trace_postcopy_timeline(mis, "dst-postcopy-run-cmd",
+                                   UINT64_MAX);
     if (ps != POSTCOPY_INCOMING_LISTENING) {
         error_setg(errp, "CMD_POSTCOPY_RUN in wrong postcopy state (%d)", ps);
         return -1;
@@ -2208,6 +2265,7 @@ static gboolean postcopy_sync_page_req(gpointer key, gpointer value,
     void *host_addr = (void *) key;
     ram_addr_t rb_offset;
     RAMBlock *rb;
+    bool sent = false;
     int ret;
 
     rb = qemu_ram_block_from_host(host_addr, true, &rb_offset);
@@ -2223,7 +2281,12 @@ static gboolean postcopy_sync_page_req(gpointer key, gpointer value,
         return FALSE;
     }
 
+    if (migrate_cxl_hybrid()) {
+        return FALSE;
+    }
+
     ret = migrate_send_rp_message_req_pages(mis, rb, rb_offset);
+    sent = ret == 0;
     if (ret) {
         /* Please refer to above comment. */
         error_report("%s: send rp message failed for addr %p",
@@ -2231,7 +2294,9 @@ static gboolean postcopy_sync_page_req(gpointer key, gpointer value,
         return FALSE;
     }
 
-    trace_postcopy_page_req_sync(host_addr);
+    if (sent) {
+        trace_postcopy_page_req_sync(host_addr);
+    }
 
     return FALSE;
 }
@@ -2320,6 +2385,7 @@ static int loadvm_handle_cmd_packaged(MigrationIncomingState *mis, Error **errp)
 
     length = qemu_get_be32(mis->from_src_file);
     trace_loadvm_handle_cmd_packaged(length);
+    loadvm_trace_postcopy_timeline(mis, "dst-packaged-begin", length);
 
     if (length > MAX_VM_CMD_PACKAGED_SIZE) {
         error_setg(errp, "Unreasonably large packaged state: %zu", length);
@@ -2339,6 +2405,7 @@ static int loadvm_handle_cmd_packaged(MigrationIncomingState *mis, Error **errp)
     }
     bioc->usage += length;
     trace_loadvm_handle_cmd_packaged_received(ret);
+    loadvm_trace_postcopy_timeline(mis, "dst-packaged-received", length);
 
     QEMUFile *packf = qemu_file_new_input(QIO_CHANNEL(bioc));
 
@@ -2365,6 +2432,8 @@ static int loadvm_handle_cmd_packaged(MigrationIncomingState *mis, Error **errp)
 
     ret = qemu_loadvm_state_main(packf, mis, errp);
     trace_loadvm_handle_cmd_packaged_main(ret);
+    loadvm_trace_postcopy_timeline(mis, "dst-packaged-main-done",
+                                   ret < 0 ? UINT64_MAX : (uint64_t)ret);
     qemu_fclose(packf);
     object_unref(OBJECT(bioc));
 
@@ -2537,6 +2606,31 @@ static int loadvm_process_command(QEMUFile *f, Error **errp)
 
     case MIG_CMD_SWITCHOVER_START:
         return loadvm_postcopy_handle_switchover_start(errp);
+
+    case MIG_CMD_CXL_HYBRID_METADATA:
+    {
+        g_autofree uint8_t *buf = g_malloc(len);
+
+        loadvm_trace_postcopy_timeline(mis, "dst-cxl-metadata-begin", len);
+        if (qemu_get_buffer(f, buf, len) != len) {
+            error_setg(errp,
+                       "Failed to read CXL hybrid metadata payload: %u bytes",
+                       len);
+            return -EIO;
+        }
+
+        ret = qemu_file_get_error(f);
+        if (ret) {
+            error_setg(errp,
+                       "Stream error while reading CXL hybrid metadata: %d",
+                       ret);
+            return ret;
+        }
+
+        ret = cxl_hybrid_metadata_recv(buf, len, errp);
+        loadvm_trace_postcopy_timeline(mis, "dst-cxl-metadata-done", len);
+        return ret;
+    }
     }
 
     error_setg(errp, "MIG_CMD 0x%x deprecated (len 0x%x)", cmd, len);
@@ -2863,6 +2957,7 @@ void qemu_loadvm_state_cleanup(MigrationIncomingState *mis)
         }
     }
 
+    cxl_hybrid_metadata_cleanup_incoming();
     qemu_loadvm_thread_pool_destroy(mis);
 }
 

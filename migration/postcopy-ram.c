@@ -20,6 +20,7 @@
 #include "qemu/madvise.h"
 #include "exec/target_page.h"
 #include "migration.h"
+#include "cxl.h"
 #include "qemu-file.h"
 #include "savevm.h"
 #include "postcopy-ram.h"
@@ -957,6 +958,8 @@ static int postcopy_request_page(MigrationIncomingState *mis, RAMBlock *rb,
                                  ram_addr_t start, uint64_t haddr, uint32_t tid)
 {
     void *aligned = (void *)(uintptr_t)ROUND_DOWN(haddr, qemu_ram_pagesize(rb));
+    Error *local_err = NULL;
+    int ret;
 
     /*
      * Discarded pages (via RamDiscardManager) are never migrated. On unlikely
@@ -971,6 +974,27 @@ static int postcopy_request_page(MigrationIncomingState *mis, RAMBlock *rb,
         bool received = ramblock_recv_bitmap_test_byte_offset(rb, start);
 
         return received ? 0 : postcopy_place_page_zero(mis, aligned, rb);
+    }
+
+    if (migrate_cxl_hybrid()) {
+        ret = cxl_hybrid_wait_and_resolve_fault(mis, rb, start, haddr, tid,
+                                                postcopy_place_page,
+                                                &local_err);
+        if (ret < 0) {
+            error_report_err(local_err);
+            return ret;
+        }
+        return 0;
+    }
+
+    ret = cxl_hybrid_try_resolve_fault(mis, rb, start, postcopy_place_page,
+                                       &local_err);
+    if (ret < 0) {
+        error_report_err(local_err);
+        return ret;
+    }
+    if (ret > 0) {
+        return 0;
     }
 
     return migrate_send_rp_req_pages(mis, rb, start, haddr, tid);
@@ -1627,6 +1651,132 @@ static int qemu_ufd_copy_ioctl(MigrationIncomingState *mis, void *host_addr,
     return ret;
 }
 
+static bool postcopy_host_addr_in_range(void *host_addr,
+                                        uintptr_t start, uintptr_t end)
+{
+    uintptr_t addr = (uintptr_t)host_addr;
+
+    return addr >= start && addr < end;
+}
+
+static int postcopy_mark_requested_page_received(MigrationIncomingState *mis,
+                                                 void *host_addr)
+{
+    int left_pages;
+
+    if (!g_tree_lookup(mis->page_requested, host_addr)) {
+        return -ENOENT;
+    }
+
+    g_tree_remove(mis->page_requested, host_addr);
+    left_pages = qatomic_dec_fetch(&mis->page_requested_count);
+
+    trace_postcopy_page_req_del(host_addr, mis->page_requested_count);
+    /* Order the update of count and read of preempt status */
+    smp_mb();
+    if (mis->preempt_thread_status == PREEMPT_THREAD_QUIT &&
+        left_pages == 0) {
+        /*
+         * This probably means the main thread is waiting for us.  Notify
+         * that we've finished receiving the last requested page.
+         */
+        qemu_cond_signal(&mis->page_request_cond);
+    }
+    mark_postcopy_blocktime_end((uintptr_t)host_addr);
+
+    return 0;
+}
+
+int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
+                                          RAMBlock *rb,
+                                          void *host_addr,
+                                          size_t len,
+                                          void *fault_host_addr,
+                                          bool *receivedp)
+{
+    size_t pagesize;
+    uintptr_t start, end, rb_start, rb_end, addr;
+    void *notify_host_addr = fault_host_addr ? fault_host_addr : host_addr;
+    bool fault_blocktime_ended = false;
+    int ret;
+
+    if (receivedp) {
+        *receivedp = false;
+    }
+    if (!mis || !rb || !host_addr || !len) {
+        return -EINVAL;
+    }
+
+    pagesize = qemu_ram_pagesize(rb);
+    if (!QEMU_PTR_IS_ALIGNED(host_addr, pagesize) ||
+        !QEMU_IS_ALIGNED(len, pagesize) ||
+        (fault_host_addr &&
+         !QEMU_PTR_IS_ALIGNED(fault_host_addr, pagesize))) {
+        return -EINVAL;
+    }
+
+    start = (uintptr_t)host_addr;
+    if (len > UINTPTR_MAX - start) {
+        return -EOVERFLOW;
+    }
+    end = start + len;
+
+    rb_start = (uintptr_t)rb->host;
+    if (rb->postcopy_length > UINTPTR_MAX - rb_start) {
+        return -EOVERFLOW;
+    }
+    rb_end = rb_start + rb->postcopy_length;
+    if (start < rb_start || end > rb_end ||
+        !postcopy_host_addr_in_range(notify_host_addr, rb_start, rb_end)) {
+        return -ERANGE;
+    }
+    if (fault_host_addr &&
+        !postcopy_host_addr_in_range(fault_host_addr, start, end)) {
+        return -ERANGE;
+    }
+
+    /*
+     * Local wake comes before QEMU state so wake failure leaves no false
+     * received state.  After it succeeds, commit state before shared wake to
+     * match postcopy_place_page*() ordering.
+     *
+     * This helper is only for a range that was already replaced with
+     * MAP_FIXED.  After validating the range above, -EINVAL from UFFDIO_WAKE
+     * is the documented kernel behavior when the remap invalidated the UFFD
+     * registration; UFFDIO_UNREGISTER is the fallback wake path for that case.
+     */
+    ret = uffd_wakeup(mis->userfault_fd, host_addr, len);
+    if (ret == -EINVAL) {
+        ret = uffd_unregister_memory(mis->userfault_fd, host_addr, len);
+    }
+    if (ret) {
+        return ret;
+    }
+
+    qemu_mutex_lock(&mis->page_request_mutex);
+    ramblock_recv_bitmap_set_range(rb, host_addr,
+                                   len / qemu_target_page_size());
+    for (addr = start; addr < end; addr += pagesize) {
+        void *page_host_addr = (void *)addr;
+
+        if (!postcopy_mark_requested_page_received(mis, page_host_addr) &&
+            page_host_addr == fault_host_addr) {
+            fault_blocktime_ended = true;
+        }
+    }
+    if (fault_host_addr && !fault_blocktime_ended &&
+        postcopy_host_addr_in_range(fault_host_addr, start, end)) {
+        mark_postcopy_blocktime_end((uintptr_t)fault_host_addr);
+    }
+    qemu_mutex_unlock(&mis->page_request_mutex);
+    if (receivedp) {
+        *receivedp = true;
+    }
+
+    return postcopy_notify_shared_wake(rb,
+        qemu_ram_block_host_offset(rb, notify_host_addr));
+}
+
 int postcopy_notify_shared_wake(RAMBlock *rb, uint64_t offset)
 {
     int i;
@@ -1742,6 +1892,16 @@ int postcopy_place_page(MigrationIncomingState *mis, void *host, void *from,
 
 int postcopy_place_page_zero(MigrationIncomingState *mis, void *host,
                         RAMBlock *rb)
+{
+    g_assert_not_reached();
+}
+
+int postcopy_mark_range_received_and_wake(MigrationIncomingState *mis,
+                                          RAMBlock *rb,
+                                          void *host_addr,
+                                          size_t len,
+                                          void *fault_host_addr,
+                                          bool *receivedp)
 {
     g_assert_not_reached();
 }

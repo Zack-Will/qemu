@@ -1,7 +1,12 @@
 # Files needed by unit tests
 migration_files = files(
+  'cxl-hybrid-control-header.c',
+  'cxl-region.c',
+  'downtime.c',
+  'cxl-hybrid-metadata.c',
   'migration-stats.c',
   'page_cache.c',
+  'postcopy.c',
   'xbzrle.c',
   'vmstate-types.c',
   'vmstate.c',
@@ -15,6 +20,8 @@ system_ss.add(files(
   'channel.c',
   'channel-block.c',
   'cpr.c',
+  'cxl-hybrid-control.c',
+  'cxl.c',
   'cpr-transfer.c',
   'cpr-exec.c',
   'cpu-throttle.c',
