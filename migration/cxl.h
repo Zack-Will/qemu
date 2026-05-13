@@ -33,6 +33,31 @@ typedef enum CXLHybridPhase {
     CXL_HYBRID_PHASE_CLEANUP,
 } CXLHybridPhase;
 
+typedef enum CXLHybridSwitchAction {
+    CXL_HYBRID_SWITCH_ACTION_NONE = 0,
+    CXL_HYBRID_SWITCH_ACTION_ENTER_BRAKE,
+    CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY,
+} CXLHybridSwitchAction;
+
+typedef struct CXLHybridSwitchPolicyInput {
+    CXLHybridPhase phase;
+    bool brake_enabled;
+    bool dirty_trigger;
+    bool max_iters_trigger;
+    bool gain_trigger;
+    bool remaining_trigger;
+    bool time_cap_trigger;
+    bool completion_ready;
+    uint64_t staged_pages;
+    uint8_t remap_coverage_threshold;
+    uint8_t remap_coverage;
+} CXLHybridSwitchPolicyInput;
+
+typedef struct CXLHybridSwitchDecision {
+    CXLHybridSwitchAction action;
+    CXLMigrationSwitchReason reason;
+} CXLHybridSwitchDecision;
+
 typedef struct CXLHybridMetadataEntry {
     char *ramblock;
     uint64_t offset;
@@ -231,6 +256,15 @@ uint64_t cxl_hybrid_choose_fault_region_granule(uint64_t align,
 uint64_t cxl_hybrid_choose_source_remap_granule(uint64_t min_align,
                                                 uint64_t configured,
                                                 uint64_t total_ram);
+uint8_t cxl_hybrid_calculate_source_remap_coverage(uint64_t staged_pages,
+                                                   uint64_t remapped_pages);
+CXLHybridSwitchDecision cxl_hybrid_switch_decide(
+    const CXLHybridSwitchPolicyInput *input);
+bool cxl_hybrid_source_remap_region_clean(const unsigned long *migrated_bmap,
+                                          size_t migrated_first_page,
+                                          const unsigned long *dirty_bmap,
+                                          size_t dirty_first_page,
+                                          size_t npages);
 uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
     uint64_t file_align,
     uint64_t dax_align,
@@ -311,6 +345,9 @@ void cxl_hybrid_cleanup_source(void);
 bool cxl_hybrid_enabled(void);
 CXLHybridPhase cxl_hybrid_phase(void);
 bool cxl_hybrid_init_destination(Error **errp);
+uint64_t cxl_hybrid_source_staged_pages(void);
+uint8_t cxl_hybrid_source_remap_coverage(void);
+void cxl_hybrid_drain_source_remaps(void);
 void cxl_hybrid_record_warm_miss(const char *rbname, ram_addr_t start);
 void cxl_hybrid_account_warm_dirty(const char *rbname, ram_addr_t offset,
                                    ram_addr_t len);
@@ -338,6 +375,7 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
                                    uint64_t *cxl_offsetp,
                                    Error **errp);
 int cxl_hybrid_begin_source_run_with_precopy_remaps(Error **errp);
+int cxl_hybrid_publish_staged_pages_for_postcopy(Error **errp);
 void cxl_hybrid_iteration_snapshot_begin(uint64_t ram_pages);
 void cxl_hybrid_iteration_snapshot_end(uint64_t ram_pages);
 bool cxl_hybrid_global_page_offset(const RAMBlock *block,
@@ -545,5 +583,6 @@ bool cxl_hybrid_source_region_owned_by_destination(RAMBlock *block,
                                                    ram_addr_t offset);
 int cxl_hybrid_completion_publish_remaining_pages(MigrationState *s,
                                                   Error **errp);
+int cxl_hybrid_completion_publish_remaining_regions(Error **errp);
 
 #endif

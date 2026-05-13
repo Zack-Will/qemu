@@ -30,6 +30,17 @@ bool migration_postcopy_ram_stream_should_publish_cxl_visible(
            data_saved;
 }
 
+bool migration_postcopy_cxl_source_completion_ready(bool hybrid_mode,
+                                                   MigrationStatus state,
+                                                   bool cxl_postcopy_warm,
+                                                   bool final_ram_flushed)
+{
+    return hybrid_mode &&
+           state == MIGRATION_STATUS_POSTCOPY_ACTIVE &&
+           cxl_postcopy_warm &&
+           final_ram_flushed;
+}
+
 MigrationPostcopyCXLRAMStreamWriteAction
 migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
                                                bool source_remapped,
@@ -46,4 +57,17 @@ migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
     }
 
     return MIGRATION_POSTCOPY_CXL_RAM_STREAM_ALLOW;
+}
+
+MigrationPostcopyIncomingListenPlan
+migration_postcopy_incoming_listen_plan(PostcopyState old_state)
+{
+    MigrationPostcopyIncomingListenPlan plan = {
+        .valid = old_state == POSTCOPY_INCOMING_ADVISE ||
+                 old_state == POSTCOPY_INCOMING_DISCARD,
+        .prepare_discard = old_state == POSTCOPY_INCOMING_ADVISE,
+        .ready_state = POSTCOPY_INCOMING_LISTENING,
+    };
+
+    return plan;
 }

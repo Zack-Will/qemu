@@ -1249,6 +1249,13 @@ void migration_bitmap_sync_precopy(bool last_stage)
     }
 }
 
+void ram_cxl_hybrid_sync_dirty_bitmap(void)
+{
+    assert(ram_state);
+
+    migration_bitmap_sync(ram_state, false);
+}
+
 void ram_release_page(const char *rbname, uint64_t offset)
 {
     if (!migrate_release_ram() || !migration_in_postcopy()) {

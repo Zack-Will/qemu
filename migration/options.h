@@ -95,6 +95,7 @@ uint32_t migrate_cxl_switch_max_iters(void);
 uint64_t migrate_cxl_switch_max_precopy_ms(void);
 uint64_t migrate_cxl_switch_min_remaining(void);
 uint64_t migrate_cxl_switch_gain_floor(void);
+uint8_t migrate_cxl_switch_remap_coverage(void);
 bool migrate_cxl_brake_enable(void);
 uint64_t migrate_cxl_brake_remap_granule(void);
 uint64_t migrate_cxl_prefetch_rate(void);

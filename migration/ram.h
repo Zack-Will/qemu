@@ -102,6 +102,7 @@ int ram_cxl_hybrid_walk_unsent(MigrationState *s,
                                          Error **errp),
                                void *opaque,
                                Error **errp);
+void ram_cxl_hybrid_sync_dirty_bitmap(void);
 
 int ramblock_recv_bitmap_test(RAMBlock *rb, void *host_addr);
 bool ramblock_recv_bitmap_test_byte_offset(RAMBlock *rb, uint64_t byte_offset);

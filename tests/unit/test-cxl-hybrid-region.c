@@ -8,6 +8,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bitmap.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "migration/cxl.h"
@@ -260,6 +261,38 @@ static void test_mapped_ram_layout_returns_page_data_spans(void)
     g_assert_cmpuint(offset, ==, 84 * MiB);
 }
 
+static void test_source_remap_region_requires_staged_clean_pages(void)
+{
+    unsigned long migrated[BITS_TO_LONGS(128)] = { 0 };
+    unsigned long dirty[BITS_TO_LONGS(128)] = { 0 };
+
+    bitmap_set(migrated, 32, 16);
+    g_assert_true(cxl_hybrid_source_remap_region_clean(migrated, 32,
+                                                       dirty, 32, 16));
+
+    bitmap_clear(migrated, 40, 1);
+    g_assert_false(cxl_hybrid_source_remap_region_clean(migrated, 32,
+                                                        dirty, 32, 16));
+
+    bitmap_set(migrated, 40, 1);
+    bitmap_set(dirty, 47, 1);
+    g_assert_false(cxl_hybrid_source_remap_region_clean(migrated, 32,
+                                                        dirty, 32, 16));
+
+    bitmap_clear(dirty, 47, 1);
+    bitmap_set(dirty, 31, 1);
+    bitmap_set(dirty, 48, 1);
+    g_assert_true(cxl_hybrid_source_remap_region_clean(migrated, 32,
+                                                       dirty, 32, 16));
+
+    g_assert_false(cxl_hybrid_source_remap_region_clean(NULL, 32, dirty,
+                                                        32, 16));
+    g_assert_false(cxl_hybrid_source_remap_region_clean(migrated, 32, NULL,
+                                                        32, 16));
+    g_assert_false(cxl_hybrid_source_remap_region_clean(migrated, 32,
+                                                        dirty, 32, 0));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -297,5 +330,7 @@ int main(int argc, char **argv)
                     test_source_remap_granule_is_independent_from_fault_region);
     g_test_add_func("/cxl/region/mapped-ram-layout-page-spans",
                     test_mapped_ram_layout_returns_page_data_spans);
+    g_test_add_func("/cxl/region/source-remap-requires-staged-clean-pages",
+                    test_source_remap_region_requires_staged_clean_pages);
     return g_test_run();
 }

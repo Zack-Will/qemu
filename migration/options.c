@@ -75,6 +75,7 @@
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_PRECOPY_MS 0
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_MIN_REMAINING 0
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_GAIN_FLOOR 0
+#define DEFAULT_MIGRATE_X_CXL_SWITCH_REMAP_COVERAGE 0
 #define DEFAULT_MIGRATE_X_CXL_BRAKE_ENABLE false
 #define DEFAULT_MIGRATE_X_CXL_BRAKE_REMAP_GRANULE 0
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_RATE 0
@@ -212,6 +213,9 @@ const Property migration_properties[] = {
     DEFINE_PROP_SIZE("x-cxl-switch-gain-floor", MigrationState,
                       parameters.x_cxl_switch_gain_floor,
                       DEFAULT_MIGRATE_X_CXL_SWITCH_GAIN_FLOOR),
+    DEFINE_PROP_UINT8("x-cxl-switch-remap-coverage", MigrationState,
+                      parameters.x_cxl_switch_remap_coverage,
+                      DEFAULT_MIGRATE_X_CXL_SWITCH_REMAP_COVERAGE),
     DEFINE_PROP_BOOL("x-cxl-brake-enable", MigrationState,
                       parameters.x_cxl_brake_enable,
                       DEFAULT_MIGRATE_X_CXL_BRAKE_ENABLE),
@@ -1002,6 +1006,13 @@ uint64_t migrate_cxl_switch_gain_floor(void)
     return s->parameters.x_cxl_switch_gain_floor;
 }
 
+uint8_t migrate_cxl_switch_remap_coverage(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_switch_remap_coverage;
+}
+
 bool migrate_cxl_brake_enable(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1284,6 +1295,7 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_switch_max_precopy_ms,
         &p->has_x_cxl_switch_min_remaining,
         &p->has_x_cxl_switch_gain_floor,
+        &p->has_x_cxl_switch_remap_coverage,
         &p->has_x_cxl_brake_enable,
         &p->has_x_cxl_brake_remap_granule,
         &p->has_x_cxl_prefetch_rate,
@@ -1505,6 +1517,13 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->x_cxl_switch_remap_coverage > 100) {
+        error_setg(errp,
+                   "Option x-cxl-switch-remap-coverage expects a value "
+                   "between 0 and 100");
+        return false;
+    }
+
     if (params->x_cxl_prefetch_batch_pages > INT32_MAX) {
         error_setg(errp,
                    "Option x-cxl-prefetch-batch-pages expects a value no larger than %d",
@@ -1668,6 +1687,10 @@ static void migrate_params_test_apply(MigrationParameters *params,
     }
     if (params->has_x_cxl_switch_gain_floor) {
         dest->x_cxl_switch_gain_floor = params->x_cxl_switch_gain_floor;
+    }
+    if (params->has_x_cxl_switch_remap_coverage) {
+        dest->x_cxl_switch_remap_coverage =
+            params->x_cxl_switch_remap_coverage;
     }
     if (params->has_x_cxl_brake_enable) {
         dest->x_cxl_brake_enable = params->x_cxl_brake_enable;
@@ -1846,6 +1869,10 @@ static void migrate_params_apply(MigrationParameters *params)
     if (params->has_x_cxl_switch_gain_floor) {
         s->parameters.x_cxl_switch_gain_floor =
             params->x_cxl_switch_gain_floor;
+    }
+    if (params->has_x_cxl_switch_remap_coverage) {
+        s->parameters.x_cxl_switch_remap_coverage =
+            params->x_cxl_switch_remap_coverage;
     }
     if (params->has_x_cxl_brake_enable) {
         s->parameters.x_cxl_brake_enable = params->x_cxl_brake_enable;

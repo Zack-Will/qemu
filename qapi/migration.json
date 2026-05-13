@@ -237,6 +237,13 @@
 #
 # @gain-collapsed: recent iteration gain fell below threshold
 #
+# @remap-coverage: source-side CXL remap coverage reached the
+#     configured threshold
+#
+# @precopy-complete: ordinary precopy completion became possible after
+#     source-side remaps were installed, so hybrid switched to
+#     postcopy to consume the remapped regions
+#
 # @manual: manual postcopy request was used
 #
 # Features:
@@ -252,6 +259,8 @@
             { 'name': 'remaining-small', 'features': [ 'unstable' ] },
             { 'name': 'precopy-time-cap', 'features': [ 'unstable' ] },
             { 'name': 'gain-collapsed', 'features': [ 'unstable' ] },
+            { 'name': 'remap-coverage', 'features': [ 'unstable' ] },
+            { 'name': 'precopy-complete', 'features': [ 'unstable' ] },
             { 'name': 'manual', 'features': [ 'unstable' ] } ] }
 
 ##
@@ -365,6 +374,9 @@
 #
 # @remapped-regions: number of regions currently remapped to CXL
 #
+# @remap-coverage: source remap coverage percentage, measured as
+#     remapped staged pages divided by staged pages
+#
 # @remap-attempts: number of region remap attempts
 #
 # @remap-successes: number of successful region remaps
@@ -411,6 +423,19 @@
 # @remap-scan-time-ns: cumulative nanoseconds spent scanning covered
 #     ranges for remap candidates
 #
+# @pending-remap-regions: number of source-remap regions currently
+#     pending a clean-remap decision after the most recent scan
+#
+# @clean-pending-remap-regions: number of pending source-remap
+#     regions that were fully staged and clean after the most recent
+#     scan
+#
+# @pending-remap-unmigrated-pages: total pages in pending remap
+#     regions that had not reached CXL after the most recent scan
+#
+# @pending-remap-dirty-pages: total dirty pages in pending remap
+#     regions after the most recent scan
+#
 # @remap-page-check-calls: number of "all pages migrated?" region
 #     checks executed before attempting remap
 #
@@ -421,16 +446,18 @@
 #     `mmap(MAP_FIXED)` remap syscall
 #
 # @remap-copy-bytes: total bytes copied back into the shared backing
-#     while the source guest was paused immediately before remap
+#     while the source guest was paused before remap; clean source
+#     remap keeps this at zero
 #
 # @remap-copy-time-ns: cumulative nanoseconds spent refreshing backing
-#     contents immediately before remap
+#     contents immediately before remap; clean source remap keeps this
+#     at zero
 #
 # @remap-pause-calls: number of short source-guest pauses taken to
-#     refresh backing contents and install remaps safely
+#     sync dirty state and install clean source remaps safely
 #
 # @remap-pause-time-ns: cumulative nanoseconds spent with the source
-#     guest paused for safe remap installation
+#     guest paused for clean-remap dirty sync and installation
 #
 # @dirty-sync-calls: number of dirty-log sync passes timed while CXL
 #     mapped-ram backing was enabled
@@ -524,6 +551,10 @@
 #
 # @warm-publish-pages: number of warm-publish operations that copied
 #     pages into shared CXL backing and marked them visible
+#
+# @completion-publish-pages: number of source-side pages already
+#     staged in shared CXL backing and published visible at the
+#     postcopy start boundary without copying
 #
 # @last-iterate-ram-pages: RAM pages transferred during the
 #     most recent migration main-loop iteration
@@ -655,8 +686,8 @@
 #
 # Features:
 #
-# @unstable: Members @phase, @phase-transitions, @switch-reason,
-#     @switch-iteration, @dst-stage-capacity-bytes,
+# @unstable: Members @remap-coverage, @phase, @phase-transitions,
+#     @switch-reason, @switch-iteration, @dst-stage-capacity-bytes,
 #     @dst-stage-slots, @dst-stage-present-slots,
 #     @dst-fault-hits, @dst-fault-misses,
 #     @dst-fault-read-bytes, @dst-fault-read-time-ns,
@@ -710,6 +741,8 @@
             'remap-granule': 'uint64',
             'total-regions': 'uint64',
             'remapped-regions': 'uint64',
+            'remap-coverage': { 'type': 'uint8',
+                                'features': [ 'unstable' ] },
             'remap-attempts': 'uint64',
             'remap-successes': 'uint64',
             'remap-failures': 'uint64',
@@ -726,6 +759,14 @@
             'migrated-bitmap-time-ns': 'uint64',
             'remap-scan-calls': 'uint64',
             'remap-scan-time-ns': 'uint64',
+            'pending-remap-regions': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'clean-pending-remap-regions': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'pending-remap-unmigrated-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'pending-remap-dirty-pages': { 'type': 'uint64',
+                                           'features': [ 'unstable' ] },
             'remap-page-check-calls': 'uint64',
             'remap-page-check-time-ns': 'uint64',
             'remap-syscall-time-ns': 'uint64',
@@ -794,6 +835,8 @@
                                       'features': [ 'unstable' ] },
             'warm-publish-pages': { 'type': 'uint64',
                                     'features': [ 'unstable' ] },
+            'completion-publish-pages': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
             'last-iterate-ram-pages': { 'type': 'uint64',
                                         'features': [ 'unstable' ] },
             'last-iterate-staged-pages-delta': { 'type': 'uint64',
@@ -1512,9 +1555,10 @@
 #     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
 #     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
 #     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
-#     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
-#     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
-#     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
+#     @x-cxl-switch-remap-coverage, @x-cxl-brake-enable,
+#     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
+#     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
+#     @x-cxl-dst-cache-size,
 #     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
 #     experimental.
 #
@@ -1550,6 +1594,8 @@
            { 'name': 'x-cxl-switch-min-remaining',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-switch-gain-floor',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-remap-coverage',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-brake-enable',
              'features': [ 'unstable' ] },
@@ -1765,6 +1811,11 @@
 #     required to justify another bulk precopy round.  Zero disables
 #     this threshold.  (Since 11.0)
 #
+# @x-cxl-switch-remap-coverage: Source remap coverage percentage, from
+#     0 to 100, required before brake phase may switch to postcopy.
+#     Coverage is remapped staged pages divided by staged pages.  Zero
+#     disables this threshold.  (Since 11.0)
+#
 # @x-cxl-brake-enable: Enable the hybrid brake phase that keeps
 #     source-side CXL write redirection active before postcopy
 #     switchover.  Default is false.  (Since 11.0)
@@ -1808,9 +1859,10 @@
 #     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
 #     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
 #     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
-#     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
-#     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
-#     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
+#     @x-cxl-switch-remap-coverage, @x-cxl-brake-enable,
+#     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
+#     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
+#     @x-cxl-dst-cache-size,
 #     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
 #     experimental.
 #
@@ -1859,6 +1911,8 @@
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-switch-gain-floor': {
                 'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-remap-coverage': {
+                'type': 'uint8', 'features': [ 'unstable' ] },
             '*x-cxl-brake-enable': {
                 'type': 'bool', 'features': [ 'unstable' ] },
             '*x-cxl-brake-remap-granule': {

@@ -1411,6 +1411,13 @@ static void *postcopy_ram_fault_thread(void *opaque)
                                                 qemu_ram_get_idstr(rb),
                                                 rb_offset,
                                                 msg.arg.pagefault.feat.ptid);
+            if (trace_event_get_state(
+                    TRACE_POSTCOPY_RAM_FAULT_THREAD_REQUEST_TS)) {
+                trace_postcopy_ram_fault_thread_request_ts(
+                    get_current_ns(), msg.arg.pagefault.address,
+                    qemu_ram_get_idstr(rb), rb_offset,
+                    msg.arg.pagefault.feat.ptid);
+            }
 retry:
             /*
              * Send the request to the source - we want to request one
@@ -1633,6 +1640,10 @@ static int qemu_ufd_copy_ioctl(MigrationIncomingState *mis, void *host_addr,
             int left_pages = qatomic_dec_fetch(&mis->page_requested_count);
 
             trace_postcopy_page_req_del(host_addr, mis->page_requested_count);
+            if (trace_event_get_state(TRACE_POSTCOPY_PAGE_REQ_DEL_TS)) {
+                trace_postcopy_page_req_del_ts(
+                    get_current_ns(), host_addr, mis->page_requested_count);
+            }
             /* Order the update of count and read of preempt status */
             smp_mb();
             if (mis->preempt_thread_status == PREEMPT_THREAD_QUIT &&
@@ -1672,6 +1683,10 @@ static int postcopy_mark_requested_page_received(MigrationIncomingState *mis,
     left_pages = qatomic_dec_fetch(&mis->page_requested_count);
 
     trace_postcopy_page_req_del(host_addr, mis->page_requested_count);
+    if (trace_event_get_state(TRACE_POSTCOPY_PAGE_REQ_DEL_TS)) {
+        trace_postcopy_page_req_del_ts(get_current_ns(), host_addr,
+                                       mis->page_requested_count);
+    }
     /* Order the update of count and read of preempt status */
     smp_mb();
     if (mis->preempt_thread_status == PREEMPT_THREAD_QUIT &&

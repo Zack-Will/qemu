@@ -59,6 +59,127 @@ uint64_t cxl_hybrid_choose_source_remap_granule(uint64_t min_align,
     return granule;
 }
 
+uint8_t cxl_hybrid_calculate_source_remap_coverage(uint64_t staged_pages,
+                                                   uint64_t remapped_pages)
+{
+    if (!staged_pages) {
+        return 0;
+    }
+
+    if (remapped_pages >= staged_pages) {
+        return 100;
+    }
+
+    return (remapped_pages * 100) / staged_pages;
+}
+
+CXLHybridSwitchDecision cxl_hybrid_switch_decide(
+    const CXLHybridSwitchPolicyInput *input)
+{
+    CXLHybridSwitchDecision decision = {
+        .action = CXL_HYBRID_SWITCH_ACTION_NONE,
+        .reason = CXL_MIGRATION_SWITCH_REASON_NONE,
+    };
+    bool remap_coverage_trigger;
+    bool brake_coverage_gate;
+    bool bulk_coverage_gate;
+
+    if (!input) {
+        return decision;
+    }
+
+    remap_coverage_trigger = input->remap_coverage_threshold &&
+        input->remap_coverage >= input->remap_coverage_threshold;
+    brake_coverage_gate = input->brake_enabled &&
+        input->remap_coverage_threshold &&
+        input->phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE;
+    bulk_coverage_gate = input->brake_enabled &&
+        input->remap_coverage_threshold &&
+        input->staged_pages &&
+        input->phase == CXL_HYBRID_PHASE_PRECOPY_BULK &&
+        (input->completion_ready || input->remaining_trigger ||
+         input->time_cap_trigger || input->dirty_trigger ||
+         input->gain_trigger || input->max_iters_trigger);
+
+    if (bulk_coverage_gate) {
+        decision.action = CXL_HYBRID_SWITCH_ACTION_ENTER_BRAKE;
+        return decision;
+    }
+
+    if (input->completion_ready &&
+        input->staged_pages &&
+        (input->phase == CXL_HYBRID_PHASE_PRECOPY_BULK ||
+         (input->phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE &&
+          !brake_coverage_gate))) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_PRECOPY_COMPLETE;
+    } else if (input->phase == CXL_HYBRID_PHASE_PRECOPY_BULK &&
+        input->brake_enabled &&
+        !input->remaining_trigger && !input->time_cap_trigger &&
+        (input->dirty_trigger || input->gain_trigger ||
+         input->max_iters_trigger)) {
+        decision.action = CXL_HYBRID_SWITCH_ACTION_ENTER_BRAKE;
+        return decision;
+    }
+
+    if (decision.reason != CXL_MIGRATION_SWITCH_REASON_NONE) {
+        /* Use the completion decision selected before brake entry. */
+    } else if (input->remaining_trigger) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL;
+    } else if (input->time_cap_trigger) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP;
+    } else if (remap_coverage_trigger &&
+               input->phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_REMAP_COVERAGE;
+    } else if (input->dirty_trigger && !input->brake_enabled) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_DIRTY_RATE_HIGH;
+    } else if (input->max_iters_trigger && !brake_coverage_gate) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_MAX_ITERS;
+    } else if (input->gain_trigger && !brake_coverage_gate) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_GAIN_COLLAPSED;
+    }
+
+    if (decision.reason == CXL_MIGRATION_SWITCH_REASON_NONE) {
+        return decision;
+    }
+
+    if (input->brake_enabled &&
+        input->phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_REMAP_COVERAGE &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_PRECOPY_COMPLETE &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_MAX_ITERS &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_GAIN_COLLAPSED) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_NONE;
+        return decision;
+    }
+
+    decision.action = CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY;
+    return decision;
+}
+
+bool cxl_hybrid_source_remap_region_clean(const unsigned long *migrated_bmap,
+                                          size_t migrated_first_page,
+                                          const unsigned long *dirty_bmap,
+                                          size_t dirty_first_page,
+                                          size_t npages)
+{
+    size_t page;
+
+    if (!migrated_bmap || !dirty_bmap || !npages) {
+        return false;
+    }
+
+    for (page = 0; page < npages; page++) {
+        if (!test_bit(migrated_first_page + page, migrated_bmap)) {
+            return false;
+        }
+    }
+
+    return bitmap_count_one_with_offset(dirty_bmap, dirty_first_page,
+                                        npages) == 0;
+}
+
 uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
     uint64_t file_align,
     uint64_t dax_align,

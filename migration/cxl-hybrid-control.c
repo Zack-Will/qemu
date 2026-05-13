@@ -1096,21 +1096,39 @@ int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
     int ret = 0;
 
     trace_cxl_hybrid_region_wait_begin(first_page, nr_pages, generation);
+    if (trace_event_get_state(TRACE_CXL_HYBRID_REGION_WAIT_BEGIN_TS)) {
+        trace_cxl_hybrid_region_wait_begin_ts(start_ns, first_page, nr_pages,
+                                             generation);
+    }
     ret = cxl_hybrid_ctrl_validate_region_span(
         state->hdr, first_page, nr_pages, &region_index, errp);
     if (ret) {
+        uint64_t elapsed_ns = cxl_hybrid_ctrl_now_ns() - start_ns;
+
         trace_cxl_hybrid_region_wait_complete(first_page, nr_pages,
-                                              generation, ret,
-                                              cxl_hybrid_ctrl_now_ns() -
-                                              start_ns);
+                                              generation, ret, elapsed_ns);
+        if (trace_event_get_state(
+                TRACE_CXL_HYBRID_REGION_WAIT_COMPLETE_TS)) {
+            trace_cxl_hybrid_region_wait_complete_ts(
+                start_ns + elapsed_ns, first_page, nr_pages, generation, ret,
+                elapsed_ns);
+        }
         return ret;
     }
     if (!state->visible_region_bitmap) {
+        uint64_t elapsed_ns;
+
         error_setg(errp, "CXL hybrid visible region bitmap is not initialized");
+        elapsed_ns = cxl_hybrid_ctrl_now_ns() - start_ns;
         trace_cxl_hybrid_region_wait_complete(first_page, nr_pages,
                                               generation, -EINVAL,
-                                              cxl_hybrid_ctrl_now_ns() -
-                                              start_ns);
+                                              elapsed_ns);
+        if (trace_event_get_state(
+                TRACE_CXL_HYBRID_REGION_WAIT_COMPLETE_TS)) {
+            trace_cxl_hybrid_region_wait_complete_ts(
+                start_ns + elapsed_ns, first_page, nr_pages, generation,
+                -EINVAL, elapsed_ns);
+        }
         return -EINVAL;
     }
 
@@ -1149,9 +1167,18 @@ int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
 
         cpu_relax();
     }
-    trace_cxl_hybrid_region_wait_complete(first_page, nr_pages, generation,
-                                          ret,
-                                          cxl_hybrid_ctrl_now_ns() - start_ns);
+    {
+        uint64_t elapsed_ns = cxl_hybrid_ctrl_now_ns() - start_ns;
+
+        trace_cxl_hybrid_region_wait_complete(first_page, nr_pages, generation,
+                                              ret, elapsed_ns);
+        if (trace_event_get_state(
+                TRACE_CXL_HYBRID_REGION_WAIT_COMPLETE_TS)) {
+            trace_cxl_hybrid_region_wait_complete_ts(
+                start_ns + elapsed_ns, first_page, nr_pages, generation, ret,
+                elapsed_ns);
+        }
+    }
 
     return ret;
 }

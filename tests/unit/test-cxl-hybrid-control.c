@@ -679,6 +679,207 @@ static void test_fault_generation_uses_stable_source_run(void)
                          true, 7, true, 2, 3), ==, 7);
 }
 
+static void test_switch_policy_enters_brake_before_coverage_switch(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BULK,
+        .brake_enabled = true,
+        .max_iters_trigger = true,
+        .remap_coverage_threshold = 80,
+        .remap_coverage = 0,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==, CXL_HYBRID_SWITCH_ACTION_ENTER_BRAKE);
+    g_assert_cmpint(decision.reason, ==, CXL_MIGRATION_SWITCH_REASON_NONE);
+}
+
+static void test_switch_policy_waits_for_remap_coverage_in_brake(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+        .brake_enabled = true,
+        .max_iters_trigger = true,
+        .gain_trigger = true,
+        .remap_coverage_threshold = 80,
+        .remap_coverage = 79,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==, CXL_HYBRID_SWITCH_ACTION_NONE);
+    g_assert_cmpint(decision.reason, ==, CXL_MIGRATION_SWITCH_REASON_NONE);
+}
+
+static void test_switch_policy_uses_remap_coverage_in_brake(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+        .brake_enabled = true,
+        .max_iters_trigger = true,
+        .remap_coverage_threshold = 80,
+        .remap_coverage = 80,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==,
+                    CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY);
+    g_assert_cmpint(decision.reason, ==,
+                    CXL_MIGRATION_SWITCH_REASON_REMAP_COVERAGE);
+}
+
+static void test_switch_policy_waits_for_remap_coverage_before_precopy_complete(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+        .brake_enabled = true,
+        .completion_ready = true,
+        .staged_pages = 100,
+        .remap_coverage_threshold = 80,
+        .remap_coverage = 79,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==, CXL_HYBRID_SWITCH_ACTION_NONE);
+    g_assert_cmpint(decision.reason, ==, CXL_MIGRATION_SWITCH_REASON_NONE);
+}
+
+static void test_switch_policy_uses_precopy_complete_without_coverage_gate(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+        .brake_enabled = true,
+        .completion_ready = true,
+        .staged_pages = 100,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==,
+                    CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY);
+    g_assert_cmpint(decision.reason, ==,
+                    CXL_MIGRATION_SWITCH_REASON_PRECOPY_COMPLETE);
+}
+
+static void test_switch_policy_uses_remap_coverage_before_precopy_complete(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+        .brake_enabled = true,
+        .completion_ready = true,
+        .staged_pages = 100,
+        .remap_coverage_threshold = 80,
+        .remap_coverage = 80,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==,
+                    CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY);
+    g_assert_cmpint(decision.reason, ==,
+                    CXL_MIGRATION_SWITCH_REASON_REMAP_COVERAGE);
+}
+
+static void test_switch_policy_enters_brake_for_bulk_complete_with_coverage(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BULK,
+        .brake_enabled = true,
+        .completion_ready = true,
+        .max_iters_trigger = true,
+        .staged_pages = 100,
+        .remap_coverage_threshold = 80,
+        .remap_coverage = 0,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==, CXL_HYBRID_SWITCH_ACTION_ENTER_BRAKE);
+    g_assert_cmpint(decision.reason, ==, CXL_MIGRATION_SWITCH_REASON_NONE);
+}
+
+static void test_switch_policy_uses_precopy_complete_from_bulk_without_coverage(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BULK,
+        .brake_enabled = true,
+        .completion_ready = true,
+        .max_iters_trigger = true,
+        .staged_pages = 100,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==,
+                    CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY);
+    g_assert_cmpint(decision.reason, ==,
+                    CXL_MIGRATION_SWITCH_REASON_PRECOPY_COMPLETE);
+}
+
+static void test_switch_policy_ignores_precopy_complete_without_staged_pages(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+        .brake_enabled = true,
+        .completion_ready = true,
+        .staged_pages = 0,
+        .remap_coverage_threshold = 80,
+        .remap_coverage = 0,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==, CXL_HYBRID_SWITCH_ACTION_NONE);
+    g_assert_cmpint(decision.reason, ==, CXL_MIGRATION_SWITCH_REASON_NONE);
+}
+
+static void test_switch_policy_keeps_remaining_and_time_cap_fallbacks(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+        .brake_enabled = true,
+        .remaining_trigger = true,
+        .max_iters_trigger = true,
+        .remap_coverage_threshold = 80,
+        .remap_coverage = 0,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==,
+                    CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY);
+    g_assert_cmpint(decision.reason, ==,
+                    CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL);
+
+    input.remaining_trigger = false;
+    input.time_cap_trigger = true;
+    decision = cxl_hybrid_switch_decide(&input);
+    g_assert_cmpint(decision.action, ==,
+                    CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY);
+    g_assert_cmpint(decision.reason, ==,
+                    CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP);
+}
+
+static void test_switch_policy_preserves_legacy_brake_without_coverage(void)
+{
+    CXLHybridSwitchPolicyInput input = {
+        .phase = CXL_HYBRID_PHASE_PRECOPY_BRAKE,
+        .brake_enabled = true,
+        .max_iters_trigger = true,
+    };
+    CXLHybridSwitchDecision decision = cxl_hybrid_switch_decide(&input);
+
+    g_assert_cmpint(decision.action, ==,
+                    CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY);
+    g_assert_cmpint(decision.reason, ==,
+                    CXL_MIGRATION_SWITCH_REASON_MAX_ITERS);
+}
+
+static void test_source_remap_coverage_uses_staged_pages_denominator(void)
+{
+    g_assert_cmpuint(cxl_hybrid_calculate_source_remap_coverage(0, 10), ==, 0);
+    g_assert_cmpuint(cxl_hybrid_calculate_source_remap_coverage(100, 0), ==, 0);
+    g_assert_cmpuint(cxl_hybrid_calculate_source_remap_coverage(100, 79), ==,
+                     79);
+    g_assert_cmpuint(cxl_hybrid_calculate_source_remap_coverage(100, 100), ==,
+                     100);
+    g_assert_cmpuint(cxl_hybrid_calculate_source_remap_coverage(100, 120), ==,
+                     100);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -736,5 +937,29 @@ int main(int argc, char **argv)
                     test_region_resolution_rejects_hole);
     g_test_add_func("/cxl-hybrid-control/fault-generation-uses-stable-source-run",
                     test_fault_generation_uses_stable_source_run);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-enters-brake-before-coverage-switch",
+                    test_switch_policy_enters_brake_before_coverage_switch);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-waits-for-remap-coverage-in-brake",
+                    test_switch_policy_waits_for_remap_coverage_in_brake);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-uses-remap-coverage-in-brake",
+                    test_switch_policy_uses_remap_coverage_in_brake);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-waits-for-coverage-before-precopy-complete",
+                    test_switch_policy_waits_for_remap_coverage_before_precopy_complete);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-uses-precopy-complete-without-coverage-gate",
+                    test_switch_policy_uses_precopy_complete_without_coverage_gate);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-uses-coverage-before-precopy-complete",
+                    test_switch_policy_uses_remap_coverage_before_precopy_complete);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-enters-brake-for-bulk-complete-with-coverage",
+                    test_switch_policy_enters_brake_for_bulk_complete_with_coverage);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-uses-precopy-complete-from-bulk-without-coverage",
+                    test_switch_policy_uses_precopy_complete_from_bulk_without_coverage);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-ignores-precopy-complete-without-staged-pages",
+                    test_switch_policy_ignores_precopy_complete_without_staged_pages);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-keeps-remaining-and-time-cap-fallbacks",
+                    test_switch_policy_keeps_remaining_and_time_cap_fallbacks);
+    g_test_add_func("/cxl-hybrid-control/switch-policy-preserves-legacy-brake-without-coverage",
+                    test_switch_policy_preserves_legacy_brake_without_coverage);
+    g_test_add_func("/cxl-hybrid-control/source-remap-coverage-uses-staged-pages-denominator",
+                    test_source_remap_coverage_uses_staged_pages_denominator);
     return g_test_run();
 }
