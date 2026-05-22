@@ -58,6 +58,13 @@ static void test_source_remapped_ram_stream_skips_backing_write(void)
                     MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE);
 }
 
+static void test_source_remapped_visible_ram_stream_skips_without_publish(void)
+{
+    g_assert_cmpint(migration_postcopy_cxl_ram_stream_write_action(
+                        false, true, true), ==,
+                    MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_ALREADY_VISIBLE);
+}
+
 static void test_destination_owned_visible_ram_stream_skips_backing_write(void)
 {
     g_assert_cmpint(migration_postcopy_cxl_ram_stream_write_action(
@@ -137,6 +144,8 @@ int main(int argc, char **argv)
                     test_native_ram_stream_does_not_publish_cxl_visible);
     g_test_add_func("/migration/postcopy/source-remapped-ram-stream-skips-backing-write",
                     test_source_remapped_ram_stream_skips_backing_write);
+    g_test_add_func("/migration/postcopy/source-remapped-visible-ram-stream-skips-without-publish",
+                    test_source_remapped_visible_ram_stream_skips_without_publish);
     g_test_add_func("/migration/postcopy/destination-owned-visible-ram-stream-skips-backing-write",
                     test_destination_owned_visible_ram_stream_skips_backing_write);
     g_test_add_func("/migration/postcopy/destination-owned-invisible-ram-stream-errors",

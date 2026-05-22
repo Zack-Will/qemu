@@ -29,7 +29,7 @@ uint64_t cxl_hybrid_choose_fault_region_granule(uint64_t align,
         return 0;
     }
 
-    granule = configured ? configured : CXL_REMAP_GRANULE_DEFAULT;
+    granule = configured ? configured : CXL_FAULT_REGION_GRANULE_DEFAULT;
     granule = MAX(align, granule);
     granule = ROUND_UP(granule, align);
     if (total_ram > 0) {
@@ -178,6 +178,89 @@ bool cxl_hybrid_source_remap_region_clean(const unsigned long *migrated_bmap,
 
     return bitmap_count_one_with_offset(dirty_bmap, dirty_first_page,
                                         npages) == 0;
+}
+
+bool cxl_hybrid_warm_page_eligible_for_push(
+    const unsigned long *migrated_bmap,
+    const unsigned long *warm_sent_bmap,
+    const unsigned long *dst_sent_bmap,
+    const unsigned long *cxl_visible_bmap,
+    size_t page_idx)
+{
+    return migrated_bmap &&
+           test_bit(page_idx, migrated_bmap) &&
+           (!warm_sent_bmap || !test_bit(page_idx, warm_sent_bmap)) &&
+           (!dst_sent_bmap || !test_bit(page_idx, dst_sent_bmap)) &&
+           (!cxl_visible_bmap || !test_bit(page_idx, cxl_visible_bmap));
+}
+
+bool cxl_hybrid_clean_remap_budget_allows(uint64_t budget_bytes,
+                                          uint64_t used_bytes,
+                                          uint64_t region_len)
+{
+    uint64_t effective_budget;
+
+    if (!region_len) {
+        return false;
+    }
+
+    if (budget_bytes == 0) {
+        return used_bytes == 0;
+    }
+
+    effective_budget = MAX(budget_bytes, region_len);
+    return used_bytes <= effective_budget &&
+           region_len <= effective_budget - used_bytes;
+}
+
+bool cxl_hybrid_clean_remap_should_throttle(uint64_t throttle_us,
+                                            bool copied_region)
+{
+    return throttle_us > 0 && copied_region;
+}
+
+bool cxl_hybrid_clean_remap_region_is_candidate(bool epoch_seen,
+                                                bool dirty_now,
+                                                bool already_remapped,
+                                                bool in_flight)
+{
+    return epoch_seen && !dirty_now && !already_remapped && !in_flight;
+}
+
+bool cxl_hybrid_clean_remap_debug_scan_only(const char *mode)
+{
+    return g_strcmp0(mode, "scan-only") == 0;
+}
+
+bool cxl_hybrid_clean_remap_debug_copy_only(const char *mode)
+{
+    return g_strcmp0(mode, "copy-only") == 0;
+}
+
+bool cxl_hybrid_clean_remap_debug_read_only(const char *mode)
+{
+    return g_strcmp0(mode, "read-only") == 0;
+}
+
+bool cxl_hybrid_clean_remap_debug_write_only(const char *mode)
+{
+    return g_strcmp0(mode, "write-only") == 0;
+}
+
+bool cxl_hybrid_clean_remap_debug_defer_remap(const char *mode)
+{
+    return g_strcmp0(mode, "defer-remap") == 0;
+}
+
+bool cxl_hybrid_clean_remap_prefault_valid(CXLCleanRemapPrefaultMode mode)
+{
+    return mode >= 0 && mode < CXL_CLEAN_REMAP_PREFAULT_MODE__MAX;
+}
+
+bool cxl_hybrid_clean_remap_prefault_enabled(CXLCleanRemapPrefaultMode mode)
+{
+    return mode == CXL_CLEAN_REMAP_PREFAULT_MODE_MADVISE ||
+           mode == CXL_CLEAN_REMAP_PREFAULT_MODE_TOUCH;
 }
 
 uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(

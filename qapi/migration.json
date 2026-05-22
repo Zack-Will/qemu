@@ -292,6 +292,31 @@
               'features': [ 'unstable' ] } ] }
 
 ##
+# @CXLCleanRemapPrefaultMode:
+#
+# Experimental source-side destination CXL prefault mode for
+# clean-remap copies.
+#
+# @off: do not synchronously prefault clean-remap copy targets
+#
+# @madvise: use MADV_POPULATE_WRITE on each clean-remap copy target
+#     before the source RAM copy
+#
+# @touch: explicitly touch each host page in the clean-remap copy
+#     target before the source RAM copy
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLCleanRemapPrefaultMode',
+  'data': [ { 'name': 'off', 'features': [ 'unstable' ] },
+            { 'name': 'madvise', 'features': [ 'unstable' ] },
+            { 'name': 'touch', 'features': [ 'unstable' ] } ] }
+
+##
 # @VfioStats:
 #
 # Detailed VFIO devices migration statistics
@@ -414,6 +439,12 @@
 # @backing-write-time-ns: cumulative nanoseconds spent in backing
 #     channel writes
 #
+# @backing-rate-sleep-count: number of source-side CXL backing
+#     pacing sleeps
+#
+# @backing-rate-sleep-time-ns: cumulative nanoseconds spent sleeping
+#     for source-side CXL backing pacing
+#
 # @migrated-bitmap-time-ns: cumulative nanoseconds spent marking
 #     pages as already copied to CXL
 #
@@ -467,6 +498,43 @@
 #
 # @dirty-clear-time-ns: cumulative nanoseconds spent clearing dirty
 #     bits for already-remapped pages
+#
+# @clean-remap-scan-calls: number of clean-remap dirty-scan epochs
+#     executed by the source.  (Since 11.0)
+#
+# @clean-remap-candidate-regions: source-remap regions queued because
+#     they were clean across a scan epoch.  (Since 11.0)
+#
+# @clean-remap-copy-bytes: bytes copied from source RAM into CXL
+#     backing by the clean-remap path.  (Since 11.0)
+#
+# @clean-remap-copy-time-ns: nanoseconds spent copying source RAM into
+#     CXL backing by the clean-remap path.  (Since 11.0)
+#
+# @clean-remap-abandoned-dirty: number of candidate regions abandoned
+#     because the final dirty sync found a dirty page.  (Since 11.0)
+#
+# @clean-remap-budget-exhaustions: number of clean-remap drains that
+#     stopped because the copy budget was exhausted.  (Since 11.0)
+#
+# @clean-remap-pending-bytes: bytes still not published/remapped
+#     by the clean-remap source mode.  (Since 11.0)
+#
+# @clean-remap-coverage: clean-remap coverage percentage, measured as
+#     remapped pages divided by total guest RAM pages.  This does
+#     not use the staged-page denominator from @remap-coverage.
+#     (Since 11.0)
+#
+# @clean-remap-prefault-bytes: bytes covered by synchronous
+#     clean-remap copy-target prefault operations.  This is separate
+#     from source-wide background @prefault-bytes.  (Since 11.0)
+#
+# @clean-remap-prefault-time-ns: cumulative nanoseconds spent in
+#     synchronous clean-remap copy-target prefault work.  (Since
+#     11.0)
+#
+# @clean-remap-prefault-errors: number of synchronous clean-remap
+#     copy-target prefault errors.  (Since 11.0)
 #
 # @prefault-bytes: bytes covered by source-side CXL page-data
 #     write-prefault operations
@@ -689,6 +757,7 @@
 # @unstable: Members @remap-coverage, @phase, @phase-transitions,
 #     @switch-reason, @switch-iteration, @dst-stage-capacity-bytes,
 #     @dst-stage-slots, @dst-stage-present-slots,
+#     @clean-remap-coverage,
 #     @dst-fault-hits, @dst-fault-misses,
 #     @dst-fault-read-bytes, @dst-fault-read-time-ns,
 #     @dst-fault-place-successes,
@@ -705,6 +774,8 @@
 #     @last-iterate-fault-burst-pages, @last-iterate-phase,
 #     @fault-publish-requests, @fault-publish-waits,
 #     @fault-publish-wait-time-ns,
+#     @clean-remap-prefault-bytes, @clean-remap-prefault-time-ns,
+#     @clean-remap-prefault-errors,
 #     @prefault-bytes, @prefault-time-ns,
 #     @prefault-wait-time-ns, @prefault-errors,
 #     @region-publish-requests, @region-publish-pages,
@@ -756,6 +827,8 @@
             'backing-write-calls': 'uint64',
             'backing-write-bytes': 'uint64',
             'backing-write-time-ns': 'uint64',
+            'backing-rate-sleep-count': 'uint64',
+            'backing-rate-sleep-time-ns': 'uint64',
             'migrated-bitmap-time-ns': 'uint64',
             'remap-scan-calls': 'uint64',
             'remap-scan-time-ns': 'uint64',
@@ -777,6 +850,21 @@
             'dirty-sync-calls': 'uint64',
             'dirty-sync-time-ns': 'uint64',
             'dirty-clear-time-ns': 'uint64',
+            'clean-remap-scan-calls': 'uint64',
+            'clean-remap-candidate-regions': 'uint64',
+            'clean-remap-copy-bytes': 'uint64',
+            'clean-remap-copy-time-ns': 'uint64',
+            'clean-remap-abandoned-dirty': 'uint64',
+            'clean-remap-budget-exhaustions': 'uint64',
+            'clean-remap-pending-bytes': 'uint64',
+            'clean-remap-coverage': { 'type': 'uint8',
+                                      'features': [ 'unstable' ] },
+            'clean-remap-prefault-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'clean-remap-prefault-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'clean-remap-prefault-errors': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
             'prefault-bytes': { 'type': 'uint64',
                                 'features': [ 'unstable' ] },
             'prefault-time-ns': { 'type': 'uint64',
@@ -1556,7 +1644,11 @@
 #     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
 #     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
 #     @x-cxl-switch-remap-coverage, @x-cxl-brake-enable,
-#     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
+#     @x-cxl-brake-remap-granule, @x-cxl-backing-rate,
+#     @x-cxl-clean-remap-enable, @x-cxl-clean-remap-copy-budget,
+#     @x-cxl-clean-remap-throttle-us,
+#     @x-cxl-clean-remap-prefault-mode,
+#     @x-cxl-prefetch-rate,
 #     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
 #     @x-cxl-dst-cache-size,
 #     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
@@ -1600,6 +1692,16 @@
            { 'name': 'x-cxl-brake-enable',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-brake-remap-granule',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-backing-rate',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-clean-remap-enable',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-clean-remap-copy-budget',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-clean-remap-throttle-us',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-clean-remap-prefault-mode',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-prefetch-rate',
              'features': [ 'unstable' ] },
@@ -1824,6 +1926,27 @@
 #     granule, in bytes.  Zero means automatic selection.  (Since
 #     11.0)
 #
+# @x-cxl-backing-rate: Maximum source-side CXL mapped-RAM backing
+#     write rate, in bytes per second.  Zero means no explicit CXL
+#     backing write cap.  (Since 11.0)
+#
+# @x-cxl-clean-remap-enable: Enable experimental clean-remap-only CXL
+#     hybrid precopy.  When enabled, source precopy scans dirty
+#     state and drains clean source-remap regions instead of
+#     bulk-copying every RAM page.  Default is false.  (Since 11.0)
+#
+# @x-cxl-clean-remap-copy-budget: Maximum bytes copied from source
+#     RAM to CXL backing by one clean-remap drain.  Zero means one
+#     source-remap region per drain.  (Since 11.0)
+#
+# @x-cxl-clean-remap-throttle-us: Microseconds to sleep after each
+#     source-remap region copied by a clean-remap drain.  Zero means
+#     no explicit clean-remap burst throttle.  (Since 11.0)
+#
+# @x-cxl-clean-remap-prefault-mode: Source-side synchronous
+#     clean-remap copy-target prefault mode.  Default is @off.
+#     (Since 11.0)
+#
 # @x-cxl-prefetch-rate: Maximum rate, in bytes per second, for
 #     background hybrid warm push into destination CXL staging.  Zero
 #     means no explicit hybrid-prefetch cap.  (Since 11.0)
@@ -1860,7 +1983,11 @@
 #     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
 #     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
 #     @x-cxl-switch-remap-coverage, @x-cxl-brake-enable,
-#     @x-cxl-brake-remap-granule, @x-cxl-prefetch-rate,
+#     @x-cxl-brake-remap-granule, @x-cxl-backing-rate,
+#     @x-cxl-clean-remap-enable, @x-cxl-clean-remap-copy-budget,
+#     @x-cxl-clean-remap-throttle-us,
+#     @x-cxl-clean-remap-prefault-mode,
+#     @x-cxl-prefetch-rate,
 #     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
 #     @x-cxl-dst-cache-size,
 #     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
@@ -1917,6 +2044,17 @@
                 'type': 'bool', 'features': [ 'unstable' ] },
             '*x-cxl-brake-remap-granule': {
                 'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-backing-rate': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-clean-remap-enable': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-clean-remap-copy-budget': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-clean-remap-throttle-us': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            '*x-cxl-clean-remap-prefault-mode': {
+                'type': 'CXLCleanRemapPrefaultMode',
+                'features': [ 'unstable' ] },
             '*x-cxl-prefetch-rate': {
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-prefetch-heat-window-ms': {

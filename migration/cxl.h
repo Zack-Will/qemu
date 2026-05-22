@@ -21,8 +21,10 @@
 #define CXL_HYBRID_CTRL_VERSION 5
 #define CXL_HYBRID_CTRL_REQUEST_ORDER 10
 #define CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE (1U << 0)
+#define CXL_FAULT_REGION_GRANULE_DEFAULT (2 * 1024 * 1024)
 #define CXL_REMAP_GRANULE_DEFAULT (64 * 1024)
 #define CXL_REMAP_GRANULE_ENV "QEMU_CXL_REMAP_GRANULE"
+#define CXL_CLEAN_REMAP_DEBUG_ENV "QEMU_CXL_CLEAN_REMAP_DEBUG"
 
 typedef enum CXLHybridPhase {
     CXL_HYBRID_PHASE_DISABLED = 0,
@@ -265,6 +267,26 @@ bool cxl_hybrid_source_remap_region_clean(const unsigned long *migrated_bmap,
                                           const unsigned long *dirty_bmap,
                                           size_t dirty_first_page,
                                           size_t npages);
+bool cxl_hybrid_warm_page_eligible_for_push(
+    const unsigned long *migrated_bmap,
+    const unsigned long *warm_sent_bmap,
+    const unsigned long *dst_sent_bmap,
+    const unsigned long *cxl_visible_bmap,
+    size_t page_idx);
+bool cxl_hybrid_clean_remap_budget_allows(uint64_t budget_bytes,
+                                          uint64_t used_bytes,
+                                          uint64_t region_len);
+bool cxl_hybrid_clean_remap_region_is_candidate(bool epoch_seen,
+                                                bool dirty_now,
+                                                bool already_remapped,
+                                                bool in_flight);
+bool cxl_hybrid_clean_remap_debug_scan_only(const char *mode);
+bool cxl_hybrid_clean_remap_debug_copy_only(const char *mode);
+bool cxl_hybrid_clean_remap_debug_read_only(const char *mode);
+bool cxl_hybrid_clean_remap_debug_write_only(const char *mode);
+bool cxl_hybrid_clean_remap_debug_defer_remap(const char *mode);
+bool cxl_hybrid_clean_remap_prefault_valid(CXLCleanRemapPrefaultMode mode);
+bool cxl_hybrid_clean_remap_prefault_enabled(CXLCleanRemapPrefaultMode mode);
 uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
     uint64_t file_align,
     uint64_t dax_align,
@@ -347,6 +369,23 @@ CXLHybridPhase cxl_hybrid_phase(void);
 bool cxl_hybrid_init_destination(Error **errp);
 uint64_t cxl_hybrid_source_staged_pages(void);
 uint8_t cxl_hybrid_source_remap_coverage(void);
+bool cxl_hybrid_clean_remap_enabled(void);
+uint64_t cxl_hybrid_clean_remap_pending_bytes(void);
+uint8_t cxl_hybrid_clean_remap_coverage(void);
+bool cxl_hybrid_clean_remap_should_throttle(uint64_t throttle_us,
+                                            bool copied_region);
+uint64_t cxl_hybrid_source_remap_granule(void);
+void cxl_hybrid_clean_remap_note_scan(void);
+void cxl_hybrid_clean_remap_scan_region(RAMBlock *block,
+                                        ram_addr_t block_offset,
+                                        size_t region_len,
+                                        bool dirty_now);
+bool cxl_hybrid_clean_remap_has_candidates(void);
+bool cxl_hybrid_clean_remap_defer_remap_enabled(void);
+bool cxl_hybrid_clean_remap_region_inflight(RAMBlock *block,
+                                            ram_addr_t block_offset);
+int cxl_hybrid_clean_remap_drain(Error **errp);
+void cxl_hybrid_clean_remap_finalize_deferred(void);
 void cxl_hybrid_drain_source_remaps(void);
 void cxl_hybrid_record_warm_miss(const char *rbname, ram_addr_t start);
 void cxl_hybrid_account_warm_dirty(const char *rbname, ram_addr_t offset,

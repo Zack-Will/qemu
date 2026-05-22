@@ -47,7 +47,9 @@ migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
                                                bool page_visible)
 {
     if (source_remapped) {
-        return MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE;
+        return page_visible ?
+            MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_ALREADY_VISIBLE :
+            MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE;
     }
 
     if (destination_owned) {

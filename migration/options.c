@@ -78,6 +78,12 @@
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_REMAP_COVERAGE 0
 #define DEFAULT_MIGRATE_X_CXL_BRAKE_ENABLE false
 #define DEFAULT_MIGRATE_X_CXL_BRAKE_REMAP_GRANULE 0
+#define DEFAULT_MIGRATE_X_CXL_BACKING_RATE 0
+#define DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_ENABLE false
+#define DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_COPY_BUDGET 0
+#define DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_THROTTLE_US 0
+#define DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_PREFAULT_MODE \
+    CXL_CLEAN_REMAP_PREFAULT_MODE_OFF
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_RATE 0
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_HEAT_WINDOW_MS 0
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_BATCH_PAGES 0
@@ -222,6 +228,23 @@ const Property migration_properties[] = {
     DEFINE_PROP_SIZE("x-cxl-brake-remap-granule", MigrationState,
                       parameters.x_cxl_brake_remap_granule,
                       DEFAULT_MIGRATE_X_CXL_BRAKE_REMAP_GRANULE),
+    DEFINE_PROP_SIZE("x-cxl-backing-rate", MigrationState,
+                      parameters.x_cxl_backing_rate,
+                      DEFAULT_MIGRATE_X_CXL_BACKING_RATE),
+    DEFINE_PROP_BOOL("x-cxl-clean-remap-enable", MigrationState,
+                      parameters.x_cxl_clean_remap_enable,
+                      DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_ENABLE),
+    DEFINE_PROP_SIZE("x-cxl-clean-remap-copy-budget", MigrationState,
+                      parameters.x_cxl_clean_remap_copy_budget,
+                      DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_COPY_BUDGET),
+    DEFINE_PROP_UINT64("x-cxl-clean-remap-throttle-us", MigrationState,
+                      parameters.x_cxl_clean_remap_throttle_us,
+                      DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_THROTTLE_US),
+    DEFINE_PROP_CXL_CLEAN_REMAP_PREFAULT_MODE(
+                      "x-cxl-clean-remap-prefault-mode",
+                      MigrationState,
+                      parameters.x_cxl_clean_remap_prefault_mode,
+                      DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_PREFAULT_MODE),
     DEFINE_PROP_SIZE("x-cxl-prefetch-rate", MigrationState,
                       parameters.x_cxl_prefetch_rate,
                       DEFAULT_MIGRATE_X_CXL_PREFETCH_RATE),
@@ -1027,6 +1050,41 @@ uint64_t migrate_cxl_brake_remap_granule(void)
     return s->parameters.x_cxl_brake_remap_granule;
 }
 
+uint64_t migrate_cxl_backing_rate(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_backing_rate;
+}
+
+bool migrate_cxl_clean_remap_enable(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_clean_remap_enable;
+}
+
+uint64_t migrate_cxl_clean_remap_copy_budget(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_clean_remap_copy_budget;
+}
+
+uint64_t migrate_cxl_clean_remap_throttle_us(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_clean_remap_throttle_us;
+}
+
+CXLCleanRemapPrefaultMode migrate_cxl_clean_remap_prefault_mode(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_clean_remap_prefault_mode;
+}
+
 uint64_t migrate_cxl_prefetch_rate(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1298,6 +1356,11 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_switch_remap_coverage,
         &p->has_x_cxl_brake_enable,
         &p->has_x_cxl_brake_remap_granule,
+        &p->has_x_cxl_backing_rate,
+        &p->has_x_cxl_clean_remap_enable,
+        &p->has_x_cxl_clean_remap_copy_budget,
+        &p->has_x_cxl_clean_remap_throttle_us,
+        &p->has_x_cxl_clean_remap_prefault_mode,
         &p->has_x_cxl_prefetch_rate,
         &p->has_x_cxl_prefetch_heat_window_ms,
         &p->has_x_cxl_prefetch_batch_pages,
@@ -1337,6 +1400,14 @@ MigrationParameters *qmp_query_migrate_parameters(Error **errp)
 
 void migrate_params_init(MigrationParameters *params)
 {
+    params->x_cxl_clean_remap_enable =
+        DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_ENABLE;
+    params->x_cxl_clean_remap_copy_budget =
+        DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_COPY_BUDGET;
+    params->x_cxl_clean_remap_throttle_us =
+        DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_THROTTLE_US;
+    params->x_cxl_clean_remap_prefault_mode =
+        DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_PREFAULT_MODE;
     params->x_cxl_fault_resolve_mode =
         DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
     migrate_mark_all_params_present(params);
@@ -1539,6 +1610,14 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->x_cxl_clean_remap_prefault_mode < 0 ||
+        params->x_cxl_clean_remap_prefault_mode >=
+        CXL_CLEAN_REMAP_PREFAULT_MODE__MAX) {
+        error_setg(errp, "Invalid x-cxl-clean-remap-prefault-mode value %d",
+                   params->x_cxl_clean_remap_prefault_mode);
+        return false;
+    }
+
     return true;
 }
 
@@ -1698,6 +1777,25 @@ static void migrate_params_test_apply(MigrationParameters *params,
     if (params->has_x_cxl_brake_remap_granule) {
         dest->x_cxl_brake_remap_granule =
             params->x_cxl_brake_remap_granule;
+    }
+    if (params->has_x_cxl_backing_rate) {
+        dest->x_cxl_backing_rate = params->x_cxl_backing_rate;
+    }
+    if (params->has_x_cxl_clean_remap_enable) {
+        dest->x_cxl_clean_remap_enable =
+            params->x_cxl_clean_remap_enable;
+    }
+    if (params->has_x_cxl_clean_remap_copy_budget) {
+        dest->x_cxl_clean_remap_copy_budget =
+            params->x_cxl_clean_remap_copy_budget;
+    }
+    if (params->has_x_cxl_clean_remap_throttle_us) {
+        dest->x_cxl_clean_remap_throttle_us =
+            params->x_cxl_clean_remap_throttle_us;
+    }
+    if (params->has_x_cxl_clean_remap_prefault_mode) {
+        dest->x_cxl_clean_remap_prefault_mode =
+            params->x_cxl_clean_remap_prefault_mode;
     }
     if (params->has_x_cxl_prefetch_rate) {
         dest->x_cxl_prefetch_rate = params->x_cxl_prefetch_rate;
@@ -1880,6 +1978,25 @@ static void migrate_params_apply(MigrationParameters *params)
     if (params->has_x_cxl_brake_remap_granule) {
         s->parameters.x_cxl_brake_remap_granule =
             params->x_cxl_brake_remap_granule;
+    }
+    if (params->has_x_cxl_backing_rate) {
+        s->parameters.x_cxl_backing_rate = params->x_cxl_backing_rate;
+    }
+    if (params->has_x_cxl_clean_remap_enable) {
+        s->parameters.x_cxl_clean_remap_enable =
+            params->x_cxl_clean_remap_enable;
+    }
+    if (params->has_x_cxl_clean_remap_copy_budget) {
+        s->parameters.x_cxl_clean_remap_copy_budget =
+            params->x_cxl_clean_remap_copy_budget;
+    }
+    if (params->has_x_cxl_clean_remap_throttle_us) {
+        s->parameters.x_cxl_clean_remap_throttle_us =
+            params->x_cxl_clean_remap_throttle_us;
+    }
+    if (params->has_x_cxl_clean_remap_prefault_mode) {
+        s->parameters.x_cxl_clean_remap_prefault_mode =
+            params->x_cxl_clean_remap_prefault_mode;
     }
     if (params->has_x_cxl_prefetch_rate) {
         s->parameters.x_cxl_prefetch_rate = params->x_cxl_prefetch_rate;

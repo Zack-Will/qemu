@@ -461,6 +461,13 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
                 MIGRATION_PARAMETER_X_CXL_FAULT_RESOLVE_MODE),
             CXLHybridFaultResolveMode_str(params->x_cxl_fault_resolve_mode));
 
+        assert(params->has_x_cxl_clean_remap_prefault_mode);
+        monitor_printf(mon, "%s: %s\n",
+            MigrationParameter_str(
+                MIGRATION_PARAMETER_X_CXL_CLEAN_REMAP_PREFAULT_MODE),
+            CXLCleanRemapPrefaultMode_str(
+                params->x_cxl_clean_remap_prefault_mode));
+
         assert(params->has_cpr_exec_command);
         monitor_print_cpr_exec_command(mon, params->cpr_exec_command);
     }
@@ -748,6 +755,11 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         p->has_x_cxl_fault_resolve_mode = true;
         visit_type_CXLHybridFaultResolveMode(
             v, param, &p->x_cxl_fault_resolve_mode, &err);
+        break;
+    case MIGRATION_PARAMETER_X_CXL_CLEAN_REMAP_PREFAULT_MODE:
+        p->has_x_cxl_clean_remap_prefault_mode = true;
+        visit_type_CXLCleanRemapPrefaultMode(
+            v, param, &p->x_cxl_clean_remap_prefault_mode, &err);
         break;
     case MIGRATION_PARAMETER_CPR_EXEC_COMMAND: {
         /*

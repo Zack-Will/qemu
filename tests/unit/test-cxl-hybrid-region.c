@@ -240,6 +240,26 @@ static void test_source_remap_granule_is_independent_from_fault_region(void)
     g_assert_cmpuint(pages_align, ==, 2 * MiB);
 }
 
+static void test_source_remap_default_is_64k_with_4k_dax_alignment(void)
+{
+    uint64_t source_granule;
+
+    source_granule = cxl_hybrid_choose_source_remap_granule(
+        TEST_TARGET_PAGE_SIZE, 0, 64 * MiB);
+
+    g_assert_cmpuint(source_granule, ==, 64 * KiB);
+}
+
+static void test_fault_region_default_is_2mib_with_4k_dax_alignment(void)
+{
+    uint64_t fault_granule;
+
+    fault_granule = cxl_hybrid_choose_fault_region_granule(
+        4 * KiB, 0, 64 * MiB);
+
+    g_assert_cmpuint(fault_granule, ==, 2 * MiB);
+}
+
 static void test_mapped_ram_layout_returns_page_data_spans(void)
 {
     uint64_t offset = 0;
@@ -293,6 +313,135 @@ static void test_source_remap_region_requires_staged_clean_pages(void)
                                                         dirty, 32, 0));
 }
 
+static void test_clean_remap_budget_zero_one_region(void)
+{
+    g_assert_true(cxl_hybrid_clean_remap_budget_allows(0, 0, 256 * KiB));
+    g_assert_false(cxl_hybrid_clean_remap_budget_allows(0, 1, 256 * KiB));
+    g_assert_false(cxl_hybrid_clean_remap_budget_allows(0, 256 * KiB,
+                                                        256 * KiB));
+}
+
+static void test_clean_remap_budget_multiple_regions(void)
+{
+    g_assert_true(cxl_hybrid_clean_remap_budget_allows(1 * MiB, 0,
+                                                       256 * KiB));
+    g_assert_true(cxl_hybrid_clean_remap_budget_allows(128 * KiB, 0,
+                                                       256 * KiB));
+    g_assert_true(cxl_hybrid_clean_remap_budget_allows(1 * MiB, 768 * KiB,
+                                                       256 * KiB));
+    g_assert_false(cxl_hybrid_clean_remap_budget_allows(1 * MiB, 768 * KiB,
+                                                        512 * KiB));
+    g_assert_false(cxl_hybrid_clean_remap_budget_allows(UINT64_MAX,
+                                                        UINT64_MAX,
+                                                        1));
+}
+
+static void test_clean_remap_throttle_requires_nonzero_delay_and_copy(void)
+{
+    g_assert_false(cxl_hybrid_clean_remap_should_throttle(0, false));
+    g_assert_false(cxl_hybrid_clean_remap_should_throttle(0, true));
+    g_assert_false(cxl_hybrid_clean_remap_should_throttle(200, false));
+    g_assert_true(cxl_hybrid_clean_remap_should_throttle(200, true));
+}
+
+static void test_clean_remap_candidate_requires_second_clean_scan(void)
+{
+    g_assert_true(cxl_hybrid_clean_remap_region_is_candidate(true, false,
+                                                             false, false));
+    g_assert_false(cxl_hybrid_clean_remap_region_is_candidate(false, false,
+                                                              false, false));
+    g_assert_false(cxl_hybrid_clean_remap_region_is_candidate(true, true,
+                                                              false, false));
+    g_assert_false(cxl_hybrid_clean_remap_region_is_candidate(true, false,
+                                                              true, false));
+    g_assert_false(cxl_hybrid_clean_remap_region_is_candidate(true, false,
+                                                              false, true));
+}
+
+static void test_clean_remap_debug_mode_helpers(void)
+{
+    g_assert_false(cxl_hybrid_clean_remap_debug_scan_only(NULL));
+    g_assert_false(cxl_hybrid_clean_remap_debug_copy_only(NULL));
+    g_assert_false(cxl_hybrid_clean_remap_debug_read_only(NULL));
+    g_assert_false(cxl_hybrid_clean_remap_debug_write_only(NULL));
+    g_assert_false(cxl_hybrid_clean_remap_debug_scan_only(""));
+    g_assert_false(cxl_hybrid_clean_remap_debug_copy_only(""));
+    g_assert_false(cxl_hybrid_clean_remap_debug_read_only(""));
+    g_assert_false(cxl_hybrid_clean_remap_debug_write_only(""));
+    g_assert_false(cxl_hybrid_clean_remap_debug_scan_only("normal"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_copy_only("normal"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_read_only("normal"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_write_only("normal"));
+
+    g_assert_true(cxl_hybrid_clean_remap_debug_scan_only("scan-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_copy_only("scan-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_read_only("scan-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_write_only("scan-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_scan_only("copy-only"));
+    g_assert_true(cxl_hybrid_clean_remap_debug_copy_only("copy-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_read_only("copy-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_write_only("copy-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_scan_only("read-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_copy_only("read-only"));
+    g_assert_true(cxl_hybrid_clean_remap_debug_read_only("read-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_write_only("read-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_scan_only("write-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_copy_only("write-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_read_only("write-only"));
+    g_assert_true(cxl_hybrid_clean_remap_debug_write_only("write-only"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_scan_only("defer-remap"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_copy_only("defer-remap"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_read_only("defer-remap"));
+    g_assert_false(cxl_hybrid_clean_remap_debug_write_only("defer-remap"));
+    g_assert_true(cxl_hybrid_clean_remap_debug_defer_remap("defer-remap"));
+}
+
+static void test_clean_remap_prefault_mode_helpers(void)
+{
+    g_assert_false(cxl_hybrid_clean_remap_prefault_enabled(
+                       CXL_CLEAN_REMAP_PREFAULT_MODE_OFF));
+    g_assert_true(cxl_hybrid_clean_remap_prefault_enabled(
+                      CXL_CLEAN_REMAP_PREFAULT_MODE_MADVISE));
+    g_assert_true(cxl_hybrid_clean_remap_prefault_enabled(
+                      CXL_CLEAN_REMAP_PREFAULT_MODE_TOUCH));
+    g_assert_false(cxl_hybrid_clean_remap_prefault_valid(
+                       CXL_CLEAN_REMAP_PREFAULT_MODE__MAX));
+}
+
+static void test_warm_page_eligible_excludes_already_visible_pages(void)
+{
+    unsigned long migrated[BITS_TO_LONGS(128)] = { 0 };
+    unsigned long warm_sent[BITS_TO_LONGS(128)] = { 0 };
+    unsigned long dst_sent[BITS_TO_LONGS(128)] = { 0 };
+    unsigned long visible[BITS_TO_LONGS(128)] = { 0 };
+
+    bitmap_set(migrated, 42, 1);
+    g_assert_true(cxl_hybrid_warm_page_eligible_for_push(migrated, warm_sent,
+                                                         dst_sent, visible,
+                                                         42));
+
+    bitmap_set(dst_sent, 42, 1);
+    g_assert_false(cxl_hybrid_warm_page_eligible_for_push(migrated, warm_sent,
+                                                          dst_sent, visible,
+                                                          42));
+
+    bitmap_clear(dst_sent, 42, 1);
+    bitmap_set(visible, 42, 1);
+    g_assert_false(cxl_hybrid_warm_page_eligible_for_push(migrated, warm_sent,
+                                                          dst_sent, visible,
+                                                          42));
+
+    bitmap_clear(visible, 42, 1);
+    bitmap_set(warm_sent, 42, 1);
+    g_assert_false(cxl_hybrid_warm_page_eligible_for_push(migrated, warm_sent,
+                                                          dst_sent, visible,
+                                                          42));
+
+    g_assert_false(cxl_hybrid_warm_page_eligible_for_push(NULL, warm_sent,
+                                                          dst_sent, visible,
+                                                          42));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -328,9 +477,27 @@ int main(int argc, char **argv)
                     test_mapped_ram_pages_alignment_includes_region_granule);
     g_test_add_func("/cxl/region/source-remap-independent-from-fault-region",
                     test_source_remap_granule_is_independent_from_fault_region);
+    g_test_add_func("/cxl/region/source-default-64k-with-4k-dax",
+                    test_source_remap_default_is_64k_with_4k_dax_alignment);
+    g_test_add_func("/cxl/region/fault-default-2mib-with-4k-dax",
+                    test_fault_region_default_is_2mib_with_4k_dax_alignment);
     g_test_add_func("/cxl/region/mapped-ram-layout-page-spans",
                     test_mapped_ram_layout_returns_page_data_spans);
     g_test_add_func("/cxl/region/source-remap-requires-staged-clean-pages",
                     test_source_remap_region_requires_staged_clean_pages);
+    g_test_add_func("/cxl/region/clean-remap-budget-zero-one-region",
+                    test_clean_remap_budget_zero_one_region);
+    g_test_add_func("/cxl/region/clean-remap-budget-multiple-regions",
+                    test_clean_remap_budget_multiple_regions);
+    g_test_add_func("/cxl/region/clean-remap-throttle-requires-delay-and-copy",
+                    test_clean_remap_throttle_requires_nonzero_delay_and_copy);
+    g_test_add_func("/cxl/region/clean-remap-candidate-requires-second-clean-scan",
+                    test_clean_remap_candidate_requires_second_clean_scan);
+    g_test_add_func("/cxl/region/clean-remap-debug-mode-helpers",
+                    test_clean_remap_debug_mode_helpers);
+    g_test_add_func("/cxl/region/clean-remap-prefault-mode-helpers",
+                    test_clean_remap_prefault_mode_helpers);
+    g_test_add_func("/cxl/region/warm-page-eligible-excludes-already-visible-pages",
+                    test_warm_page_eligible_excludes_already_visible_pages);
     return g_test_run();
 }

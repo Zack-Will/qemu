@@ -150,7 +150,10 @@ static void migration_trace_precopy_timeline(MigrationState *s,
         must_precopy,
         can_postcopy,
         migrate_cxl_hybrid() ? cxl_hybrid_phase() : CXL_HYBRID_PHASE_DISABLED,
-        migrate_cxl_hybrid() ? cxl_hybrid_source_remap_coverage() : 0,
+        migrate_cxl_hybrid() ?
+            (cxl_hybrid_clean_remap_enabled() ?
+             cxl_hybrid_clean_remap_coverage() :
+             cxl_hybrid_source_remap_coverage()) : 0,
         migrate_cxl_hybrid() ? cxl_hybrid_source_staged_pages() : 0);
 }
 
@@ -174,6 +177,7 @@ static bool migration_cxl_hybrid_should_start_postcopy(MigrationState *s,
     uint8_t remap_coverage;
     uint64_t previous_remaining;
     uint64_t gain;
+    bool clean_remap_enabled;
     CXLHybridSwitchPolicyInput input;
     CXLHybridSwitchDecision decision;
 
@@ -198,20 +202,28 @@ static bool migration_cxl_hybrid_should_start_postcopy(MigrationState *s,
     max_iters = migrate_cxl_switch_max_iters();
     staged_pages = cxl_hybrid_source_staged_pages();
     remap_coverage_threshold = migrate_cxl_switch_remap_coverage();
-    remap_coverage = cxl_hybrid_source_remap_coverage();
+    clean_remap_enabled = cxl_hybrid_clean_remap_enabled();
+    if (clean_remap_enabled) {
+        pending_size += cxl_hybrid_clean_remap_pending_bytes();
+        remap_coverage = cxl_hybrid_clean_remap_coverage();
+    } else {
+        remap_coverage = cxl_hybrid_source_remap_coverage();
+    }
     previous_remaining = s->cxl_hybrid_prev_remaining;
     gain = previous_remaining > pending_size ? previous_remaining - pending_size : 0;
     s->cxl_hybrid_prev_remaining = pending_size;
 
     input = (CXLHybridSwitchPolicyInput) {
         .phase = cxl_hybrid_phase(),
-        .brake_enabled = migrate_cxl_brake_enable(),
+        .brake_enabled = migrate_cxl_brake_enable() ||
+                          clean_remap_enabled,
         .dirty_trigger = dirty_threshold && dirty_rate >= dirty_threshold,
         .max_iters_trigger = max_iters &&
             s->cxl_hybrid_iteration >= max_iters,
         .gain_trigger = gain_floor && previous_remaining &&
             gain <= gain_floor,
-        .remaining_trigger = remaining_threshold &&
+        .remaining_trigger = !clean_remap_enabled &&
+            remaining_threshold &&
             pending_size <= remaining_threshold,
         .time_cap_trigger = max_precopy_ms && elapsed_ms >= max_precopy_ms,
         .completion_ready = complete_ready,
@@ -242,6 +254,7 @@ static bool migration_cxl_hybrid_should_start_postcopy(MigrationState *s,
         return false;
     }
 
+    cxl_hybrid_clean_remap_finalize_deferred();
     migration_trace_precopy_timeline(s, "request-postcopy", pending_size,
                                      must_precopy, can_postcopy);
     migration_request_postcopy(s, true, decision.reason);
@@ -258,8 +271,17 @@ static bool migration_cxl_hybrid_should_defer_precopy_completion(bool complete_r
     }
 
     remap_coverage_threshold = migrate_cxl_switch_remap_coverage();
+    if (cxl_hybrid_clean_remap_enabled() &&
+        cxl_hybrid_clean_remap_pending_bytes() > 0) {
+        return true;
+    }
+
     if (!remap_coverage_threshold || !cxl_hybrid_source_staged_pages()) {
         return false;
+    }
+
+    if (cxl_hybrid_clean_remap_enabled()) {
+        return cxl_hybrid_clean_remap_coverage() < remap_coverage_threshold;
     }
 
     return cxl_hybrid_source_remap_coverage() < remap_coverage_threshold;
@@ -3742,9 +3764,13 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                 migration_trace_precopy_timeline(s, "drain-remaps-begin",
                                                  pending_size, must_precopy,
                                                  can_postcopy);
-                bql_lock();
-                cxl_hybrid_drain_source_remaps();
-                bql_unlock();
+                if (cxl_hybrid_clean_remap_enabled()) {
+                    cxl_hybrid_drain_source_remaps();
+                } else {
+                    bql_lock();
+                    cxl_hybrid_drain_source_remaps();
+                    bql_unlock();
+                }
                 migration_trace_precopy_timeline(s, "drain-remaps-end",
                                                  pending_size, must_precopy,
                                                  can_postcopy);
@@ -3787,9 +3813,13 @@ static MigIterateState migration_iteration_run(MigrationState *s)
         migration_trace_precopy_timeline(s, "drain-remaps-begin",
                                          pending_size, must_precopy,
                                          can_postcopy);
-        bql_lock();
-        cxl_hybrid_drain_source_remaps();
-        bql_unlock();
+        if (cxl_hybrid_clean_remap_enabled()) {
+            cxl_hybrid_drain_source_remaps();
+        } else {
+            bql_lock();
+            cxl_hybrid_drain_source_remaps();
+            bql_unlock();
+        }
         migration_trace_precopy_timeline(s, "drain-remaps-end",
                                          pending_size, must_precopy,
                                          can_postcopy);

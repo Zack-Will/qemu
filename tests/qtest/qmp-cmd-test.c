@@ -400,6 +400,66 @@ static void test_migrate_set_parameters_cxl_switch_remap_coverage(void)
     qtest_quit(qts);
 }
 
+static void test_migrate_set_parameters_cxl_backing_rate(void)
+{
+    QTestState *qts;
+    QDict *resp;
+    QDict *ret;
+
+    qts = qtest_init(common_args);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': {"
+                    "    'x-cxl-backing-rate': 536870912 } }");
+    g_assert_nonnull(resp);
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'query-migrate-parameters' }");
+    g_assert_nonnull(resp);
+    ret = qdict_get_qdict(resp, "return");
+    g_assert_nonnull(ret);
+    g_assert_cmpint(qdict_get_int(ret, "x-cxl-backing-rate"), ==,
+                    536870912);
+    qobject_unref(resp);
+
+    qtest_quit(qts);
+}
+
+static void test_migrate_set_parameters_cxl_clean_remap(void)
+{
+    QTestState *qts;
+    QDict *resp;
+    QDict *ret;
+
+    qts = qtest_init(common_args);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': {"
+                    "    'x-cxl-clean-remap-enable': true,"
+                    "    'x-cxl-clean-remap-copy-budget': 8388608,"
+                    "    'x-cxl-clean-remap-throttle-us': 200,"
+                    "    'x-cxl-clean-remap-prefault-mode': 'touch' } }");
+    g_assert_nonnull(resp);
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'query-migrate-parameters' }");
+    g_assert_nonnull(resp);
+    ret = qdict_get_qdict(resp, "return");
+    g_assert_nonnull(ret);
+    g_assert_true(qdict_get_bool(ret, "x-cxl-clean-remap-enable"));
+    g_assert_cmpint(qdict_get_int(ret, "x-cxl-clean-remap-copy-budget"), ==,
+                    8388608);
+    g_assert_cmpint(qdict_get_int(ret, "x-cxl-clean-remap-throttle-us"), ==,
+                    200);
+    g_assert_cmpstr(qdict_get_str(ret, "x-cxl-clean-remap-prefault-mode"), ==,
+                    "touch");
+    qobject_unref(resp);
+
+    qtest_quit(qts);
+}
+
 static void assert_schema_object_has_member(SchemaInfo *type,
                                             const char *member_name)
 {
@@ -461,10 +521,23 @@ static void test_query_migrate_cxl_schema_loop_stats(void)
     assert_schema_object_has_member(cxl_type, "last-iterate-phase");
     assert_schema_object_has_member(cxl_type, "staged-pages-percent");
     assert_schema_object_has_member(cxl_type, "remap-coverage");
+    assert_schema_object_has_member(cxl_type, "backing-rate-sleep-count");
+    assert_schema_object_has_member(cxl_type, "backing-rate-sleep-time-ns");
     assert_schema_object_has_member(cxl_type, "pending-remap-regions");
     assert_schema_object_has_member(cxl_type, "clean-pending-remap-regions");
     assert_schema_object_has_member(cxl_type, "pending-remap-unmigrated-pages");
     assert_schema_object_has_member(cxl_type, "pending-remap-dirty-pages");
+    assert_schema_object_has_member(cxl_type, "clean-remap-scan-calls");
+    assert_schema_object_has_member(cxl_type, "clean-remap-candidate-regions");
+    assert_schema_object_has_member(cxl_type, "clean-remap-copy-bytes");
+    assert_schema_object_has_member(cxl_type, "clean-remap-copy-time-ns");
+    assert_schema_object_has_member(cxl_type, "clean-remap-abandoned-dirty");
+    assert_schema_object_has_member(cxl_type, "clean-remap-budget-exhaustions");
+    assert_schema_object_has_member(cxl_type, "clean-remap-pending-bytes");
+    assert_schema_object_has_member(cxl_type, "clean-remap-coverage");
+    assert_schema_object_has_member(cxl_type, "clean-remap-prefault-bytes");
+    assert_schema_object_has_member(cxl_type, "clean-remap-prefault-time-ns");
+    assert_schema_object_has_member(cxl_type, "clean-remap-prefault-errors");
 
     qmp_schema_cleanup(&schema);
 }
@@ -505,6 +578,10 @@ int main(int argc, char *argv[])
                    test_migrate_set_parameters_cxl_switch_max_precopy_ms);
     qtest_add_func("qmp/migrate-set-parameters/cxl-switch-remap-coverage",
                    test_migrate_set_parameters_cxl_switch_remap_coverage);
+    qtest_add_func("qmp/migrate-set-parameters/cxl-backing-rate",
+                   test_migrate_set_parameters_cxl_backing_rate);
+    qtest_add_func("qmp/migrate-set-parameters/cxl-clean-remap",
+                   test_migrate_set_parameters_cxl_clean_remap);
     qtest_add_func("qmp/query-migrate/cxl-schema-loop-stats",
                    test_query_migrate_cxl_schema_loop_stats);
     qtest_add_func("qmp/query-migrate/stop-to-start-schema",
