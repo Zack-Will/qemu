@@ -83,6 +83,22 @@ typedef struct {
     bool all_zero;
 } PostcopyTmpPage;
 
+typedef enum CXLGuestTimelineEvent {
+    CXL_GUEST_TIMELINE_EVENT_MIGRATE_START = 1,
+    CXL_GUEST_TIMELINE_EVENT_POSTCOPY_START = 2,
+    CXL_GUEST_TIMELINE_EVENT_DOWNTIME_END = 3,
+    CXL_GUEST_TIMELINE_EVENT_DST_STARTED_ACK = 4,
+    CXL_GUEST_TIMELINE_EVENT_COMPLETED = 5,
+    CXL_GUEST_TIMELINE_EVENT_DST_STARTED = 6,
+    CXL_GUEST_TIMELINE_EVENT_ENTER_BRAKE = 7,
+    CXL_GUEST_TIMELINE_EVENT_REQUEST_POSTCOPY = 8,
+    CXL_GUEST_TIMELINE_EVENT_POSTCOPY_ACTIVE = 9,
+    CXL_GUEST_TIMELINE_EVENT_COMPLETION_ENTER = 10,
+} CXLGuestTimelineEvent;
+
+void cxl_guest_timeline_mark(const char *stage,
+                             CXLGuestTimelineEvent event);
+
 typedef enum {
     PREEMPT_THREAD_NONE = 0,
     PREEMPT_THREAD_CREATED,

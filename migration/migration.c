@@ -49,6 +49,7 @@
 #include "qemu/thread.h"
 #include "trace.h"
 #include "exec/target_page.h"
+#include "exec/cpu-common.h"
 #include "io/channel-buffer.h"
 #include "io/channel-tls.h"
 #include "migration/colo.h"
@@ -71,8 +72,60 @@
 
 #define INMIGRATE_DEFAULT_EXIT_ON_ERROR true
 #define POSTCOPY_PACKAGE_WAIT_POLL_MS 1
+#define CXL_GUEST_TIMELINE_ENV "QEMU_CXL_GUEST_TIMELINE_MARKER_ADDR"
 
 static GSList *migration_state_notifiers[MIG_MODE__MAX];
+static uint64_t cxl_guest_timeline_addr;
+static bool cxl_guest_timeline_addr_set;
+static bool cxl_guest_timeline_addr_initialized;
+static uint32_t cxl_guest_timeline_seq;
+
+static void cxl_guest_timeline_marker_reset(void)
+{
+    const char *value = g_getenv(CXL_GUEST_TIMELINE_ENV);
+    char *endptr = NULL;
+
+    cxl_guest_timeline_seq = 0;
+    cxl_guest_timeline_addr_set = false;
+    cxl_guest_timeline_addr_initialized = true;
+    cxl_guest_timeline_addr = 0;
+
+    if (!value || !*value) {
+        return;
+    }
+
+    cxl_guest_timeline_addr = g_ascii_strtoull(value, &endptr, 0);
+    if (!endptr || *endptr != '\0') {
+        warn_report("invalid %s=%s", CXL_GUEST_TIMELINE_ENV, value);
+        cxl_guest_timeline_addr = 0;
+        return;
+    }
+    cxl_guest_timeline_addr_set = true;
+}
+
+void cxl_guest_timeline_mark(const char *stage, CXLGuestTimelineEvent event)
+{
+    uint32_t payload[2];
+    uint64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int ret = 0;
+
+    if (!cxl_guest_timeline_addr_initialized) {
+        cxl_guest_timeline_marker_reset();
+    }
+
+    if (!cxl_guest_timeline_addr_set) {
+        return;
+    }
+
+    cxl_guest_timeline_seq++;
+    payload[0] = cpu_to_le32((uint32_t)event);
+    payload[1] = cpu_to_le32(cxl_guest_timeline_seq);
+    cpu_physical_memory_write(cxl_guest_timeline_addr + 16, payload,
+                              sizeof(payload));
+    trace_cxl_hybrid_guest_timeline_marker(
+        stage, cxl_guest_timeline_seq, event, now_ns,
+        cxl_guest_timeline_addr, ret);
+}
 
 /* Messages sent on the return path from destination to source */
 enum mig_rp_message_type {
@@ -247,6 +300,8 @@ static bool migration_cxl_hybrid_should_start_postcopy(MigrationState *s,
                                s->cxl_hybrid_iteration);
         migration_trace_precopy_timeline(s, "enter-brake", pending_size,
                                          must_precopy, can_postcopy);
+        cxl_guest_timeline_mark("enter-brake",
+                                CXL_GUEST_TIMELINE_EVENT_ENTER_BRAKE);
         return false;
     }
 
@@ -257,6 +312,8 @@ static bool migration_cxl_hybrid_should_start_postcopy(MigrationState *s,
     cxl_hybrid_clean_remap_finalize_deferred();
     migration_trace_precopy_timeline(s, "request-postcopy", pending_size,
                                      must_precopy, can_postcopy);
+    cxl_guest_timeline_mark("request-postcopy",
+                            CXL_GUEST_TIMELINE_EVENT_REQUEST_POSTCOPY);
     migration_request_postcopy(s, true, decision.reason);
     return true;
 }
@@ -957,6 +1014,8 @@ static void process_incoming_migration_bh(void *opaque)
             if (migration_block_activate(NULL)) {
                 vm_start();
                 vm_started = true;
+                cxl_guest_timeline_mark("dst-started",
+                                        CXL_GUEST_TIMELINE_EVENT_DST_STARTED);
             }
         } else {
             runstate_set(RUN_STATE_PAUSED);
@@ -964,6 +1023,8 @@ static void process_incoming_migration_bh(void *opaque)
     } else if (migrate_colo()) {
         vm_start();
         vm_started = true;
+        cxl_guest_timeline_mark("dst-started",
+                                CXL_GUEST_TIMELINE_EVENT_DST_STARTED);
     } else {
         runstate_set(global_state_get_runstate());
     }
@@ -1944,6 +2005,7 @@ int migrate_init(MigrationState *s, Error **errp)
     qemu_event_reset(&s->postcopy_package_loaded_event);
     migration_downtime_reset(s);
     migration_stop_to_start_reset(s);
+    cxl_guest_timeline_marker_reset();
 
     return 0;
 }
@@ -2496,6 +2558,8 @@ static void migrate_handle_rp_dst_started(MigrationState *s)
     int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     migration_record_stop_to_start(s, now - s->downtime_start);
+    cxl_guest_timeline_mark("dst-started-ack",
+                            CXL_GUEST_TIMELINE_EVENT_DST_STARTED_ACK);
     trace_vmstate_downtime_checkpoint("src-dst-start-ack");
 }
 
@@ -2853,6 +2917,8 @@ static int postcopy_start(MigrationState *ms, Error **errp)
     }
 
     trace_postcopy_start();
+    cxl_guest_timeline_mark("postcopy-start",
+                            CXL_GUEST_TIMELINE_EVENT_POSTCOPY_START);
     migration_trace_postcopy_timeline(ms, "start", UINT64_MAX);
     bql_lock();
     trace_postcopy_start_set_run();
@@ -2983,6 +3049,8 @@ static int postcopy_start(MigrationState *ms, Error **errp)
     }
 
     migration_downtime_end(ms);
+    cxl_guest_timeline_mark("downtime-end",
+                            CXL_GUEST_TIMELINE_EVENT_DOWNTIME_END);
     migration_trace_postcopy_timeline(ms, "downtime-end", UINT64_MAX);
 
     if (migrate_postcopy_ram()) {
@@ -3023,6 +3091,10 @@ static int postcopy_start(MigrationState *ms, Error **errp)
         ms->rp_state.rp_thread_created ? "state-postcopy-device" :
                                          "state-postcopy-active",
         UINT64_MAX);
+    if (!ms->rp_state.rp_thread_created) {
+        cxl_guest_timeline_mark("postcopy-active",
+                                CXL_GUEST_TIMELINE_EVENT_POSTCOPY_ACTIVE);
+    }
 
     bql_unlock();
 
@@ -3190,6 +3262,8 @@ static void migration_completion(MigrationState *s)
     if (s->state == MIGRATION_STATUS_ACTIVE) {
         ret = migration_completion_precopy(s);
     } else if (s->state == MIGRATION_STATUS_POSTCOPY_ACTIVE) {
+        cxl_guest_timeline_mark("completion-enter",
+                                CXL_GUEST_TIMELINE_EVENT_COMPLETION_ENTER);
         migration_trace_postcopy_timeline(s, "completion-enter",
                                           UINT64_MAX);
         migration_completion_postcopy(s);
@@ -3516,6 +3590,8 @@ static void migration_completion_end(MigrationState *s)
 
     migrate_set_state(&s->state, s->state,
                       MIGRATION_STATUS_COMPLETED);
+    cxl_guest_timeline_mark("completed",
+                            CXL_GUEST_TIMELINE_EVENT_COMPLETED);
     migration_trace_postcopy_timeline(s, "completed", UINT64_MAX);
     bql_unlock();
 }
@@ -3635,6 +3711,8 @@ static MigIterateState migration_wait_for_postcopy_package_loaded(
                       MIGRATION_STATUS_POSTCOPY_ACTIVE);
     migration_trace_postcopy_timeline(s, "state-postcopy-active",
                                       pending_size);
+    cxl_guest_timeline_mark("postcopy-active",
+                            CXL_GUEST_TIMELINE_EVENT_POSTCOPY_ACTIVE);
     return MIG_ITERATE_SKIP;
 }
 
@@ -3703,6 +3781,8 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                               MIGRATION_STATUS_POSTCOPY_ACTIVE);
             migration_trace_postcopy_timeline(s, "state-postcopy-active",
                                               pending_size);
+            cxl_guest_timeline_mark("postcopy-active",
+                                    CXL_GUEST_TIMELINE_EVENT_POSTCOPY_ACTIVE);
         }
     } else {
         /*
@@ -4153,6 +4233,8 @@ static void *migration_thread(void *opaque)
     s->setup_time = qemu_clock_get_ms(QEMU_CLOCK_HOST) - setup_start;
 
     trace_migration_thread_setup_complete();
+    cxl_guest_timeline_mark("migrate-start",
+                            CXL_GUEST_TIMELINE_EVENT_MIGRATE_START);
 
     while (migration_is_active()) {
         if (urgent || !migration_rate_exceeded(s->to_dst_file)) {

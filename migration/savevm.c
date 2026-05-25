@@ -2221,6 +2221,8 @@ static void loadvm_postcopy_handle_run_bh(void *opaque)
         if (success) {
             vm_start();
             vm_started = true;
+            cxl_guest_timeline_mark("dst-started",
+                                    CXL_GUEST_TIMELINE_EVENT_DST_STARTED);
         }
     } else {
         /* leave it paused and let management decide when to start the CPU */
