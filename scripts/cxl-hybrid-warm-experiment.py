@@ -1574,6 +1574,7 @@ def collect_in_memory_guest_latency(conn, path: Path, pressure, **kwargs):
     fallback_conn = kwargs.pop("fallback_conn", None)
     fallback_path = kwargs.pop("fallback_path", None)
     fallback_marker_path = kwargs.pop("fallback_marker_path", None)
+    primary_dump_source = kwargs.pop("primary_dump_source", "primary")
     base_kwargs = dict(kwargs)
 
     def collect_from(active_conn, active_path, active_marker_path,
@@ -1665,7 +1666,7 @@ def collect_in_memory_guest_latency(conn, path: Path, pressure, **kwargs):
         return report
 
     try:
-        return collect_from(conn, path, marker_path, "primary")
+        return collect_from(conn, path, marker_path, primary_dump_source)
     except Exception as exc:
         primary_error = str(exc)
         partial = parse_partial_primary(exc)
@@ -2777,7 +2778,8 @@ def run_case(base: Path, mode: str, pressure: str,
              rdma_pin_all=False,
              accel="tcg",
              qemu_perf=False,
-             in_memory_guest_latency=False):
+             in_memory_guest_latency=False,
+             in_memory_guest_latency_source_first=False):
     profile = threshold_profile or resolve_threshold_profile("balanced")
     if mode_uses_cxl_hybrid(mode):
         case_name = f"{mode}-{profile['name']}-run{run_index:02d}"
@@ -3038,14 +3040,27 @@ def run_case(base: Path, mode: str, pressure: str,
                 qmp_ok(dst_qmp, "stop")
             except Exception:
                 pass
+            latency_conn = dst_qmp
+            latency_path = in_memory_latency_file
+            latency_marker_path = in_memory_marker_file
+            latency_kwargs = {
+                "fallback_conn": src_qmp,
+                "fallback_path": in_memory_latency_src_file,
+                "fallback_marker_path": in_memory_marker_src_file,
+            }
+            if in_memory_guest_latency_source_first:
+                latency_conn = src_qmp
+                latency_path = in_memory_latency_src_file
+                latency_marker_path = in_memory_marker_src_file
+                latency_kwargs = {
+                    "primary_dump_source": "source-first",
+                }
             guest_in_memory_latency = collect_in_memory_guest_latency(
-                dst_qmp,
-                in_memory_latency_file,
+                latency_conn,
+                latency_path,
                 pressure,
-                marker_path=in_memory_marker_file,
-                fallback_conn=src_qmp,
-                fallback_path=in_memory_latency_src_file,
-                fallback_marker_path=in_memory_marker_src_file,
+                marker_path=latency_marker_path,
+                **latency_kwargs,
                 heartbeat_events=heartbeat_events_for_in_memory,
                 migration_start_ts=migration_start_ts,
                 migration_complete_ts=migration_complete_ts,
@@ -4003,7 +4018,8 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                         rdma_pin_all=False,
                         accel="tcg",
                         qemu_perf=False,
-                        in_memory_guest_latency=False):
+                        in_memory_guest_latency=False,
+                        in_memory_guest_latency_source_first=False):
     results = {}
     summary = []
     summary_grouped = []
@@ -4039,6 +4055,8 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                 kwargs["qemu_perf"] = qemu_perf
                 if in_memory_guest_latency:
                     kwargs["in_memory_guest_latency"] = True
+                if in_memory_guest_latency_source_first:
+                    kwargs["in_memory_guest_latency_source_first"] = True
                 if switch_remap_coverage is not None:
                     kwargs["switch_remap_coverage"] = switch_remap_coverage
                 kwargs["clean_remap_enable"] = clean_remap_enable
@@ -4162,6 +4180,9 @@ def parse_args(argv=None):
                         help="Record perf data for source and destination QEMU PIDs")
     parser.add_argument("--in-memory-guest-latency", action="store_true",
                         help="Record per-sample guest TSC deltas in RAM and dump them after migration")
+    parser.add_argument("--in-memory-guest-latency-source-first",
+                        action="store_true",
+                        help="Dump the in-memory latency log from source QMP first; source-side windows only")
     return parser.parse_args(argv)
 
 
@@ -4245,7 +4266,9 @@ def main():
                                      accel=args.accel,
                                      qemu_perf=args.qemu_perf,
                                      in_memory_guest_latency=
-                                     args.in_memory_guest_latency)
+                                     args.in_memory_guest_latency,
+                                     in_memory_guest_latency_source_first=
+                                     args.in_memory_guest_latency_source_first)
         result = {
             "base_dir": str(base),
             **matrix,

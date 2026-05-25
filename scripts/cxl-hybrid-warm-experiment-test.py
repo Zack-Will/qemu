@@ -3133,6 +3133,103 @@ class WarmExperimentScriptTest(unittest.TestCase):
             "guest-in-memory-marker-src.bin"
         ))
 
+    def test_run_case_in_memory_latency_can_dump_source_first(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            collect_calls = []
+
+            class FakeProc:
+                def poll(self):
+                    return None
+
+                def terminate(self):
+                    pass
+
+                def wait(self, timeout=None):
+                    return 0
+
+                def kill(self):
+                    pass
+
+            class FakeQMP:
+                def __init__(self, path):
+                    self.path = path
+
+                def close(self):
+                    pass
+
+            def fake_build_boot_image(case_dir, pressure,
+                                      in_memory_guest_latency=False):
+                img = case_dir / f"warm-boot-{pressure}.img"
+                img.write_bytes(b"\0" * 512)
+                return img
+
+            def fake_start_vm(_common, _qmp_sock, _extra_args, stderr_path,
+                              env=None):
+                Path(stderr_path).write_text("", encoding="utf-8")
+                return FakeProc()
+
+            def fake_qmp_ok(_conn, cmd, _args=None):
+                if cmd == "query-status":
+                    return {"status": "running"}
+                return {}
+
+            def fake_collect_until_complete(*_args, **_kwargs):
+                last = {
+                    "status": "completed",
+                    "total-time": 10,
+                    "setup-time": 1,
+                    "downtime": 1,
+                    "x-cxl": {"phase": "disabled"},
+                }
+                samples = [{
+                    "ts": 1.0,
+                    "status": "completed",
+                    "src-query-migrate": last,
+                    "dst-query-migrate": {"x-cxl": {}},
+                    "src-query-status": {"status": "postmigrate"},
+                    "dst-query-status": {"status": "running"},
+                    "ram": {"postcopy-requests": 0},
+                }]
+                return last, samples, {"status": "postmigrate"}, {
+                    "status": "running"
+                }, "completed"
+
+            def fake_collect_in_memory(conn, path, pressure, **kwargs):
+                collect_calls.append((conn.path, path, kwargs))
+                return {"valid": True, "dump_source": "source-first"}
+
+            self.mod.build_boot_image = fake_build_boot_image
+            self.mod.start_vm = fake_start_vm
+            self.mod.wait_sock = (
+                lambda path, proc, procs, timeout=10.0: Path(path).touch()
+            )
+            self.mod.connect_qmp = lambda path: FakeQMP(path)
+            self.mod.connect_stream_socket = lambda _path: object()
+            self.mod.qmp_ok = fake_qmp_ok
+            self.mod.collect_until_complete = fake_collect_until_complete
+            self.mod.collect_in_memory_guest_latency = fake_collect_in_memory
+            self.mod.parse_trace_log = (
+                lambda _path: self.mod.trace_count_template()
+            )
+
+            result = self.mod.run_case(
+                base, "pure_precopy", "light",
+                in_memory_guest_latency=True,
+                in_memory_guest_latency_source_first=True,
+            )
+
+        self.assertTrue(result["guest_in_memory_latency"]["valid"])
+        self.assertEqual(len(collect_calls), 1)
+        conn_path, path, kwargs = collect_calls[0]
+        self.assertIn("src.qmp", str(conn_path))
+        self.assertTrue(str(path).endswith("guest-in-memory-latency-src.bin"))
+        self.assertTrue(str(kwargs["marker_path"]).endswith(
+            "guest-in-memory-marker-src.bin"
+        ))
+        self.assertEqual(kwargs["primary_dump_source"], "source-first")
+        self.assertNotIn("fallback_conn", kwargs)
+
     def test_collect_in_memory_guest_latency_parses_partial_dump_after_timeout(self):
         records = [100, 105, 500, 95]
         payload = struct.pack(
