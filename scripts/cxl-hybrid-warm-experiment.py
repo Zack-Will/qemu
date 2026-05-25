@@ -679,7 +679,7 @@ def build_migration_parameters(args, mode: str, cxl_path=None,
                 profile["x-cxl-switch-max-precopy-ms"],
             "x-cxl-switch-min-remaining":
                 profile["x-cxl-switch-min-remaining"],
-            "x-cxl-brake-enable": True,
+            "x-cxl-brake-enable": getattr(args, "x_cxl_brake_enable", True),
             "x-cxl-prefetch-rate": (
                 prefetch_rate
                 if prefetch_rate is not None
@@ -719,6 +719,7 @@ def set_params(f, cxl_path: str, mode: str, pressure: str,
                max_bandwidth=0, max_postcopy_bandwidth=None,
                cxl_backing_rate=None,
                brake_remap_granule=REMAP_GRANULE,
+               brake_enable=True,
                switch_remap_coverage=None,
                clean_remap_enable=False,
                clean_remap_copy_budget=None,
@@ -738,6 +739,7 @@ def set_params(f, cxl_path: str, mode: str, pressure: str,
         x_cxl_fault_control_plane=fault_control_plane,
         x_cxl_fault_resolve_mode=fault_resolve_mode,
         x_cxl_brake_remap_granule=brake_remap_granule,
+        x_cxl_brake_enable=brake_enable,
         x_cxl_clean_remap_enable=clean_remap_enable,
         x_cxl_clean_remap_copy_budget=clean_remap_copy_budget,
         x_cxl_clean_remap_throttle_us=clean_remap_throttle_us,
@@ -2767,6 +2769,7 @@ def run_case(base: Path, mode: str, pressure: str,
              max_postcopy_bandwidth=None,
              cxl_backing_rate=None,
              brake_remap_granule=REMAP_GRANULE,
+             brake_enable=True,
              switch_remap_coverage=None,
              clean_remap_enable=False,
              clean_remap_copy_budget=None,
@@ -2966,6 +2969,7 @@ def run_case(base: Path, mode: str, pressure: str,
                    fault_resolve_mode=fault_resolve_mode,
                    max_bandwidth=max_bandwidth,
                    brake_remap_granule=brake_remap_granule,
+                   brake_enable=brake_enable,
                    switch_remap_coverage=switch_remap_coverage,
                    cxl_backing_rate=cxl_backing_rate,
                    clean_remap_enable=clean_remap_enable,
@@ -2981,6 +2985,7 @@ def run_case(base: Path, mode: str, pressure: str,
                    fault_resolve_mode=fault_resolve_mode,
                    max_bandwidth=max_bandwidth,
                    brake_remap_granule=brake_remap_granule,
+                   brake_enable=brake_enable,
                    switch_remap_coverage=switch_remap_coverage,
                    cxl_backing_rate=cxl_backing_rate,
                    clean_remap_enable=clean_remap_enable,
@@ -4007,6 +4012,7 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                         max_postcopy_bandwidth=None,
                         cxl_backing_rate=None,
                         brake_remap_granule=REMAP_GRANULE,
+                        brake_enable=True,
                         switch_remap_coverage=None,
                         clean_remap_enable=False,
                         clean_remap_copy_budget=None,
@@ -4051,6 +4057,8 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                 if cxl_backing_rate is not None:
                     kwargs["cxl_backing_rate"] = cxl_backing_rate
                 kwargs["brake_remap_granule"] = brake_remap_granule
+                if not brake_enable:
+                    kwargs["brake_enable"] = False
                 kwargs["accel"] = accel
                 kwargs["qemu_perf"] = qemu_perf
                 if in_memory_guest_latency:
@@ -4135,6 +4143,11 @@ def parse_args(argv=None):
     parser.add_argument("--x-cxl-switch-remap-coverage", type=int)
     parser.add_argument("--x-cxl-brake-remap-granule", type=int,
                         default=REMAP_GRANULE)
+    parser.add_argument("--x-cxl-disable-brake",
+                        dest="x_cxl_brake_enable",
+                        action="store_false",
+                        default=True,
+                        help="Disable hybrid brake phase; switch directly from bulk to postcopy")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--migration-timeout", type=float,
                         default=DEFAULT_MIGRATION_TIMEOUT_SECS)
@@ -4248,6 +4261,7 @@ def main():
                                      args.x_cxl_backing_rate,
                                      brake_remap_granule=
                                      args.x_cxl_brake_remap_granule,
+                                     brake_enable=args.x_cxl_brake_enable,
                                      switch_remap_coverage=
                                      args.x_cxl_switch_remap_coverage,
                                      clean_remap_enable=

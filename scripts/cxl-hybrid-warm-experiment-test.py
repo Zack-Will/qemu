@@ -569,6 +569,32 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertEqual(params["x-cxl-brake-remap-granule"], 1024 * 1024)
 
+    def test_build_migration_parameters_can_disable_hybrid_brake(self):
+        args = argparse.Namespace(
+            pressure="heavy",
+            threshold_profile="balanced",
+            x_cxl_switch_dirty_threshold=None,
+            x_cxl_switch_max_iters=None,
+            x_cxl_switch_max_precopy_ms=None,
+            x_cxl_switch_min_remaining=None,
+            x_cxl_switch_remap_coverage=None,
+            x_cxl_prefetch_rate=None,
+            x_cxl_dst_install_policy=None,
+            x_cxl_fault_control_plane=None,
+            x_cxl_fault_resolve_mode=None,
+            x_cxl_brake_remap_granule=2 * 1024 * 1024,
+            x_cxl_brake_enable=False,
+        )
+
+        params = self.mod.build_migration_parameters(
+            args,
+            "hybrid_postcopy_auto",
+            cxl_path="/tmp/cxl.img",
+            shared_backing=True,
+        )
+
+        self.assertFalse(params["x-cxl-brake-enable"])
+
     def test_build_migration_parameters_accepts_postcopy_bandwidth_override(self):
         args = argparse.Namespace(
             pressure="heavy",
@@ -641,6 +667,17 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(params["x-cxl-clean-remap-copy-budget"], 8388608)
         self.assertEqual(params["x-cxl-clean-remap-throttle-us"], 200)
         self.assertEqual(params["x-cxl-clean-remap-prefault-mode"], "madvise")
+
+    def test_disable_brake_cli_sets_brake_enable_false(self):
+        default_args = self.mod.parse_args([])
+        disabled_args = self.mod.parse_args([
+            "--pressure", "remap_xlarge_random_rw",
+            "--mode", "hybrid_postcopy_auto",
+            "--x-cxl-disable-brake",
+        ])
+
+        self.assertTrue(default_args.x_cxl_brake_enable)
+        self.assertFalse(disabled_args.x_cxl_brake_enable)
 
     def test_clean_remap_debug_mode_sets_source_env_only(self):
         src_env = self.mod.build_qemu_env(
@@ -1015,7 +1052,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
                                     prefetch_rate=None, dst_install_policy=None,
                                     fault_control_plane=None,
                                     fault_resolve_mode=None,
-                                    cxl_path_override=None):
+                                    cxl_path_override=None, **kwargs):
             calls.append({
                 "base": str(base),
                 "pressures": list(pressures),
@@ -1028,6 +1065,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
                 "fault_control_plane": fault_control_plane,
                 "fault_resolve_mode": fault_resolve_mode,
                 "cxl_path_override": cxl_path_override,
+                "brake_enable": kwargs.get("brake_enable"),
             })
             return {
                 "pressures": list(pressures),
@@ -1561,7 +1599,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
                                     prefetch_rate=None, dst_install_policy=None,
                                     fault_control_plane=None,
                                     fault_resolve_mode=None,
-                                    cxl_path_override=None):
+                                    cxl_path_override=None, **kwargs):
             calls.append({
                 "base": str(base),
                 "pressures": list(pressures),
@@ -1574,6 +1612,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
                 "fault_control_plane": fault_control_plane,
                 "fault_resolve_mode": fault_resolve_mode,
                 "cxl_path_override": cxl_path_override,
+                "brake_enable": kwargs.get("brake_enable"),
             })
             return {
                 "pressures": list(pressures),
@@ -5964,6 +6003,40 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(calls, [
             ("hybrid_postcopy_auto", "remap_heavy", True, 8388608, 200,
              "copy-only"),
+        ])
+
+    def test_run_pressure_matrix_forwards_brake_enable(self):
+        calls = []
+
+        def fake_run_case(_base, mode, pressure, **kwargs):
+            calls.append((mode, pressure, kwargs.get("brake_enable")))
+            return {
+                "mode": mode,
+                "pressure": pressure,
+                "final_status": "completed",
+                "latency": {
+                    "total_time_ms": 45,
+                    "downtime_ms": 2,
+                    "setup_time_ms": 1,
+                },
+                "summary": {},
+                "trace": {"combined": self.mod.trace_count_template()},
+                "stage_population_observed": 0,
+                "guest_latency": {},
+            }
+
+        self.mod.run_case = fake_run_case
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.mod.run_pressure_matrix(
+                Path(tmpdir),
+                ["remap_heavy"],
+                ["hybrid_postcopy_auto"],
+                brake_enable=False,
+            )
+
+        self.assertEqual(calls, [
+            ("hybrid_postcopy_auto", "remap_heavy", False),
         ])
 
     def test_run_pressure_matrix_forwards_qemu_perf_option(self):
