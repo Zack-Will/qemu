@@ -161,6 +161,7 @@ MIGRATION_MODES = (
     "hybrid_postcopy_auto",
     "hybrid_postcopy_cxl_offset",
     "hybrid_postcopy_manual",
+    "hybrid_parallel_rdma_cxl",
     "native_postcopy_stream",
     "native_rdma_precopy",
     "pure_precopy",
@@ -212,7 +213,10 @@ def resolve_threshold_profile(name, dirty_threshold=None,
 
 
 def mode_uses_cxl_hybrid(mode: str) -> bool:
-    return mode.startswith("hybrid_postcopy")
+    return (
+        mode.startswith("hybrid_postcopy") or
+        mode == "hybrid_parallel_rdma_cxl"
+    )
 
 
 def mode_uses_rdma(mode: str) -> bool:
@@ -3300,7 +3304,7 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
             (config["end_addr"] - config["start_addr"]) // PAGE_SIZE,
         "writes_per_page": config["writes_per_page"],
         "batch_pages": PRESSURE_BATCH_PAGES[pressure]
-        if mode.startswith("hybrid_postcopy") else 0,
+        if mode_uses_cxl_hybrid(mode) else 0,
         "warm_send": trace.get("warm_send", 0),
         "warm_recv": trace.get("warm_recv", 0),
         "warm_desc_send": trace.get("warm_desc_send", 0),

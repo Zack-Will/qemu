@@ -419,6 +419,39 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertTrue(caps["x-cxl-hybrid"])
         self.assertTrue(caps["multifd"])
 
+    def test_parallel_rdma_cxl_mode_is_registered_and_classified_as_hybrid(self):
+        mode = "hybrid_parallel_rdma_cxl"
+
+        self.assertIn(mode, self.mod.MIGRATION_MODES)
+        self.assertTrue(self.mod.mode_uses_cxl_hybrid(mode))
+        self.assertFalse(self.mod.mode_uses_rdma(mode))
+        self.assertTrue(self.mod.mode_uses_postcopy(mode))
+        self.assertTrue(self.mod.mode_uses_mapped_ram(mode))
+        self.assertTrue(self.mod.mode_uses_multifd(mode))
+        self.assertTrue(self.mod.mode_uses_write_redirect(mode))
+        self.assertTrue(self.mod.mode_requires_postcopy_warm(mode))
+
+    def test_set_caps_parallel_rdma_cxl_enables_hybrid_without_native_rdma(self):
+        calls = []
+
+        def fake_qmp_ok(_f, cmd, args=None):
+            calls.append((cmd, args))
+            return {}
+
+        self.mod.qmp_ok = fake_qmp_ok
+        self.mod.set_caps(object(), "hybrid_parallel_rdma_cxl")
+
+        _cmd, args = calls[0]
+        caps = {
+            item["capability"]: item["state"]
+            for item in args["capabilities"]
+        }
+        self.assertTrue(caps["mapped-ram"])
+        self.assertTrue(caps["postcopy-ram"])
+        self.assertTrue(caps["x-cxl-hybrid"])
+        self.assertTrue(caps["multifd"])
+        self.assertFalse(caps["rdma-pin-all"])
+
     def test_set_caps_hybrid_postcopy_manual_enables_postcopy_and_hybrid(self):
         calls = []
 
@@ -595,6 +628,35 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertFalse(params["x-cxl-brake-enable"])
 
+    def test_build_migration_parameters_parallel_rdma_cxl_can_disable_brake(self):
+        args = argparse.Namespace(
+            pressure="heavy",
+            threshold_profile="balanced",
+            x_cxl_switch_dirty_threshold=None,
+            x_cxl_switch_max_iters=None,
+            x_cxl_switch_max_precopy_ms=None,
+            x_cxl_switch_min_remaining=None,
+            x_cxl_switch_remap_coverage=None,
+            x_cxl_prefetch_rate=None,
+            x_cxl_dst_install_policy=None,
+            x_cxl_fault_control_plane=None,
+            x_cxl_fault_resolve_mode=None,
+            x_cxl_brake_remap_granule=2 * 1024 * 1024,
+            x_cxl_brake_enable=False,
+        )
+
+        params = self.mod.build_migration_parameters(
+            args,
+            "hybrid_parallel_rdma_cxl",
+            cxl_path="/tmp/cxl.img",
+            shared_backing=True,
+        )
+
+        self.assertEqual(params["cxl-path"], "/tmp/cxl.img")
+        self.assertEqual(params["multifd-channels"], 2)
+        self.assertFalse(params["x-cxl-brake-enable"])
+        self.assertEqual(params["x-cxl-prefetch-batch-pages"], 128)
+
     def test_build_migration_parameters_accepts_postcopy_bandwidth_override(self):
         args = argparse.Namespace(
             pressure="heavy",
@@ -678,6 +740,76 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertTrue(default_args.x_cxl_brake_enable)
         self.assertFalse(disabled_args.x_cxl_brake_enable)
+
+    def test_main_accepts_parallel_rdma_cxl_and_forwards_disable_brake(self):
+        calls = []
+
+        def fake_run_pressure_matrix(base, pressures, modes, threshold_profile=None,
+                                    repeat=1, migration_timeout=60.0,
+                                    **kwargs):
+            calls.append({
+                "base": str(base),
+                "pressures": list(pressures),
+                "modes": list(modes),
+                "threshold_profile": threshold_profile,
+                "repeat": repeat,
+                "migration_timeout": migration_timeout,
+                "brake_enable": kwargs.get("brake_enable"),
+            })
+            return {
+                "pressures": list(pressures),
+                "modes": list(modes),
+                "results": {},
+                "summary": [],
+                "summary_grouped": [],
+            }
+
+        argv = [
+            "cxl-hybrid-warm-experiment.py",
+            "--pressure", "remap_xlarge_random_rw",
+            "--mode", "hybrid_parallel_rdma_cxl",
+            "--x-cxl-disable-brake",
+        ]
+        original_maybe_reexec = self.mod.maybe_reexec_with_sudo
+        original_qemu = self.mod.QEMU
+        original_trace_events = self.mod.TRACE_EVENTS
+        original_boot_asm = self.mod.BOOT_ASM
+        original_mkdtemp = self.mod.tempfile.mkdtemp
+        original_rmtree = self.mod.shutil.rmtree
+        had_print = hasattr(self.mod, "print")
+        original_print = getattr(self.mod, "print", None)
+        original_run_pressure_matrix = self.mod.run_pressure_matrix
+        original_argv = self.mod.sys.argv
+        try:
+            self.mod.maybe_reexec_with_sudo = lambda: None
+            self.mod.QEMU = SCRIPT_PATH
+            self.mod.TRACE_EVENTS = SCRIPT_PATH
+            self.mod.BOOT_ASM = SCRIPT_PATH
+            self.mod.tempfile.mkdtemp = (
+                lambda *args, **kwargs: "/tmp/cxl-exp-test"
+            )
+            self.mod.shutil.rmtree = lambda _path: None
+            self.mod.print = lambda *_args, **_kwargs: None
+            self.mod.run_pressure_matrix = fake_run_pressure_matrix
+            self.mod.sys.argv = argv
+            self.mod.main()
+        finally:
+            self.mod.maybe_reexec_with_sudo = original_maybe_reexec
+            self.mod.QEMU = original_qemu
+            self.mod.TRACE_EVENTS = original_trace_events
+            self.mod.BOOT_ASM = original_boot_asm
+            self.mod.tempfile.mkdtemp = original_mkdtemp
+            self.mod.shutil.rmtree = original_rmtree
+            if had_print:
+                self.mod.print = original_print
+            else:
+                delattr(self.mod, "print")
+            self.mod.run_pressure_matrix = original_run_pressure_matrix
+            self.mod.sys.argv = original_argv
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["modes"], ["hybrid_parallel_rdma_cxl"])
+        self.assertFalse(calls[0]["brake_enable"])
 
     def test_clean_remap_debug_mode_sets_source_env_only(self):
         src_env = self.mod.build_qemu_env(
