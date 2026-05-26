@@ -4256,23 +4256,28 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                     kwargs["fault_resolve_mode"] = fault_resolve_mode
                 if cxl_path_override is not None:
                     kwargs["cxl_path_override"] = cxl_path_override
-                kwargs["max_bandwidth"] = max_bandwidth
+                if max_bandwidth:
+                    kwargs["max_bandwidth"] = max_bandwidth
                 if max_postcopy_bandwidth is not None:
                     kwargs["max_postcopy_bandwidth"] = max_postcopy_bandwidth
                 if cxl_backing_rate is not None:
                     kwargs["cxl_backing_rate"] = cxl_backing_rate
-                kwargs["brake_remap_granule"] = brake_remap_granule
+                if brake_remap_granule != REMAP_GRANULE:
+                    kwargs["brake_remap_granule"] = brake_remap_granule
                 if not brake_enable:
                     kwargs["brake_enable"] = False
-                kwargs["accel"] = accel
-                kwargs["qemu_perf"] = qemu_perf
+                if accel != "tcg":
+                    kwargs["accel"] = accel
+                if qemu_perf:
+                    kwargs["qemu_perf"] = qemu_perf
                 if in_memory_guest_latency:
                     kwargs["in_memory_guest_latency"] = True
                 if in_memory_guest_latency_source_first:
                     kwargs["in_memory_guest_latency_source_first"] = True
                 if switch_remap_coverage is not None:
                     kwargs["switch_remap_coverage"] = switch_remap_coverage
-                kwargs["clean_remap_enable"] = clean_remap_enable
+                if clean_remap_enable:
+                    kwargs["clean_remap_enable"] = clean_remap_enable
                 if clean_remap_copy_budget is not None:
                     kwargs["clean_remap_copy_budget"] = clean_remap_copy_budget
                 if clean_remap_throttle_us is not None:

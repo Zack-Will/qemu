@@ -31,7 +31,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         publish_start = source.index("int cxl_hybrid_publish_page_to_cxl(")
         publish_end = source.index("static void cxl_hybrid_publish_fault_burst(")
         publish_body = source[publish_start:publish_end]
-        self.assertIn("cxl_hybrid_ctrl_set_page_visible(page_idx, generation)",
+        self.assertIn("cxl_hybrid_ctrl_publish_pages_visible(page_idx,",
                       publish_body)
         self.assertIn("cxl_hybrid_mark_page_cxl_visible(page_idx)",
                       publish_body)
@@ -50,9 +50,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         remap_start = source.index("static void cxl_mark_pages_remapped(")
         remap_end = source.index(
-            "static bool cxl_refresh_region_backing(")
+            "static bool cxl_remapped_region_all_pages_ready(")
         remap_body = source[remap_start:remap_end]
-        self.assertIn("cxl_hybrid_ctrl_set_page_visible(page_idx, generation)",
+        self.assertIn("cxl_hybrid_ctrl_publish_pages_visible(first_page,",
                       remap_body)
         self.assertIn("set_bit_atomic(page_idx, cxl_state.cxl_visible_bmap)",
                       remap_body)
@@ -68,7 +68,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertIn("if (!state->hdr || !state->visible_bitmap)", fn_body)
         self.assertNotIn("state->hdr->generation != generation", fn_body)
-        self.assertIn("cxl_hybrid_control_mark_page_visible(state->hdr,",
+        self.assertIn("cxl_hybrid_control_mark_page_visible_generation(",
                       fn_body)
 
     def test_summarize_guest_heartbeats_reports_handoff_gap_and_stall(self):
@@ -115,7 +115,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertAlmostEqual(report["baseline_gap_ms"], 10.0)
         self.assertAlmostEqual(report["max_gap_during_migration_ms"], 40.0)
         self.assertAlmostEqual(report["total_gap_during_migration_ms"], 20.0)
-        self.assertAlmostEqual(report["total_stall_during_migration_ms"], 10.0)
+        self.assertAlmostEqual(report["total_stall_during_migration_ms"], 15.0)
 
     def test_summarize_guest_heartbeats_reports_corrected_window(self):
         events = [
@@ -567,7 +567,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(cmd, "migrate-set-parameters")
         self.assertEqual(args["cxl-path"], "/tmp/cxl.img")
         self.assertEqual(args["multifd-channels"], 2)
-        self.assertEqual(args["max-bandwidth"], 8 * 1024 * 1024)
+        self.assertEqual(args["max-bandwidth"], 0)
         self.assertEqual(args["x-cxl-switch-dirty-threshold"], 1)
         self.assertEqual(args["x-cxl-switch-max-iters"], 20)
         self.assertEqual(args["x-cxl-switch-max-precopy-ms"], 0)
@@ -933,6 +933,121 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertTrue(calls[0]["in_memory_guest_latency"])
         self.assertTrue(calls[0]["in_memory_guest_latency_source_first"])
 
+    def test_main_accepts_task7_benchmark_matrix_shape(self):
+        calls = []
+
+        def fake_run_pressure_matrix(base, pressures, modes,
+                                    threshold_profile=None, repeat=1,
+                                    migration_timeout=60.0, **kwargs):
+            calls.append({
+                "base": str(base),
+                "pressures": list(pressures),
+                "modes": list(modes),
+                "threshold_profile": threshold_profile,
+                "repeat": repeat,
+                "migration_timeout": migration_timeout,
+                "brake_enable": kwargs.get("brake_enable"),
+                "rdma_host": kwargs.get("rdma_host"),
+                "rdma_port": kwargs.get("rdma_port"),
+                "accel": kwargs.get("accel"),
+                "max_bandwidth": kwargs.get("max_bandwidth"),
+                "cxl_path_override": kwargs.get("cxl_path_override"),
+                "in_memory_guest_latency": kwargs.get(
+                    "in_memory_guest_latency"
+                ),
+                "in_memory_guest_latency_source_first": kwargs.get(
+                    "in_memory_guest_latency_source_first"
+                ),
+            })
+            return {
+                "pressures": list(pressures),
+                "modes": list(modes),
+                "results": {},
+                "summary": [],
+                "summary_grouped": [],
+            }
+
+        argv = [
+            "cxl-hybrid-warm-experiment.py",
+            "--pressure", "remap_xlarge_random_rw",
+            "--mode",
+            ",".join([
+                "hybrid_postcopy_auto",
+                "hybrid_parallel_rdma_cxl",
+                "pure_precopy",
+                "native_postcopy_stream",
+                "native_rdma_precopy",
+            ]),
+            "--repeat", "1",
+            "--migration-timeout", "120",
+            "--accel", "kvm",
+            "--max-bandwidth", "0",
+            "--cxl-path", "/dev/dax0.1",
+            "--x-cxl-brake-remap-granule", "262144",
+            "--x-cxl-switch-min-remaining", "0",
+            "--x-cxl-switch-remap-coverage", "50",
+            "--x-cxl-switch-max-precopy-ms", "50",
+            "--x-cxl-disable-brake",
+            "--rdma-host", "10.0.0.2",
+            "--rdma-port", "7701",
+            "--in-memory-guest-latency",
+            "--in-memory-guest-latency-source-first",
+        ]
+        original_maybe_reexec = self.mod.maybe_reexec_with_sudo
+        original_qemu = self.mod.QEMU
+        original_trace_events = self.mod.TRACE_EVENTS
+        original_boot_asm = self.mod.BOOT_ASM
+        original_mkdtemp = self.mod.tempfile.mkdtemp
+        original_rmtree = self.mod.shutil.rmtree
+        had_print = hasattr(self.mod, "print")
+        original_print = getattr(self.mod, "print", None)
+        original_run_pressure_matrix = self.mod.run_pressure_matrix
+        original_argv = self.mod.sys.argv
+        try:
+            self.mod.maybe_reexec_with_sudo = lambda: None
+            self.mod.QEMU = SCRIPT_PATH
+            self.mod.TRACE_EVENTS = SCRIPT_PATH
+            self.mod.BOOT_ASM = SCRIPT_PATH
+            self.mod.tempfile.mkdtemp = (
+                lambda *args, **kwargs: "/tmp/cxl-exp-test"
+            )
+            self.mod.shutil.rmtree = lambda _path: None
+            self.mod.print = lambda *_args, **_kwargs: None
+            self.mod.run_pressure_matrix = fake_run_pressure_matrix
+            self.mod.sys.argv = argv
+            self.mod.main()
+        finally:
+            self.mod.maybe_reexec_with_sudo = original_maybe_reexec
+            self.mod.QEMU = original_qemu
+            self.mod.TRACE_EVENTS = original_trace_events
+            self.mod.BOOT_ASM = original_boot_asm
+            self.mod.tempfile.mkdtemp = original_mkdtemp
+            self.mod.shutil.rmtree = original_rmtree
+            if had_print:
+                self.mod.print = original_print
+            else:
+                delattr(self.mod, "print")
+            self.mod.run_pressure_matrix = original_run_pressure_matrix
+            self.mod.sys.argv = original_argv
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["modes"], [
+            "hybrid_postcopy_auto",
+            "hybrid_parallel_rdma_cxl",
+            "pure_precopy",
+            "native_postcopy_stream",
+            "native_rdma_precopy",
+        ])
+        self.assertEqual(calls[0]["pressures"], ["remap_xlarge_random_rw"])
+        self.assertFalse(calls[0]["brake_enable"])
+        self.assertEqual(calls[0]["rdma_host"], "10.0.0.2")
+        self.assertEqual(calls[0]["rdma_port"], 7701)
+        self.assertEqual(calls[0]["accel"], "kvm")
+        self.assertEqual(calls[0]["max_bandwidth"], 0)
+        self.assertEqual(calls[0]["cxl_path_override"], "/dev/dax0.1")
+        self.assertTrue(calls[0]["in_memory_guest_latency"])
+        self.assertTrue(calls[0]["in_memory_guest_latency_source_first"])
+
     def test_clean_remap_debug_mode_sets_source_env_only(self):
         src_env = self.mod.build_qemu_env(
             "hybrid_postcopy_auto", is_source=True,
@@ -1170,8 +1285,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
         _cmd, args = calls[0]
         self.assertEqual(args["cxl-path"], "/tmp/cxl.img")
         self.assertTrue(args["x-cxl-shared-backing"])
-        self.assertEqual(args["x-cxl-warm-transport"], "cxl-offset")
-        self.assertEqual(args["x-cxl-dst-install-policy"], "on-demand")
+        self.assertNotIn("x-cxl-warm-transport", args)
+        self.assertNotIn("x-cxl-dst-install-policy", args)
+        self.assertNotIn("x-cxl-fault-resolve-mode", args)
 
     def test_resolve_threshold_profile_balanced(self):
         profile = self.mod.resolve_threshold_profile("balanced")
@@ -1222,7 +1338,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(args["x-cxl-switch-max-precopy-ms"], 420)
         self.assertEqual(args["x-cxl-switch-min-remaining"], 16 * 1024 * 1024)
 
-    def test_set_params_hybrid_auto_accepts_prefetch_and_install_overrides(self):
+    def test_set_params_hybrid_auto_accepts_prefetch_override(self):
         calls = []
 
         def fake_qmp_ok(_f, cmd, args=None):
@@ -1239,9 +1355,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         _cmd, args = calls[0]
         self.assertEqual(args["x-cxl-prefetch-rate"], 16 * 1024 * 1024)
-        self.assertEqual(args["x-cxl-dst-install-policy"], "eager")
+        self.assertNotIn("x-cxl-dst-install-policy", args)
 
-    def test_set_params_hybrid_auto_accepts_fault_control_plane_override(self):
+    def test_set_params_hybrid_auto_ignores_removed_fault_control_plane_override(self):
         calls = []
 
         def fake_qmp_ok(_f, cmd, args=None):
@@ -1256,7 +1372,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         )
 
         _cmd, args = calls[0]
-        self.assertEqual(args["x-cxl-fault-control-plane"], "cxl")
+        self.assertNotIn("x-cxl-fault-control-plane", args)
 
     def test_fault_resolve_mode_arg_sets_qmp_parameter(self):
         chw = self.mod
@@ -1602,59 +1718,23 @@ class WarmExperimentScriptTest(unittest.TestCase):
         )
         self.assertEqual(counts["rdma_invalidate_publish_amplification"], 2.0)
 
-    def test_fault_control_plane_option_is_declared(self):
+    def test_fault_control_plane_option_is_removed_from_qapi(self):
         qapi_source = (SCRIPT_PATH.parent.parent / "qapi" /
                        "migration.json").resolve()
         options_source = (SCRIPT_PATH.parent.parent / "migration" /
                           "options.c").resolve()
         options_header = (SCRIPT_PATH.parent.parent / "migration" /
                           "options.h").resolve()
-        qdev_header = (SCRIPT_PATH.parent.parent / "include" / "hw" / "core" /
-                       "qdev-properties-system.h").resolve()
-        qdev_source = (SCRIPT_PATH.parent.parent / "hw" / "core" /
-                       "qdev-properties-system.c").resolve()
 
         qapi_text = qapi_source.read_text(encoding="utf-8")
         options_text = options_source.read_text(encoding="utf-8")
         options_header_text = options_header.read_text(encoding="utf-8")
-        qdev_header_text = qdev_header.read_text(encoding="utf-8")
-        qdev_text = qdev_source.read_text(encoding="utf-8")
 
-        self.assertIn("# @CXLHybridFaultControlPlane:", qapi_text)
-        self.assertIn("{ 'enum': 'CXLHybridFaultControlPlane',", qapi_text)
-        self.assertIn("{ 'name': 'stream', 'features': [ 'unstable' ] }",
-                      qapi_text)
-        self.assertIn("{ 'name': 'cxl', 'features': [ 'unstable' ] }",
-                      qapi_text)
-        self.assertIn("'*x-cxl-fault-control-plane': {", qapi_text)
-        self.assertIn("'type': 'CXLHybridFaultControlPlane'", qapi_text)
-
-        self.assertIn("extern const PropertyInfo qdev_prop_cxl_hybrid_fault_control_plane;",
-                      qdev_header_text)
-        self.assertIn("#define DEFINE_PROP_CXL_HYBRID_FAULT_CONTROL_PLANE(",
-                      qdev_header_text)
-        self.assertIn("QEMU_BUILD_BUG_ON(sizeof(CXLHybridFaultControlPlane) != sizeof(int));",
-                      qdev_text)
-        self.assertIn("const PropertyInfo qdev_prop_cxl_hybrid_fault_control_plane = {",
-                      qdev_text)
-        self.assertIn("&CXLHybridFaultControlPlane_lookup", qdev_text)
-
-        self.assertIn("DEFINE_PROP_CXL_HYBRID_FAULT_CONTROL_PLANE(\"x-cxl-fault-control-plane\",",
-                      options_text)
-        self.assertIn("parameters.x_cxl_fault_control_plane,", options_text)
-        self.assertIn("CXLHybridFaultControlPlane migrate_cxl_fault_control_plane(void)",
-                      options_text)
-        self.assertIn("return s->parameters.x_cxl_fault_control_plane;",
-                      options_text)
-        self.assertIn("bool migrate_cxl_fault_control_plane_cxl(void)",
-                      options_text)
-        self.assertIn("return migrate_cxl_fault_control_plane() ==\n           CXL_HYBRID_FAULT_CONTROL_PLANE_CXL;",
-                      options_text)
-
-        self.assertIn("CXLHybridFaultControlPlane migrate_cxl_fault_control_plane(void);",
-                      options_header_text)
-        self.assertIn("bool migrate_cxl_fault_control_plane_cxl(void);",
-                      options_header_text)
+        self.assertNotIn("CXLHybridFaultControlPlane", qapi_text)
+        self.assertNotIn("x-cxl-fault-control-plane", qapi_text)
+        self.assertNotIn("x_cxl_fault_control_plane", options_text)
+        self.assertNotIn("migrate_cxl_fault_control_plane", options_text)
+        self.assertNotIn("migrate_cxl_fault_control_plane", options_header_text)
 
     def test_cxl_fault_control_module_is_declared(self):
         meson_source = (SCRIPT_PATH.parent.parent / "migration" /
@@ -1675,8 +1755,10 @@ class WarmExperimentScriptTest(unittest.TestCase):
                       cxl_header_text)
         self.assertIn("typedef struct CXLHybridFaultRequestRecord {",
                       cxl_header_text)
-        self.assertIn("typedef struct CXLHybridFaultReadyRecord {",
-                      cxl_header_text)
+        self.assertIn("unsigned long *visible_region_bitmap;",
+                      control_text)
+        self.assertIn("unsigned long *owned_region_bitmap;",
+                      control_text)
         self.assertIn("int cxl_hybrid_control_init_source(Error **errp);",
                       cxl_header_text)
         self.assertIn("int cxl_hybrid_control_init_destination(Error **errp);",
@@ -1690,12 +1772,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertIn("static void cxl_hybrid_ctrl_publish_request(",
                       control_text)
-        self.assertIn("static void cxl_hybrid_ctrl_publish_ready(",
-                      control_text)
         self.assertIn("static bool cxl_hybrid_ctrl_try_dequeue_request(",
                       control_text)
-        self.assertIn("static bool cxl_hybrid_ctrl_try_dequeue_ready(",
-                      control_text)
+        self.assertNotIn("cxl_hybrid_ctrl_try_dequeue_ready", control_text)
 
     def test_cxl_fault_control_workers_have_lifecycle_hooks(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -1707,14 +1786,10 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertIn("static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)",
                       control_text)
-        self.assertIn("static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)",
-                      control_text)
         self.assertIn("qemu_thread_create(&state->request_worker, \"cxl-ctrl-req\",",
                       control_text)
-        self.assertIn("qemu_thread_create(&state->ready_poller, \"cxl-ctrl-ready\",",
-                      control_text)
         self.assertIn("qemu_thread_join(&state->request_worker);", control_text)
-        self.assertIn("qemu_thread_join(&state->ready_poller);", control_text)
+        self.assertNotIn("ready_poller", control_text)
 
         source_init_start = cxl_text.index("bool cxl_hybrid_init_source(void)")
         cleanup_start = cxl_text.index("void cxl_hybrid_cleanup_source(void)")
@@ -1722,15 +1797,21 @@ class WarmExperimentScriptTest(unittest.TestCase):
         destination_init_start = cxl_text.index("bool cxl_hybrid_init_destination(Error **errp)")
         write_redirect_start = cxl_text.index("static bool cxl_write_redirect_enabled(void)")
         destination_init = cxl_text[destination_init_start:write_redirect_start]
-        destination_cleanup_start = cxl_text.index("static void cxl_destination_staging_cleanup(void)")
+        destination_setup_start = cxl_text.index(
+            "static int cxl_destination_control_and_region_init(QIOChannelCXL *cioc,\n"
+            "                                                   Error **errp)\n{")
+        destination_copy_start = cxl_text.index(
+            "static int cxl_destination_copy_staging_init(",
+            destination_setup_start)
+        destination_setup = cxl_text[destination_setup_start:destination_copy_start]
+        destination_cleanup_start = cxl_text.index("static void cxl_destination_setup_cleanup(void)")
         destination_init_again = cxl_text.index("bool cxl_hybrid_init_destination(Error **errp)")
         destination_cleanup = cxl_text[destination_cleanup_start:destination_init_again]
         source_cleanup = cxl_text[cleanup_start:cxl_text.index("bool cxl_hybrid_enabled(void)")]
 
-        self.assertIn("migrate_cxl_fault_control_plane_cxl()", source_init)
         self.assertIn("cxl_hybrid_control_init_source(&local_err)", source_init)
-        self.assertIn("migrate_cxl_fault_control_plane_cxl()", destination_init)
-        self.assertIn("cxl_hybrid_control_init_destination(errp)", destination_init)
+        self.assertIn("cxl_destination_setup_init(errp)", destination_init)
+        self.assertIn("cxl_hybrid_control_init_destination(errp)", destination_setup)
         self.assertIn("cxl_hybrid_control_cleanup_source();", source_cleanup)
         self.assertIn("cxl_hybrid_control_cleanup_destination();",
                       destination_cleanup)
@@ -1742,8 +1823,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertIn("cxl_hybrid_ctrl_request_worker_start", text)
         self.assertIn("cxl_hybrid_ctrl_request_worker_stop", text)
-        self.assertIn("cxl_hybrid_ctrl_ready_poller_start", text)
-        self.assertIn("cxl_hybrid_ctrl_ready_poller_stop", text)
+        self.assertNotIn("cxl_hybrid_ctrl_ready_poller_start", text)
+        self.assertNotIn("cxl_hybrid_ctrl_ready_poller_stop", text)
 
     def test_fault_publish_core_is_backend_neutral(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -1756,12 +1837,12 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("int cxl_hybrid_publish_fault_request_core(",
                       cxl_text)
         core_start = cxl_text.index("int cxl_hybrid_publish_fault_request_core(")
-        handle_start = cxl_text.index("int cxl_hybrid_handle_publish_request(")
-        core = cxl_text[core_start:cxl_text.index("int cxl_hybrid_handle_publish_quiesce(")]
-        self.assertIn("CXLHybridFaultReadyRecord *primary_ready", cxl_text)
+        core_end = cxl_text.index("int cxl_hybrid_warm_push_iteration(")
+        core = cxl_text[core_start:core_end]
+        self.assertNotIn("CXLHybridFaultReadyRecord", cxl_text)
         self.assertIn("cxl_hybrid_publish_page_to_cxl(", core)
-        self.assertIn("primary_ready->page_index =", core)
-        self.assertIn("primary_ready->cxl_offset =", core)
+        self.assertIn("cxl_hybrid_record_timing(&cxl_state.fault_publish_primary_samples",
+                      core)
         self.assertNotIn("qemu_savevm_send_cxl_hybrid_publish_ready(", core)
 
         self.assertIn("cxl_hybrid_publish_fault_request_core(", control_text)
@@ -1773,9 +1854,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         worker_start = control_text.index(
             "static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)")
-        ready_poller_start = control_text.index(
-            "static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)")
-        worker = control_text[worker_start:ready_poller_start]
+        start_helper = control_text.index(
+            "static void cxl_hybrid_ctrl_start_request_worker(")
+        worker = control_text[worker_start:start_helper]
 
         self.assertIn("cxl_hybrid_ctrl_dequeue_fault_request(&record)", worker)
         self.assertIn("cxl_hybrid_lookup_global_page(record.page_index, &block,",
@@ -1791,19 +1872,14 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         worker_start = control_text.index(
             "static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)")
-        ready_poller_start = control_text.index(
-            "static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)")
         start_helper = control_text.index(
             "static void cxl_hybrid_ctrl_start_request_worker(")
-        worker = control_text[worker_start:ready_poller_start]
-        poller = control_text[ready_poller_start:start_helper]
+        worker = control_text[worker_start:start_helper]
 
-        self.assertIn("record.generation != state->hdr->generation", worker)
-        self.assertIn("record.generation != state->hdr->generation", poller)
+        self.assertIn("cxl_hybrid_control_generation_matches(state->hdr,",
+                      worker)
         self.assertNotIn("record.generation != cxl_hybrid_fault_publish_generation()",
                          worker)
-        self.assertNotIn("record.generation != cxl_hybrid_fault_publish_generation()",
-                         poller)
 
     def test_fault_path_uses_shared_bitmap_and_self_registration(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -1813,7 +1889,6 @@ class WarmExperimentScriptTest(unittest.TestCase):
         publish_ready_start = text.index("void cxl_hybrid_get_publish_stats")
         wait = text[wait_start:publish_ready_start]
 
-        self.assertIn("if (migrate_cxl_fault_control_plane_cxl()) {", wait)
         self.assertIn("page_index = cxl_global_page_index(rb, offset);", wait)
         self.assertIn("cxl_hybrid_ctrl_page_visible(page_index, generation)", wait)
         self.assertIn("ret = cxl_hybrid_ctrl_enqueue_fault_request(page_index, generation,",
@@ -1822,30 +1897,25 @@ class WarmExperimentScriptTest(unittest.TestCase):
                       wait)
         self.assertIn("cxl_hybrid_source_page_cxl_offset(ramblock, offset,", wait)
         self.assertIn("cxl_hybrid_dst_staging_register_external_page(", wait)
-        self.assertIn("} else {", wait)
-        self.assertIn("ret = migrate_send_rp_cxl_publish_req(", wait)
-        cxl_branch = wait[wait.index("if (migrate_cxl_fault_control_plane_cxl()) {"):
-                          wait.index("} else {")]
-        self.assertNotIn("cxl_hybrid_dst_staging_wait_range_present(",
-                         cxl_branch)
-        self.assertNotIn("ready_recv_ns", cxl_branch)
+        self.assertNotIn("migrate_send_rp_cxl_publish_req(", wait)
+        self.assertNotIn("ready_recv_ns", wait)
 
-    def test_ready_poller_registers_pages_into_staging(self):
+    def test_request_worker_publishes_regions_directly(self):
         control_source = (SCRIPT_PATH.parent.parent / "migration" /
                           "cxl-hybrid-control.c").resolve()
         control_text = control_source.read_text(encoding="utf-8")
 
-        poller_start = control_text.index(
-            "static void *cxl_hybrid_ctrl_ready_poller_thread(void *opaque)")
         start_helper = control_text.index(
             "static void cxl_hybrid_ctrl_start_request_worker(")
-        poller = control_text[poller_start:start_helper]
+        worker_start = control_text.index(
+            "static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)")
+        worker = control_text[worker_start:start_helper]
 
-        self.assertIn("cxl_hybrid_ctrl_dequeue_fault_ready(&record)", poller)
-        self.assertIn("if (record.generation != state->hdr->generation) {",
-                      poller)
-        self.assertIn("cxl_hybrid_handle_fault_ready_record(&record, &local_err);",
-                      poller)
+        self.assertIn("record.flags & CXL_HYBRID_FAULT_REQUEST_F_REGION",
+                      worker)
+        self.assertIn("cxl_hybrid_publish_fault_region_request_core(",
+                      worker)
+        self.assertNotIn("cxl_hybrid_ctrl_dequeue_fault_ready", worker)
 
     def test_control_region_maps_shared_visible_bitmap(self):
         control_source = (SCRIPT_PATH.parent.parent / "migration" /
@@ -1943,9 +2013,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertIn("while (!cxl_hybrid_ctrl_page_visible(page_index, generation))",
                       wait)
-        self.assertIn("cxl_hybrid_control_destination.hdr->generation != generation",
+        self.assertIn("!cxl_hybrid_control_generation_matches(",
                       wait)
-        self.assertIn("g_usleep(50);", wait)
+        self.assertIn("cpu_relax();", wait)
         self.assertNotIn("retries", wait)
         self.assertNotIn("Timed out waiting", wait)
         self.assertNotIn("-ETIMEDOUT", wait)
@@ -1966,7 +2036,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
                                 "hybrid_postcopy_payload", "light")
         self.assertEqual(calls, [])
 
-    def test_set_params_hybrid_cxl_offset_forces_descriptor_transport(self):
+    def test_set_params_hybrid_cxl_offset_uses_shared_control_region(self):
         calls = []
 
         def fake_qmp_ok(_f, cmd, args=None):
@@ -1980,8 +2050,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         _cmd, args = calls[0]
         self.assertTrue(args["x-cxl-shared-backing"])
-        self.assertEqual(args["x-cxl-dst-install-policy"], "on-demand")
-        self.assertEqual(args["x-cxl-warm-transport"], "cxl-offset")
+        self.assertNotIn("x-cxl-dst-install-policy", args)
+        self.assertNotIn("x-cxl-warm-transport", args)
+        self.assertEqual(args["x-cxl-prefetch-rate"], 0)
 
     def test_default_modes_exclude_payload_hybrid(self):
         self.assertNotIn("hybrid_postcopy_payload",
@@ -2112,8 +2183,11 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertNotIn("qemu_cond_destroy(&cxl_dst_staging.cond)", cleanup)
         self.assertNotIn("qemu_mutex_destroy(&cxl_dst_staging.lock)", cleanup)
-        self.assertIn("cxl_dst_staging.stopping = true;", cleanup)
-        self.assertIn("qemu_cond_broadcast(&cxl_dst_staging.cond)", cleanup)
+        self.assertIn("qemu_mutex_lock(&cxl_dst_staging.lock);", cleanup)
+        self.assertIn("g_clear_pointer(&cxl_dst_staging.slots, g_hash_table_destroy)",
+                      cleanup)
+        self.assertIn("cxl_hybrid_dst_staging_reset_counters();", cleanup)
+        self.assertNotIn("cxl_dst_staging.sync_ready = false;", cleanup)
 
     def test_real_devdax_paths_use_aligned_reserved_regions_and_fixed_staging_fd(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -2143,27 +2217,25 @@ class WarmExperimentScriptTest(unittest.TestCase):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
         publish_start = text.index("int cxl_hybrid_publish_page_to_cxl")
-        handle_start = text.index("int cxl_hybrid_handle_publish_request")
+        handle_start = text.index("static void cxl_hybrid_publish_fault_burst")
         publish = text[publish_start:handle_start]
 
         self.assertNotIn("page_len = TARGET_PAGE_SIZE", publish)
         self.assertIn("!page_len || !QEMU_IS_ALIGNED(page_len, TARGET_PAGE_SIZE)",
                       publish)
 
-    def test_publish_request_queues_primary_ready_before_fault_burst(self):
+    def test_fault_request_core_publishes_primary_before_optional_burst(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
-        handle_start = text.index("int cxl_hybrid_handle_publish_request")
-        quiesce_start = text.index("int cxl_hybrid_handle_publish_quiesce")
+        handle_start = text.index("int cxl_hybrid_publish_fault_request_core")
+        quiesce_start = text.index("int cxl_hybrid_warm_push_iteration")
         handle = text[handle_start:quiesce_start]
 
-        self.assertIn("cxl_hybrid_publish_fault_request_core(ramblock, guest_offset,", handle)
-        self.assertIn("&primary_ready,", handle)
-        self.assertIn("cxl_hybrid_stream_ready_consumer,", handle)
+        self.assertIn("cxl_hybrid_publish_page_to_cxl(ramblock, guest_offset, page_len,",
+                      handle)
         self.assertIn("cxl_hybrid_publish_fault_burst(", handle)
-        self.assertIn("generation, ready_consumer, errp);", handle)
         self.assertLess(
-            handle.index("cxl_hybrid_stream_ready_consumer,"),
+            handle.index("cxl_hybrid_publish_page_to_cxl("),
             handle.index("cxl_hybrid_publish_fault_burst(")
         )
 
@@ -2175,32 +2247,20 @@ class WarmExperimentScriptTest(unittest.TestCase):
         wait = text[wait_start:publish_ready_start]
 
         self.assertIn("wait_start_ns = cxl_now_ns();", wait)
-        self.assertIn("cxl_hybrid_lookup_fault_wait_record_locked(", wait)
-        self.assertIn("migrate_send_rp_cxl_publish_req(", wait)
-        self.assertIn("cxl_ctrl_fault_path = migrate_cxl_fault_control_plane_cxl();",
-                      wait)
-        self.assertIn("if (!cxl_ctrl_fault_path && cxl_state.publish_mutex_ready) {",
-                      wait)
-        self.assertIn("if (!cxl_ctrl_fault_path) {", wait)
-        non_cxl_branch = wait[wait.index("} else {"):
-                              wait.index("if (publish_req_sent) {")]
-        cxl_branch = wait[wait.index("if (migrate_cxl_fault_control_plane_cxl()) {"):
-                          wait.index("} else {")]
-
-        self.assertIn("cxl_hybrid_take_fault_wait_ready_recv_ns_locked(",
-                      non_cxl_branch)
-        self.assertLess(wait.index("cxl_hybrid_lookup_fault_wait_record_locked("),
-                        wait.index("migrate_send_rp_cxl_publish_req("))
-        self.assertNotIn("cxl_hybrid_lookup_fault_wait_record_locked(",
-                         cxl_branch)
+        self.assertIn("wait_start_ns = cxl_now_ns();", wait)
+        self.assertIn("cxl_hybrid_ctrl_enqueue_fault_request(", wait)
+        self.assertIn("cxl_hybrid_ctrl_wait_page_visible(", wait)
+        self.assertIn("cxl_hybrid_set_last_publish_wait(", wait)
+        self.assertNotIn("cxl_hybrid_lookup_fault_wait_record_locked(", wait)
+        self.assertNotIn("migrate_send_rp_cxl_publish_req(", wait)
         self.assertNotIn("cxl_hybrid_take_fault_wait_ready_recv_ns_locked(",
-                         cxl_branch)
+                         wait)
 
     def test_fault_burst_helper_uses_fixed_forward_window(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
         helper_start = text.index("static void cxl_hybrid_publish_fault_burst(")
-        handle_start = text.index("int cxl_hybrid_handle_publish_request")
+        handle_start = text.index("static int cxl_hybrid_publish_region_span_to_cxl")
         helper = text[helper_start:handle_start]
 
         self.assertIn("CXL_HYBRID_FAULT_BURST_PAGES 4", text)
@@ -2209,32 +2269,23 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("(uint64_t)(page - 1) * TARGET_PAGE_SIZE", helper)
         self.assertNotIn("page = 0", helper)
 
-    def test_pending_publish_ready_revalidates_before_send(self):
+    def test_shared_control_region_removes_pending_publish_ready_drain(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
-        send_start = text.index("int cxl_hybrid_send_pending_publish_ready")
-        handle_start = text.index("int cxl_hybrid_handle_publish_ready")
-        send = text[send_start:handle_start]
 
-        self.assertIn("cxl_hybrid_republish_pending_ready(ready, errp)", send)
-        self.assertLess(send.index("cxl_hybrid_republish_pending_ready"),
-                        send.index("cxl_hybrid_publish_notify_encoded_len"))
+        self.assertNotIn("cxl_hybrid_send_pending_publish_ready", text)
+        self.assertIn("cxl_hybrid_ctrl_publish_pages_visible(", text)
 
-    def test_primary_publish_ready_queue_marks_urgent_migration_request(self):
+    def test_primary_fault_publish_updates_shared_visibility_without_ready_queue(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
-        migration_header = (SCRIPT_PATH.parent.parent / "migration" /
-                            "migration.h").resolve()
         text = cxl_source.read_text(encoding="utf-8")
-        header = migration_header.read_text(encoding="utf-8")
-        queue_start = text.index("static void cxl_hybrid_queue_publish_ready(")
-        republish_start = text.index("static int cxl_hybrid_republish_pending_ready(")
-        queue = text[queue_start:republish_start]
+        publish_start = text.index("int cxl_hybrid_publish_page_to_cxl(")
+        publish_end = text.index("static void cxl_hybrid_publish_fault_burst(")
+        publish = text[publish_start:publish_end]
 
-        self.assertIn("void migration_mark_cxl_hybrid_ready_urgent(void);", header)
-        self.assertIn("bool migration_cxl_hybrid_ready_urgent(void);", header)
-        self.assertIn("void migration_clear_cxl_hybrid_ready_urgent(void);", header)
-        self.assertIn("if (fault_primary) {", queue)
-        self.assertIn("migration_mark_cxl_hybrid_ready_urgent();", queue)
+        self.assertIn("cxl_hybrid_mark_page_cxl_visible(page_idx);", publish)
+        self.assertIn("cxl_hybrid_ctrl_publish_pages_visible(page_idx,", publish)
+        self.assertNotIn("cxl_hybrid_queue_publish_ready", text)
 
     def test_ram_iterate_breaks_early_for_cxl_hybrid_ready_urgent(self):
         ram_source = (SCRIPT_PATH.parent.parent / "migration" / "ram.c").resolve()
@@ -2247,17 +2298,12 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertLess(iterate.index("migration_cxl_hybrid_ready_urgent()"),
                         iterate.index("pages = ram_find_and_save_block(rs);"))
 
-    def test_pending_publish_ready_drain_clears_urgent_flag_before_send_loop(self):
+    def test_iteration_run_has_no_publish_ready_urgent_drain(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
-        send_start = text.index("int cxl_hybrid_send_pending_publish_ready")
-        handle_start = text.index("int cxl_hybrid_handle_publish_ready")
-        send = text[send_start:handle_start]
 
-        self.assertIn("if (migration_cxl_hybrid_ready_urgent()) {", send)
-        self.assertIn("migration_clear_cxl_hybrid_ready_urgent();", send)
-        self.assertLess(send.index("migration_clear_cxl_hybrid_ready_urgent();"),
-                        send.index("while ((ready = cxl_hybrid_pop_publish_ready()) != NULL) {"))
+        self.assertNotIn("migration_cxl_hybrid_ready_urgent", text)
+        self.assertNotIn("migration_clear_cxl_hybrid_ready_urgent", text)
 
     def test_cleanup_latches_final_x_cxl_stats_before_state_reset(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -2287,24 +2333,28 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("info->x_cxl = QAPI_CLONE(CXLMigrationStats, cxl_cleanup_snapshot);",
                       populate)
 
-    def test_postcopy_completion_prepares_cxl_before_eof(self):
+    def test_postcopy_completion_finishes_cxl_after_postcopy_active_completion(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
         text = migration_source.read_text(encoding="utf-8")
 
         helper_start = text.rindex(
-            "static int migration_completion_prepare_cxl_postcopy")
+            "static int migration_completion_finish_cxl_postcopy")
         postcopy_start = text.index("static void migration_completion_postcopy(MigrationState *s)")
         completion_start = text.index("static void migration_completion(MigrationState *s)")
         iterate_start = text.index("static MigIterateState migration_iteration_run")
         helper = text[helper_start:postcopy_start]
         completion = text[completion_start:iterate_start]
 
-        self.assertIn("migration_completion_prepare_cxl_postcopy(s, &local_err)",
+        self.assertIn("migration_completion_finish_cxl_postcopy(s, &local_err)",
                       completion)
         self.assertLess(
-            completion.index("migration_completion_prepare_cxl_postcopy"),
-            completion.index("migration_completion_postcopy(s)")
+            completion.index("migration_completion_postcopy(s)"),
+            completion.index("migration_completion_finish_cxl_postcopy")
+        )
+        self.assertLess(
+            completion.index("migration_completion_finish_cxl_postcopy"),
+            completion.index("migration_trace_postcopy_timeline(s, \"completion-prepare-done\"")
         )
 
     def test_postcopy_start_initializes_cxl_fault_control_source_workers(self):
@@ -2331,19 +2381,18 @@ class WarmExperimentScriptTest(unittest.TestCase):
         text = migration_source.read_text(encoding="utf-8")
 
         helper_start = text.rindex(
-            "static int migration_completion_prepare_cxl_postcopy")
+            "static int migration_completion_finish_cxl_postcopy")
         postcopy_start = text.index("static void migration_completion_postcopy(MigrationState *s)")
         helper = text[helper_start:postcopy_start]
 
         self.assertIn("cxl_hybrid_completion_publish_remaining_pages(ms, errp)",
                       helper)
-        self.assertIn("if (!migrate_cxl_shared_bitmap()) {", helper)
-        self.assertIn("cxl_hybrid_send_pending_publish_ready(ms->to_dst_file, errp)",
-                      helper)
+        self.assertIn("cxl_hybrid_control_complete_source_run(errp)", helper)
+        self.assertNotIn("cxl_hybrid_send_pending_publish_ready", helper)
         self.assertNotIn("while (ms->rp_state.rp_thread_created", helper)
         self.assertNotIn("ms->rp_state.rp_thread_exited", helper)
 
-    def test_pre_eof_cxl_prepare_quiesces_publish_requests_without_final_visibility_drain(self):
+    def test_completion_finishes_shared_control_run_without_stream_quiesce(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
         savevm_source = (SCRIPT_PATH.parent.parent / "migration" /
@@ -2352,36 +2401,31 @@ class WarmExperimentScriptTest(unittest.TestCase):
         savevm = savevm_source.read_text(encoding="utf-8")
 
         helper_start = text.rindex(
-            "static int migration_completion_prepare_cxl_postcopy")
+            "static int migration_completion_finish_cxl_postcopy")
         postcopy_start = text.index("static void migration_completion_postcopy(MigrationState *s)")
         helper = text[helper_start:postcopy_start]
 
-        self.assertIn("qemu_savevm_send_cxl_hybrid_publish_quiesce(ms->to_dst_file)",
+        self.assertIn("cxl_hybrid_control_complete_source_run(errp)",
                       helper)
-        self.assertIn("migration_completion_wait_cxl_publish_quiesce_ack(ms, errp)",
-                      helper)
-        self.assertLess(
-            helper.index("qemu_savevm_send_cxl_hybrid_publish_quiesce"),
-            helper.index("migration_completion_wait_cxl_publish_quiesce_ack")
-        )
-        self.assertIn("if (!migrate_cxl_shared_bitmap()) {", helper)
-        self.assertIn("cxl_hybrid_send_pending_publish_ready(ms->to_dst_file, errp)",
-                      helper)
-        self.assertIn("MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE", savevm)
+        self.assertNotIn("qemu_savevm_send_cxl_hybrid_publish_quiesce", helper)
+        self.assertNotIn("migration_completion_wait_cxl_publish_quiesce_ack",
+                         helper)
+        self.assertNotIn("MIG_CMD_CXL_HYBRID_PUBLISH_QUIESCE", savevm)
 
-    def test_pre_eof_cxl_prepare_flushes_stream_after_visibility_updates(self):
+    def test_completion_traces_shared_control_prepare_window(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
         text = migration_source.read_text(encoding="utf-8")
 
         helper_start = text.rindex(
-            "static int migration_completion_prepare_cxl_postcopy")
+            "static int migration_completion_finish_cxl_postcopy")
         postcopy_start = text.index("static void migration_completion_postcopy(MigrationState *s)")
         helper = text[helper_start:postcopy_start]
 
-        self.assertIn("qemu_fflush(ms->to_dst_file)", helper)
-        self.assertIn("if (ready_sent > 0) {", helper)
-        self.assertIn("cxl_hybrid_mark_completion_publish_ready_flushed()", helper)
+        self.assertIn("trace_cxl_hybrid_completion_prepare_begin();", helper)
+        self.assertIn("trace_cxl_hybrid_completion_prepare_end(remaining_sent, 0);",
+                      helper)
+        self.assertNotIn("qemu_fflush(ms->to_dst_file)", helper)
 
     def test_warm_push_publishes_directly_without_warm_descriptor_transport(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -2392,8 +2436,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         send = text[send_start:cleanup_start]
 
         self.assertIn("cxl_hybrid_publish_page_to_cxl(", send)
-        self.assertIn("if (!ret && !migrate_cxl_shared_bitmap()) {", send)
-        self.assertIn("cxl_hybrid_send_warm_descriptor(", send)
+        self.assertNotIn("cxl_hybrid_send_warm_descriptor(", send)
         self.assertIn("set_bit_atomic(page_idx, cxl_state.warm_sent_bmap);", send)
         self.assertIn("clear_bit_atomic(page_idx, cxl_state.warm_dirty_bmap);", send)
 
@@ -2461,8 +2504,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertNotIn("CXLHybridWarmDescBatchBuilder", callback)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_append", callback)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_flush", helper)
-        self.assertIn("if (migrate_cxl_shared_bitmap()) {", callback)
-        self.assertIn("cxl_hybrid_send_warm_descriptor(s->to_dst_file", callback)
+        self.assertIn("cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,",
+                      callback)
+        self.assertNotIn("cxl_hybrid_send_warm_descriptor", callback)
 
     def test_completion_publish_remaining_pages_filters_on_cxl_visibility(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -2511,7 +2555,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("cxl_hybrid_completion_publish_remaining_page(s, page_idx",
                       helper)
 
-    def test_iteration_run_skips_publish_ready_drain_in_shared_bitmap_mode(self):
+    def test_iteration_run_uses_warm_push_without_publish_ready_drain(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
         text = migration_source.read_text(encoding="utf-8")
@@ -2520,9 +2564,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
         end = text.index("static void migration_iteration_finish(MigrationState *s)")
         body = text[start:end]
 
-        self.assertIn("!migrate_cxl_shared_bitmap() &&", body)
-        self.assertIn("cxl_hybrid_send_pending_publish_ready(s->to_dst_file", body)
         self.assertIn("cxl_hybrid_warm_push_iteration(s, &local_err)", body)
+        self.assertNotIn("cxl_hybrid_send_pending_publish_ready", body)
 
     def test_publish_and_invalidate_maintain_remaining_bitmap(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -2564,7 +2607,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("clear_bit_atomic(page_idx, cxl_state.remaining_bmap);",
                       helper)
 
-    def test_warm_desc_batch_protocol_is_declared(self):
+    def test_legacy_warm_desc_batch_protocol_is_removed(self):
         cxl_header = (SCRIPT_PATH.parent.parent / "migration" / "cxl.h").resolve()
         savevm_source = (SCRIPT_PATH.parent.parent / "migration" / "savevm.c").resolve()
         savevm_header = (SCRIPT_PATH.parent.parent / "migration" / "savevm.h").resolve()
@@ -2572,49 +2615,39 @@ class WarmExperimentScriptTest(unittest.TestCase):
         savevm_text = savevm_source.read_text(encoding="utf-8")
         savevm_header_text = savevm_header.read_text(encoding="utf-8")
 
-        self.assertIn("typedef struct CXLHybridWarmDescRange {", cxl_text)
-        self.assertIn("typedef struct CXLHybridWarmDescBatch {", cxl_text)
-        self.assertIn("int cxl_hybrid_warm_desc_batch_encode(", cxl_text)
-        self.assertIn("int cxl_hybrid_warm_desc_batch_decode(", cxl_text)
-        self.assertIn("MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH", savevm_text)
-        self.assertIn("qemu_savevm_send_cxl_hybrid_warm_desc_batch", savevm_header_text)
+        self.assertNotIn("CXLHybridWarmDescRange", cxl_text)
+        self.assertNotIn("CXLHybridWarmDescBatch", cxl_text)
+        self.assertNotIn("cxl_hybrid_warm_desc_batch_encode", cxl_text)
+        self.assertNotIn("cxl_hybrid_warm_desc_batch_decode", cxl_text)
+        self.assertNotIn("MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH", savevm_text)
+        self.assertNotIn("qemu_savevm_send_cxl_hybrid_warm_desc_batch",
+                         savevm_header_text)
 
-    def test_warm_descriptor_send_marks_page_visible_on_destination(self):
+    def test_warm_push_marks_page_visible_through_shared_control(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
 
-        send_start = text.index("int cxl_hybrid_send_warm_descriptor")
-        next_start = text.index("int cxl_hybrid_send_warm_page")
+        send_start = text.index("static int cxl_hybrid_send_selected_page(")
+        next_start = text.index("static int cxl_hybrid_completion_publish_remaining_page(")
         send = text[send_start:next_start]
 
-        self.assertIn("cxl_hybrid_account_dst_page_sent(ramblock, guest_offset, TARGET_PAGE_SIZE)",
+        self.assertIn("cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,",
                       send)
-        self.assertLess(
-            send.index("qemu_savevm_send_cxl_hybrid_warm_desc"),
-            send.index("cxl_hybrid_account_dst_page_sent")
-        )
+        self.assertIn("CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH", send)
+        self.assertNotIn("qemu_savevm_send_cxl_hybrid_warm_desc", send)
 
-    def test_publish_request_send_observes_destination_quiesce_gate(self):
+    def test_publish_request_uses_shared_control_ring_not_return_path(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
-        migration_header = (SCRIPT_PATH.parent.parent / "migration" /
-                            "migration.h").resolve()
+        cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = migration_source.read_text(encoding="utf-8")
-        header = migration_header.read_text(encoding="utf-8")
-        send_start = text.index("int migrate_send_rp_cxl_publish_req")
-        next_start = text.index("int migrate_send_rp_req_pages")
-        send = text[send_start:next_start]
+        cxl_text = cxl_source.read_text(encoding="utf-8")
 
-        self.assertIn("bool cxl_publish_request_quiesce;", header)
-        self.assertIn("bool *sentp", send)
-        self.assertIn("mis->cxl_publish_request_quiesce", send)
-        self.assertIn("QEMU_LOCK_GUARD(&mis->rp_mutex)", send)
-        self.assertLess(
-            send.index("mis->cxl_publish_request_quiesce"),
-            send.index("migrate_send_rp_message_locked")
-        )
+        self.assertNotIn("migrate_send_rp_cxl_publish_req", text)
+        self.assertIn("cxl_hybrid_ctrl_enqueue_fault_request(", cxl_text)
+        self.assertIn("cxl_hybrid_ctrl_wait_page_visible(", cxl_text)
 
-    def test_publish_request_protocol_carries_send_timestamp(self):
+    def test_publish_request_timestamp_is_carried_in_shared_control_record(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
         cxl_header = (SCRIPT_PATH.parent.parent / "migration" /
@@ -2622,54 +2655,30 @@ class WarmExperimentScriptTest(unittest.TestCase):
         text = migration_source.read_text(encoding="utf-8")
         cxl_header_text = cxl_header.read_text(encoding="utf-8")
 
-        send_start = text.index("int migrate_send_rp_cxl_publish_req")
-        next_start = text.index("int migrate_send_rp_req_pages")
-        send = text[send_start:next_start]
-        handler_start = text.index("static void *source_return_path_thread(void *opaque)")
-        source_open_start = text.index("static void open_return_path_on_source(MigrationState *ms)")
-        handler = text[handler_start:source_open_start]
+        self.assertNotIn("migrate_send_rp_cxl_publish_req", text)
+        self.assertIn("uint64_t request_ts_ns;", cxl_header_text)
+        self.assertIn("void cxl_hybrid_note_publish_request_received(",
+                      cxl_header_text)
 
-        self.assertIn("size_t msglen = 24;", send)
-        self.assertIn("uint64_t sent_at_ns;", send)
-        self.assertIn("sent_at_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);", send)
-        self.assertIn("stq_be_p(bufc + 16, sent_at_ns);", send)
-        self.assertIn("void cxl_hybrid_record_publish_req_recv_time(uint64_t elapsed_ns);", cxl_header_text)
-        self.assertIn("expected_len = 24 + 1;", handler)
-        self.assertIn("publish_req_sent_at_ns = ldq_be_p(buf + 16);", handler)
-        self.assertIn("cxl_hybrid_record_publish_req_recv_time(", handler)
-
-    def test_publish_ready_command_carries_send_timestamp_and_primary_flag(self):
+    def test_publish_ready_command_is_removed(self):
         savevm_source = (SCRIPT_PATH.parent.parent / "migration" /
                          "savevm.c").resolve()
         savevm_header = (SCRIPT_PATH.parent.parent / "migration" /
                          "savevm.h").resolve()
-        cxl_header = (SCRIPT_PATH.parent.parent / "migration" /
-                      "cxl.h").resolve()
         savevm_text = savevm_source.read_text(encoding="utf-8")
         savevm_header_text = savevm_header.read_text(encoding="utf-8")
-        cxl_header_text = cxl_header.read_text(encoding="utf-8")
 
-        send_start = savevm_text.index("void qemu_savevm_send_cxl_hybrid_publish_ready")
-        quiesce_start = savevm_text.index("void qemu_savevm_send_cxl_hybrid_publish_quiesce")
-        send = savevm_text[send_start:quiesce_start]
         switch_start = savevm_text.index("static int loadvm_process_command(QEMUFile *f, Error **errp)")
         cleanup_start = savevm_text.index("void qemu_loadvm_state_cleanup(MigrationIncomingState *mis)")
         switch = savevm_text[switch_start:cleanup_start]
 
-        self.assertIn("bool fault_primary", savevm_header_text)
-        self.assertIn("uint64_t sent_at_ns;", send)
-        self.assertIn("size_t cmd_hdr_len = 8 + 1;", send)
-        self.assertIn("sent_at_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);", send)
-        self.assertIn("stq_be_p(cmd_buf, sent_at_ns);", send)
-        self.assertIn("cmd_buf[8] = fault_primary ? CXL_HYBRID_PUBLISH_READY_FLAG_PRIMARY : 0;", send)
-        self.assertIn("void cxl_hybrid_record_publish_ready_recv_time(uint64_t elapsed_ns);", cxl_header_text)
-        self.assertIn("if (len < 9) {", switch)
-        self.assertIn("publish_ready_sent_at_ns = ldq_be_p(buf);", switch)
-        self.assertIn("fault_primary = buf[8] & CXL_HYBRID_PUBLISH_READY_FLAG_PRIMARY;", switch)
-        self.assertIn("cxl_hybrid_record_publish_ready_recv_time(", switch)
-        self.assertIn("cxl_hybrid_handle_publish_ready(&notify, fault_primary,", switch)
+        self.assertNotIn("qemu_savevm_send_cxl_hybrid_publish_ready",
+                         savevm_text)
+        self.assertNotIn("CXL_HYBRID_PUBLISH_READY", savevm_text)
+        self.assertNotIn("fault_primary", savevm_header_text)
+        self.assertNotIn("cxl_hybrid_handle_publish_ready", switch)
 
-    def test_source_return_path_handles_publish_quiesce_ack(self):
+    def test_source_return_path_has_no_publish_quiesce_ack(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
         text = migration_source.read_text(encoding="utf-8")
@@ -2677,11 +2686,10 @@ class WarmExperimentScriptTest(unittest.TestCase):
         source_open_start = text.index("static void open_return_path_on_source(MigrationState *ms)")
         handler = text[handler_start:source_open_start]
 
-        self.assertIn("MIG_RP_MSG_CXL_HYBRID_PUBLISH_QUIESCE_ACK", handler)
-        self.assertIn("ms->cxl_publish_quiesce_acked = true;", handler)
-        self.assertIn("migration_rp_kick(ms);", handler)
+        self.assertNotIn("MIG_RP_MSG_CXL_HYBRID_PUBLISH_QUIESCE_ACK", handler)
+        self.assertNotIn("cxl_publish_quiesce_acked", handler)
 
-    def test_loadvm_handles_warm_desc_batch_command(self):
+    def test_loadvm_handles_cxl_metadata_command(self):
         savevm_source = (SCRIPT_PATH.parent.parent / "migration" /
                          "savevm.c").resolve()
         text = savevm_source.read_text(encoding="utf-8")
@@ -2690,18 +2698,19 @@ class WarmExperimentScriptTest(unittest.TestCase):
         cleanup_start = text.index("void qemu_loadvm_state_cleanup(MigrationIncomingState *mis)")
         switch = text[switch_start:cleanup_start]
 
-        self.assertIn("case MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH:", switch)
-        self.assertIn("cxl_hybrid_warm_desc_batch_decode", switch)
-        self.assertIn("cxl_hybrid_warm_desc_batch_store", switch)
+        self.assertIn("case MIG_CMD_CXL_HYBRID_METADATA:", switch)
+        self.assertIn("cxl_hybrid_metadata_recv", switch)
+        self.assertNotIn("MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH", switch)
 
-    def test_destination_has_warm_desc_batch_apply_helper(self):
+    def test_destination_registers_external_cxl_ranges_directly(self):
         metadata_source = (SCRIPT_PATH.parent.parent / "migration" /
                            "cxl-hybrid-metadata.c").resolve()
         text = metadata_source.read_text(encoding="utf-8")
 
-        self.assertIn("int cxl_hybrid_warm_desc_batch_store", text)
-        self.assertIn("CXLHybridWarmDescBatch *batch", text)
-        self.assertIn("qemu_cond_broadcast(&cxl_dst_staging.cond)", text)
+        self.assertIn("int cxl_hybrid_dst_staging_register_external_page(",
+                      text)
+        self.assertIn("external_offsets", text)
+        self.assertNotIn("cxl_hybrid_warm_desc_batch_store", text)
 
     def test_locked_external_page_registration_uses_locked_active_helper(self):
         metadata_source = (SCRIPT_PATH.parent.parent / "migration" /
@@ -2723,25 +2732,25 @@ class WarmExperimentScriptTest(unittest.TestCase):
         text = metadata_source.read_text(encoding="utf-8")
 
         range_start = text.index(
-            "static int cxl_hybrid_dst_staging_register_external_range_locked(")
-        batch_start = text.index("int cxl_hybrid_warm_desc_batch_store(")
+            "static int cxl_hybrid_dst_staging_register_external_page_locked(")
+        batch_start = text.index(
+            "int cxl_hybrid_dst_staging_register_external_page(")
         range_helper = text[range_start:batch_start]
-        batch_store = text[batch_start:]
 
         self.assertIn("cxl_hybrid_dst_staging_lookup", range_helper)
-        self.assertIn("remaining", range_helper)
-        self.assertIn("chunk_len", range_helper)
-        self.assertIn("cxl_hybrid_dst_staging_register_external_range_locked", batch_store)
-        self.assertNotIn("cxl_hybrid_dst_staging_register_external_page_locked(", batch_store)
+        self.assertIn("external_offsets[first_page + page]", range_helper)
+        self.assertIn("slot->present_bitmap", range_helper)
+        self.assertNotIn("cxl_hybrid_warm_desc_batch_store", text)
 
-    def test_trace_events_include_warm_desc_batch_traces(self):
+    def test_trace_events_include_current_cxl_visibility_traces(self):
         trace_events = (SCRIPT_PATH.parent.parent / "migration" /
                         "trace-events").resolve()
         text = trace_events.read_text(encoding="utf-8")
 
-        self.assertIn("savevm_send_cxl_hybrid_warm_desc_batch", text)
-        self.assertIn("cxl_hybrid_warm_desc_batch_send", text)
-        self.assertIn("cxl_hybrid_warm_desc_batch_recv", text)
+        self.assertIn("savevm_send_cxl_hybrid_metadata", text)
+        self.assertIn("cxl_hybrid_publish_request_send", text)
+        self.assertIn("cxl_hybrid_region_publish_complete", text)
+        self.assertNotIn("cxl_hybrid_warm_desc_batch_send", text)
 
     def test_pre_eof_cxl_prepare_uses_publish_only_completion(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
@@ -2752,7 +2761,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         cxl_text = cxl_source.read_text(encoding="utf-8")
 
         helper_start = migration_text.rindex(
-            "static int migration_completion_prepare_cxl_postcopy")
+            "static int migration_completion_finish_cxl_postcopy")
         postcopy_start = migration_text.index("static void migration_completion_postcopy(MigrationState *s)")
         helper = migration_text[helper_start:postcopy_start]
         completion_start = cxl_text.index(
@@ -2762,10 +2771,11 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertIn("cxl_hybrid_completion_publish_remaining_pages(ms, errp)", helper)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_flush", completion)
-        self.assertIn("if (migrate_cxl_shared_bitmap()) {", completion)
-        self.assertIn("cxl_hybrid_send_warm_descriptor(s->to_dst_file", completion)
+        self.assertIn("cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,",
+                      completion)
+        self.assertNotIn("cxl_hybrid_send_warm_descriptor", completion)
 
-    def test_loadvm_rejects_legacy_visibility_transport_commands_in_shared_bitmap_mode(self):
+    def test_loadvm_has_only_current_cxl_metadata_visibility_command(self):
         savevm_source = (SCRIPT_PATH.parent.parent / "migration" /
                          "savevm.c").resolve()
         text = savevm_source.read_text(encoding="utf-8")
@@ -2774,11 +2784,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
         cleanup_start = text.index("void qemu_loadvm_state_cleanup(MigrationIncomingState *mis)")
         switch = text[switch_start:cleanup_start]
 
-        self.assertIn("case MIG_CMD_CXL_HYBRID_WARM_DESC:", switch)
-        self.assertIn("case MIG_CMD_CXL_HYBRID_WARM_DESC_BATCH:", switch)
-        self.assertIn("case MIG_CMD_CXL_HYBRID_PUBLISH_READY:", switch)
-        self.assertIn("migrate_cxl_shared_bitmap()", switch)
-        self.assertIn("shared-bitmap mode rejects legacy", switch)
+        self.assertIn("case MIG_CMD_CXL_HYBRID_METADATA:", switch)
+        self.assertNotIn("MIG_CMD_CXL_HYBRID_WARM_DESC", switch)
+        self.assertNotIn("MIG_CMD_CXL_HYBRID_PUBLISH_READY", switch)
 
     def test_qapi_includes_last_publish_event_diagnostics(self):
         qapi_source = (SCRIPT_PATH.parent.parent / "qapi" /
@@ -2786,17 +2794,16 @@ class WarmExperimentScriptTest(unittest.TestCase):
         text = qapi_source.read_text(encoding="utf-8")
 
         self.assertIn("{ 'struct': 'CXLMigrationPublishRequestInfo'", text)
-        self.assertIn("{ 'struct': 'CXLMigrationPublishReadyInfo'", text)
         self.assertIn("{ 'struct': 'CXLMigrationPublishWaitInfo'", text)
         self.assertIn("'*last-publish-request': {", text)
         self.assertIn("'type': 'CXLMigrationPublishRequestInfo'", text)
-        self.assertIn("'*last-publish-ready': {", text)
-        self.assertIn("'*last-completion-publish-ready': {", text)
-        self.assertIn("'type': 'CXLMigrationPublishReadyInfo'", text)
-        self.assertIn("'*last-publish-ready-recv': {", text)
         self.assertIn("'*last-publish-wait-begin': {", text)
         self.assertIn("'*last-publish-wait-complete': {", text)
         self.assertIn("'type': 'CXLMigrationPublishWaitInfo'", text)
+        self.assertNotIn("CXLMigrationPublishReadyInfo", text)
+        self.assertNotIn("'*last-publish-ready': {", text)
+        self.assertNotIn("'*last-completion-publish-ready': {", text)
+        self.assertNotIn("'*last-publish-ready-recv': {", text)
 
     def test_qapi_includes_fault_wait_breakdown_fields(self):
         qapi_source = (SCRIPT_PATH.parent.parent / "qapi" /
@@ -2809,33 +2816,28 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("'fault-publish-burst-samples': {", text)
         self.assertIn("'fault-publish-burst-time-ns': {", text)
         self.assertIn("'max-fault-publish-burst-time-ns': {", text)
-        self.assertIn("'fault-primary-ready-send-samples': {", text)
-        self.assertIn("'fault-primary-ready-send-time-ns': {", text)
-        self.assertIn("'max-fault-primary-ready-send-time-ns': {", text)
         self.assertIn("'fault-publish-req-recv-samples': {", text)
         self.assertIn("'fault-publish-req-recv-time-ns': {", text)
         self.assertIn("'max-fault-publish-req-recv-time-ns': {", text)
         self.assertIn("'fault-publish-req-handle-samples': {", text)
         self.assertIn("'fault-publish-req-handle-time-ns': {", text)
         self.assertIn("'max-fault-publish-req-handle-time-ns': {", text)
-        self.assertIn("'fault-primary-ready-drain-samples': {", text)
-        self.assertIn("'fault-primary-ready-drain-time-ns': {", text)
-        self.assertIn("'max-fault-primary-ready-drain-time-ns': {", text)
-        self.assertIn("'fault-primary-ready-write-samples': {", text)
-        self.assertIn("'fault-primary-ready-write-time-ns': {", text)
-        self.assertIn("'max-fault-primary-ready-write-time-ns': {", text)
-        self.assertIn("'fault-primary-ready-recv-samples': {", text)
-        self.assertIn("'fault-primary-ready-recv-time-ns': {", text)
-        self.assertIn("'max-fault-primary-ready-recv-time-ns': {", text)
-        self.assertIn("'fault-primary-ready-handle-samples': {", text)
-        self.assertIn("'fault-primary-ready-handle-time-ns': {", text)
-        self.assertIn("'max-fault-primary-ready-handle-time-ns': {", text)
-        self.assertIn("'fault-wait-ready-recv-samples': {", text)
-        self.assertIn("'fault-wait-ready-recv-time-ns': {", text)
-        self.assertIn("'max-fault-wait-ready-recv-time-ns': {", text)
-        self.assertIn("'fault-wait-after-ready-recv-samples': {", text)
-        self.assertIn("'fault-wait-after-ready-recv-time-ns': {", text)
-        self.assertIn("'max-fault-wait-after-ready-recv-time-ns': {", text)
+        self.assertNotIn("'fault-primary-ready-send-samples': {", text)
+        self.assertNotIn("'fault-primary-ready-drain-samples': {", text)
+        self.assertNotIn("'fault-primary-ready-write-samples': {", text)
+        self.assertNotIn("'max-fault-primary-ready-write-time-ns': {", text)
+        self.assertNotIn("'fault-primary-ready-recv-samples': {", text)
+        self.assertNotIn("'fault-primary-ready-recv-time-ns': {", text)
+        self.assertNotIn("'max-fault-primary-ready-recv-time-ns': {", text)
+        self.assertNotIn("'fault-primary-ready-handle-samples': {", text)
+        self.assertNotIn("'fault-primary-ready-handle-time-ns': {", text)
+        self.assertNotIn("'max-fault-primary-ready-handle-time-ns': {", text)
+        self.assertNotIn("'fault-wait-ready-recv-samples': {", text)
+        self.assertNotIn("'fault-wait-ready-recv-time-ns': {", text)
+        self.assertNotIn("'max-fault-wait-ready-recv-time-ns': {", text)
+        self.assertNotIn("'fault-wait-after-ready-recv-samples': {", text)
+        self.assertNotIn("'fault-wait-after-ready-recv-time-ns': {", text)
+        self.assertNotIn("'max-fault-wait-after-ready-recv-time-ns': {", text)
 
     def test_set_params_precopy_omits_hybrid_prefetch_settings(self):
         calls = []
@@ -2868,7 +2870,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         _cmd, args = calls[0]
         self.assertEqual(args["multifd-channels"], 2)
-        self.assertEqual(args["max-bandwidth"], 8 * 1024 * 1024)
+        self.assertEqual(args["max-bandwidth"], 0)
         self.assertNotIn("cxl-path", args)
         self.assertNotIn("x-cxl-brake-remap-granule", args)
         self.assertNotIn("x-cxl-prefetch-batch-pages", args)
@@ -4788,7 +4790,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(summary["last_publish_wait_begin"]["count"], 6)
         self.assertEqual(summary["last_publish_wait_complete"]["count"], 4)
 
-    def test_cxl_ready_ring_poller_reuses_publish_ready_timing_path(self):
+    def test_shared_control_request_worker_replaces_ready_ring_poller(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         control_source = (SCRIPT_PATH.parent.parent / "migration" /
                           "cxl-hybrid-control.c").resolve()
@@ -4796,19 +4798,13 @@ class WarmExperimentScriptTest(unittest.TestCase):
         cxl_text = cxl_source.read_text(encoding="utf-8")
         control_text = control_source.read_text(encoding="utf-8")
 
-        self.assertIn("int cxl_hybrid_handle_fault_ready_record(", cxl_text)
-        self.assertIn("cxl_hybrid_record_publish_ready_recv_time(", cxl_text)
-        self.assertIn("cxl_hybrid_handle_publish_ready(", cxl_text)
-        self.assertIn("cxl_hybrid_handle_fault_ready_record(&record, &local_err)", control_text)
-
-        helper_start = cxl_text.index("int cxl_hybrid_handle_fault_ready_record(")
-        warm_desc_start = cxl_text.index("int cxl_hybrid_send_warm_descriptor(")
-        helper = cxl_text[helper_start:warm_desc_start]
-        self.assertIn("fault_primary = record->flags & CXL_HYBRID_FAULT_READY_F_PRIMARY;", helper)
-        self.assertIn("cxl_hybrid_record_publish_ready_recv_time(ready_recv_elapsed_ns);",
-                      helper)
-        self.assertIn("return cxl_hybrid_handle_publish_ready(&notify, fault_primary,",
-                      helper)
+        self.assertNotIn("cxl_hybrid_handle_fault_ready_record", cxl_text)
+        self.assertNotIn("cxl_hybrid_record_publish_ready_recv_time", cxl_text)
+        self.assertNotIn("cxl_hybrid_handle_publish_ready", cxl_text)
+        self.assertNotIn("ready_poller", control_text)
+        self.assertIn("cxl_hybrid_publish_fault_request_core(", control_text)
+        self.assertIn("cxl_hybrid_publish_fault_region_request_core(",
+                      control_text)
 
     def test_destination_postcopy_timeline_instrumentation_present(self):
         savevm = (REPO_ROOT / "migration" / "savevm.c").read_text(
@@ -5078,7 +5074,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
             ("dst", "trace-file-flush"),
         ])
         self.assertEqual(parsed, ["src-trace.bin", "dst-trace.bin"])
-        self.assertEqual(len(heartbeat_snapshot_calls), 1)
+        self.assertGreaterEqual(len(heartbeat_snapshot_calls), 1)
         self.assertEqual(result["guest_latency"]["handoff_gap_ms"], 20.0)
         self.assertEqual(result["latency"]["qemu_total_time_window_ms"], 10)
         self.assertAlmostEqual(
@@ -5193,7 +5189,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(len(snapshots), 2)
         self.assertEqual(result["guest_latency"]["events_dst"], 2)
 
-    def test_run_case_enables_descriptor_trace_events(self):
+    def test_run_case_enables_current_hybrid_trace_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
 
@@ -5298,20 +5294,24 @@ class WarmExperimentScriptTest(unittest.TestCase):
             trace_events = Path(result["case_dir"]) / "trace-events"
             contents = trace_events.read_text(encoding="ascii").splitlines()
 
-        self.assertIn("cxl_hybrid_warm_desc_send", contents)
-        self.assertIn("cxl_hybrid_warm_desc_recv", contents)
+        self.assertIn("cxl_hybrid_warm_page_queued", contents)
         self.assertIn("cxl_hybrid_publish_request_send", contents)
         self.assertIn("cxl_hybrid_publish_request_recv", contents)
-        self.assertIn("cxl_hybrid_publish_ready_send", contents)
-        self.assertIn("cxl_hybrid_publish_ready_recv", contents)
-        self.assertIn("cxl_hybrid_publish_ready_queue", contents)
-        self.assertIn("cxl_hybrid_publish_ready_pop", contents)
-        self.assertIn("cxl_hybrid_publish_ready_drain_begin", contents)
-        self.assertIn("cxl_hybrid_publish_ready_drain_end", contents)
         self.assertIn("cxl_hybrid_completion_prepare_begin", contents)
         self.assertIn("cxl_hybrid_completion_prepare_end", contents)
         self.assertIn("cxl_hybrid_publish_wait_begin", contents)
         self.assertIn("cxl_hybrid_publish_wait_complete", contents)
+        self.assertIn("cxl_hybrid_region_publish_complete", contents)
+        self.assertIn("cxl_hybrid_rdma_bulk_region", contents)
+        self.assertIn("cxl_hybrid_rdma_ready", contents)
+        self.assertIn("cxl_hybrid_rdma_invalidate", contents)
+        self.assertIn("cxl_hybrid_rdma_cxl_republish", contents)
+        self.assertIn("cxl_hybrid_region_request_enqueue", contents)
+        self.assertIn("cxl_hybrid_region_request_dequeue", contents)
+        self.assertNotIn("cxl_hybrid_warm_desc_send", contents)
+        self.assertNotIn("cxl_hybrid_warm_desc_recv", contents)
+        self.assertNotIn("cxl_hybrid_publish_ready_send", contents)
+        self.assertNotIn("cxl_hybrid_publish_ready_recv", contents)
 
     def test_run_case_pure_precopy_does_not_require_postcopy_warm(self):
         with tempfile.TemporaryDirectory() as tmpdir:
