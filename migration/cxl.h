@@ -178,6 +178,24 @@ typedef struct CXLHybridDstRegionState {
     bool cond_ready;
 } CXLHybridDstRegionState;
 
+typedef struct CXLHybridRDMASidecarStats {
+    uint64_t rdma_ready_regions;
+    uint64_t rdma_ready_pages;
+    uint64_t rdma_invalidated_regions;
+    uint64_t rdma_ready_pages_lost;
+    uint64_t cxl_republish_regions_due_to_rdma_invalidate;
+    uint64_t cxl_republish_pages_due_to_rdma_invalidate;
+} CXLHybridRDMASidecarStats;
+
+typedef struct CXLHybridRDMASidecarState {
+    unsigned long *ready_bmap;
+    unsigned long *invalidated_bmap;
+    unsigned long *republished_bmap;
+    uint64_t total_regions;
+    uint64_t pages_per_region;
+    CXLHybridRDMASidecarStats stats;
+} CXLHybridRDMASidecarState;
+
 void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta);
 int cxl_hybrid_metadata_encoded_len(const CXLHybridMetadata *meta,
                                     size_t *len,
@@ -322,6 +340,33 @@ bool cxl_hybrid_dst_region_try_begin_remap(CXLHybridDstRegionState *state,
 void cxl_hybrid_dst_region_finish_remap(CXLHybridDstRegionState *state,
                                         uint64_t region_index,
                                         bool success);
+void cxl_hybrid_rdma_sidecar_state_init_for_test(
+    CXLHybridRDMASidecarState *state,
+    uint64_t total_regions,
+    uint64_t pages_per_region);
+void cxl_hybrid_rdma_sidecar_state_destroy_for_test(
+    CXLHybridRDMASidecarState *state);
+bool cxl_hybrid_rdma_sidecar_mark_ready(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_invalidate_ready(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_note_cxl_republish(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+void cxl_hybrid_rdma_sidecar_get_stats(
+    const CXLHybridRDMASidecarState *state,
+    CXLHybridRDMASidecarStats *stats);
+void cxl_hybrid_reset_rdma_sidecar_stats(void);
+void cxl_hybrid_reset_rdma_sidecar_stats_for_test(void);
+void cxl_hybrid_account_rdma_ready(uint64_t region_index,
+                                   uint64_t pages);
+void cxl_hybrid_account_rdma_invalidate(uint64_t region_index,
+                                        uint64_t pages);
+void cxl_hybrid_account_rdma_cxl_republish(uint64_t region_index,
+                                           uint64_t pages);
+void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats);
 
 void cxl_cleanup_outgoing_migration(void);
 

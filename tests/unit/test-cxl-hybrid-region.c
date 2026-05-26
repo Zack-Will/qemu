@@ -442,6 +442,55 @@ static void test_warm_page_eligible_excludes_already_visible_pages(void)
                                                           42));
 }
 
+static void test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish(void)
+{
+    CXLHybridRDMASidecarState state = { 0 };
+    CXLHybridRDMASidecarStats stats = { 0 };
+
+    cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 8, 512);
+
+    g_assert_true(cxl_hybrid_rdma_sidecar_mark_ready(&state, 2));
+    g_assert_false(cxl_hybrid_rdma_sidecar_mark_ready(&state, 2));
+    cxl_hybrid_rdma_sidecar_get_stats(&state, &stats);
+    g_assert_cmpuint(stats.rdma_ready_regions, ==, 1);
+    g_assert_cmpuint(stats.rdma_ready_pages, ==, 512);
+
+    g_assert_true(cxl_hybrid_rdma_sidecar_invalidate_ready(&state, 2));
+    g_assert_false(cxl_hybrid_rdma_sidecar_invalidate_ready(&state, 2));
+    cxl_hybrid_rdma_sidecar_get_stats(&state, &stats);
+    g_assert_cmpuint(stats.rdma_invalidated_regions, ==, 1);
+    g_assert_cmpuint(stats.rdma_ready_pages_lost, ==, 512);
+
+    g_assert_true(cxl_hybrid_rdma_sidecar_note_cxl_republish(&state, 2));
+    g_assert_false(cxl_hybrid_rdma_sidecar_note_cxl_republish(&state, 2));
+    cxl_hybrid_rdma_sidecar_get_stats(&state, &stats);
+    g_assert_cmpuint(stats.cxl_republish_regions_due_to_rdma_invalidate, ==, 1);
+    g_assert_cmpuint(stats.cxl_republish_pages_due_to_rdma_invalidate, ==, 512);
+
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
+}
+
+static void test_rdma_sidecar_global_accounting_exports_stats(void)
+{
+    CXLHybridRDMASidecarStats stats = { 0 };
+
+    cxl_hybrid_reset_rdma_sidecar_stats_for_test();
+
+    cxl_hybrid_account_rdma_ready(7, 512);
+    cxl_hybrid_account_rdma_invalidate(7, 512);
+    cxl_hybrid_account_rdma_cxl_republish(7, 1024);
+    cxl_hybrid_get_rdma_sidecar_stats(&stats);
+
+    g_assert_cmpuint(stats.rdma_ready_regions, ==, 1);
+    g_assert_cmpuint(stats.rdma_ready_pages, ==, 512);
+    g_assert_cmpuint(stats.rdma_invalidated_regions, ==, 1);
+    g_assert_cmpuint(stats.rdma_ready_pages_lost, ==, 512);
+    g_assert_cmpuint(stats.cxl_republish_regions_due_to_rdma_invalidate, ==, 1);
+    g_assert_cmpuint(stats.cxl_republish_pages_due_to_rdma_invalidate, ==, 1024);
+
+    cxl_hybrid_reset_rdma_sidecar_stats_for_test();
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -499,5 +548,9 @@ int main(int argc, char **argv)
                     test_clean_remap_prefault_mode_helpers);
     g_test_add_func("/cxl/region/warm-page-eligible-excludes-already-visible-pages",
                     test_warm_page_eligible_excludes_already_visible_pages);
+    g_test_add_func("/cxl/region/rdma-sidecar-accounting",
+                    test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish);
+    g_test_add_func("/cxl/region/rdma-sidecar-global-accounting",
+                    test_rdma_sidecar_global_accounting_exports_stats);
     return g_test_run();
 }

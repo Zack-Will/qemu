@@ -1904,8 +1904,10 @@ uint64_t cxl_hybrid_reserved_region_bytes(uint64_t align,
 void cxl_populate_migration_info(MigrationInfo *info)
 {
     CXLHybridDstStagingStats dst_stats = { 0 };
+    CXLHybridRDMASidecarStats rdma_stats = { 0 };
 
     cxl_hybrid_dst_staging_get_stats(&dst_stats);
+    cxl_hybrid_get_rdma_sidecar_stats(&rdma_stats);
     if (!cxl_state.active && cxl_cleanup_snapshot) {
         info->x_cxl = QAPI_CLONE(CXLMigrationStats, cxl_cleanup_snapshot);
         info->x_cxl->active = false;
@@ -2077,6 +2079,21 @@ void cxl_populate_migration_info(MigrationInfo *info)
         qatomic_read(&cxl_state.region_publish_pages);
     info->x_cxl->region_publish_time_ns =
         qatomic_read(&cxl_state.region_publish_time_ns);
+    info->x_cxl->rdma_ready_regions =
+        rdma_stats.rdma_ready_regions;
+    info->x_cxl->rdma_ready_pages =
+        rdma_stats.rdma_ready_pages;
+    info->x_cxl->rdma_invalidated_regions =
+        rdma_stats.rdma_invalidated_regions;
+    info->x_cxl->rdma_ready_pages_lost =
+        rdma_stats.rdma_ready_pages_lost;
+    info->x_cxl->cxl_republish_regions_due_to_rdma_invalidate =
+        rdma_stats.cxl_republish_regions_due_to_rdma_invalidate;
+    info->x_cxl->cxl_republish_pages_due_to_rdma_invalidate =
+        rdma_stats.cxl_republish_pages_due_to_rdma_invalidate;
+    info->x_cxl->rdma_invalidate_publish_amplification =
+        (double)info->x_cxl->cxl_republish_pages_due_to_rdma_invalidate /
+        (double)MAX(info->x_cxl->rdma_ready_pages_lost, 1);
     info->x_cxl->publish_memcpy_bytes =
         qatomic_read(&cxl_state.publish_memcpy_bytes);
     info->x_cxl->publish_memcpy_time_ns =
@@ -4168,6 +4185,7 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
     uint64_t total_ram = ram_bytes_total();
 
     cxl_hybrid_clear_cleanup_snapshot();
+    cxl_hybrid_reset_rdma_sidecar_stats();
     cxl_state.align = align;
     cxl_state.remap_granule = cxl_choose_fault_region_granule(align,
                                                               total_ram);

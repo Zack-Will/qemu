@@ -1325,6 +1325,93 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(counts["region_wait_complete_failures"], 0)
         self.assertEqual(counts["dst_region_remap"], 1)
 
+    def test_rdma_fallback_stats_are_exported_to_qapi_and_summary(self):
+        qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
+        cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        for field in (
+            "rdma-ready-regions",
+            "rdma-ready-pages",
+            "rdma-invalidated-regions",
+            "rdma-ready-pages-lost",
+            "cxl-republish-regions-due-to-rdma-invalidate",
+            "cxl-republish-pages-due-to-rdma-invalidate",
+            "rdma-invalidate-publish-amplification",
+        ):
+            self.assertIn(f"'{field}'", qapi_text)
+
+        self.assertIn("info->x_cxl->rdma_ready_regions", cxl_text)
+        self.assertIn("info->x_cxl->rdma_ready_pages", cxl_text)
+        self.assertIn("info->x_cxl->rdma_invalidated_regions", cxl_text)
+        self.assertIn("info->x_cxl->rdma_ready_pages_lost", cxl_text)
+        self.assertIn(
+            "info->x_cxl->cxl_republish_pages_due_to_rdma_invalidate",
+            cxl_text,
+        )
+
+        summary = self.mod.extract_summary([
+            {
+                "x-cxl": {
+                    "rdma-ready-regions": 1,
+                    "rdma-ready-pages": 512,
+                    "rdma-invalidated-regions": 1,
+                    "rdma-ready-pages-lost": 512,
+                    "cxl-republish-regions-due-to-rdma-invalidate": 1,
+                    "cxl-republish-pages-due-to-rdma-invalidate": 1024,
+                    "rdma-invalidate-publish-amplification": 2.0,
+                },
+                "dst-query-migrate": {
+                    "x-cxl": {
+                        "rdma-ready-regions": 3,
+                        "rdma-ready-pages": 1536,
+                        "rdma-invalidated-regions": 2,
+                        "rdma-ready-pages-lost": 1024,
+                        "cxl-republish-regions-due-to-rdma-invalidate": 2,
+                        "cxl-republish-pages-due-to-rdma-invalidate": 2048,
+                        "rdma-invalidate-publish-amplification": 2.0,
+                    }
+                },
+            }
+        ])
+
+        self.assertEqual(summary["rdma_ready_regions"], 3)
+        self.assertEqual(summary["rdma_ready_pages"], 1536)
+        self.assertEqual(summary["rdma_invalidated_regions"], 2)
+        self.assertEqual(summary["rdma_ready_pages_lost"], 1024)
+        self.assertEqual(
+            summary["cxl_republish_regions_due_to_rdma_invalidate"], 2
+        )
+        self.assertEqual(
+            summary["cxl_republish_pages_due_to_rdma_invalidate"], 2048
+        )
+        self.assertEqual(summary["rdma_invalidate_publish_amplification"], 2.0)
+
+    def test_rdma_fallback_trace_events_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace = Path(tmpdir) / "trace.log"
+            trace.write_text(
+                "\n".join([
+                    "cxl_hybrid_rdma_ready region=2 pages=512",
+                    "cxl_hybrid_rdma_invalidate region=2 pages=512",
+                    "cxl_hybrid_rdma_cxl_republish region=2 pages=1024",
+                ]) + "\n",
+                encoding="ascii",
+            )
+
+            counts = self.mod.parse_trace_log(trace)
+
+        self.assertEqual(counts["rdma_ready_regions"], 1)
+        self.assertEqual(counts["rdma_ready_pages"], 512)
+        self.assertEqual(counts["rdma_invalidated_regions"], 1)
+        self.assertEqual(counts["rdma_ready_pages_lost"], 512)
+        self.assertEqual(
+            counts["cxl_republish_regions_due_to_rdma_invalidate"], 1
+        )
+        self.assertEqual(
+            counts["cxl_republish_pages_due_to_rdma_invalidate"], 1024
+        )
+        self.assertEqual(counts["rdma_invalidate_publish_amplification"], 2.0)
+
     def test_fault_control_plane_option_is_declared(self):
         qapi_source = (SCRIPT_PATH.parent.parent / "qapi" /
                        "migration.json").resolve()
@@ -3037,6 +3124,41 @@ class WarmExperimentScriptTest(unittest.TestCase):
             row["handoff_control_src_enter_brake_to_request_postcopy_ms"],
             20.0,
         )
+
+    def test_summarize_single_result_exports_rdma_fallback_metrics(self):
+        result = {
+            "summary": {
+                "rdma_ready_regions": 3,
+                "rdma_ready_pages": 1536,
+                "rdma_invalidated_regions": 2,
+                "rdma_ready_pages_lost": 1024,
+                "cxl_republish_regions_due_to_rdma_invalidate": 2,
+                "cxl_republish_pages_due_to_rdma_invalidate": 2048,
+                "rdma_invalidate_publish_amplification": 2.0,
+            },
+            "trace": {"combined": self.mod.trace_count_template()},
+            "latency": {},
+        }
+
+        row = self.mod.summarize_single_result(
+            "remap_xlarge_random_rw",
+            "hybrid_parallel_rdma_cxl",
+            self.mod.resolve_threshold_profile("balanced"),
+            1,
+            result,
+        )
+
+        self.assertEqual(row["rdma_ready_regions"], 3)
+        self.assertEqual(row["rdma_ready_pages"], 1536)
+        self.assertEqual(row["rdma_invalidated_regions"], 2)
+        self.assertEqual(row["rdma_ready_pages_lost"], 1024)
+        self.assertEqual(
+            row["cxl_republish_regions_due_to_rdma_invalidate"], 2
+        )
+        self.assertEqual(
+            row["cxl_republish_pages_due_to_rdma_invalidate"], 2048
+        )
+        self.assertEqual(row["rdma_invalidate_publish_amplification"], 2.0)
 
     def test_dump_guest_physical_memory_quotes_hmp_filename(self):
         calls = []

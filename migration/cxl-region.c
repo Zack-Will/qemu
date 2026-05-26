@@ -9,9 +9,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bitmap.h"
+#include "qemu/atomic.h"
 #include "qemu/host-utils.h"
 #include "qapi/error.h"
 #include "migration/cxl.h"
+#include "trace.h"
 
 bool cxl_hybrid_fault_resolve_mode_emits_burst(
     CXLHybridFaultResolveMode mode)
@@ -319,6 +321,170 @@ static bool cxl_hybrid_dst_region_index_valid(
 {
     return state && state->remapped_bmap && state->copy_owned_bmap &&
            state->remapping_bmap && region_index < state->total_regions;
+}
+
+static bool cxl_hybrid_rdma_sidecar_region_index_valid(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    return state && state->ready_bmap && state->invalidated_bmap &&
+           state->republished_bmap && region_index < state->total_regions;
+}
+
+static CXLHybridRDMASidecarStats cxl_hybrid_rdma_sidecar_stats;
+
+void cxl_hybrid_rdma_sidecar_state_init_for_test(
+    CXLHybridRDMASidecarState *state,
+    uint64_t total_regions,
+    uint64_t pages_per_region)
+{
+    if (!state) {
+        return;
+    }
+
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(state);
+    state->total_regions = total_regions;
+    state->pages_per_region = pages_per_region;
+    if (total_regions) {
+        state->ready_bmap = bitmap_new(total_regions);
+        state->invalidated_bmap = bitmap_new(total_regions);
+        state->republished_bmap = bitmap_new(total_regions);
+    }
+}
+
+void cxl_hybrid_rdma_sidecar_state_destroy_for_test(
+    CXLHybridRDMASidecarState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    g_free(state->ready_bmap);
+    g_free(state->invalidated_bmap);
+    g_free(state->republished_bmap);
+    memset(state, 0, sizeof(*state));
+}
+
+bool cxl_hybrid_rdma_sidecar_mark_ready(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    if (test_and_set_bit(region_index, state->ready_bmap)) {
+        return false;
+    }
+
+    state->stats.rdma_ready_regions++;
+    state->stats.rdma_ready_pages += state->pages_per_region;
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_invalidate_ready(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        !test_bit(region_index, state->ready_bmap)) {
+        return false;
+    }
+
+    if (test_and_set_bit(region_index, state->invalidated_bmap)) {
+        return false;
+    }
+
+    state->stats.rdma_invalidated_regions++;
+    state->stats.rdma_ready_pages_lost += state->pages_per_region;
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_note_cxl_republish(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        !test_bit(region_index, state->invalidated_bmap)) {
+        return false;
+    }
+
+    if (test_and_set_bit(region_index, state->republished_bmap)) {
+        return false;
+    }
+
+    state->stats.cxl_republish_regions_due_to_rdma_invalidate++;
+    state->stats.cxl_republish_pages_due_to_rdma_invalidate +=
+        state->pages_per_region;
+    return true;
+}
+
+void cxl_hybrid_rdma_sidecar_get_stats(
+    const CXLHybridRDMASidecarState *state,
+    CXLHybridRDMASidecarStats *stats)
+{
+    if (!stats) {
+        return;
+    }
+
+    *stats = state ? state->stats : (CXLHybridRDMASidecarStats) { 0 };
+}
+
+void cxl_hybrid_reset_rdma_sidecar_stats(void)
+{
+    memset(&cxl_hybrid_rdma_sidecar_stats, 0,
+           sizeof(cxl_hybrid_rdma_sidecar_stats));
+}
+
+void cxl_hybrid_reset_rdma_sidecar_stats_for_test(void)
+{
+    cxl_hybrid_reset_rdma_sidecar_stats();
+}
+
+void cxl_hybrid_account_rdma_ready(uint64_t region_index, uint64_t pages)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_regions);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_pages, pages);
+    trace_cxl_hybrid_rdma_ready(region_index, pages);
+}
+
+void cxl_hybrid_account_rdma_invalidate(uint64_t region_index, uint64_t pages)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_invalidated_regions);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_pages_lost, pages);
+    trace_cxl_hybrid_rdma_invalidate(region_index, pages);
+}
+
+void cxl_hybrid_account_rdma_cxl_republish(uint64_t region_index,
+                                           uint64_t pages)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                cxl_republish_regions_due_to_rdma_invalidate);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                cxl_republish_pages_due_to_rdma_invalidate, pages);
+    trace_cxl_hybrid_rdma_cxl_republish(region_index, pages);
+}
+
+void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats)
+{
+    if (!stats) {
+        return;
+    }
+
+    stats->rdma_ready_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_regions);
+    stats->rdma_ready_pages =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_pages);
+    stats->rdma_invalidated_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_invalidated_regions);
+    stats->rdma_ready_pages_lost =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_pages_lost);
+    stats->cxl_republish_regions_due_to_rdma_invalidate =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     cxl_republish_regions_due_to_rdma_invalidate);
+    stats->cxl_republish_pages_due_to_rdma_invalidate =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     cxl_republish_pages_due_to_rdma_invalidate);
 }
 
 void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,

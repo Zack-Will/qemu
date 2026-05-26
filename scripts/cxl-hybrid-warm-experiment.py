@@ -72,6 +72,9 @@ REGION_WAIT_COMPLETE_TRACE_RE = re.compile(
     r"\bret=(?P<ret>-?\d+)\b"
     r"(?:.*\belapsed_ns=(?P<elapsed_ns>\d+)\b)?"
 )
+RDMA_REGION_TRACE_RE = re.compile(
+    r"\bregion=(?P<region>\d+)\b.*\bpages=(?P<pages>\d+)\b"
+)
 PUBLISH_SPAN_TRACE_RE = re.compile(
     r"\blen=0x(?P<len>[0-9a-fA-F]+)\b"
     r"(?:.*\bkind=(?P<kind>\d+)\b)?"
@@ -905,6 +908,13 @@ def trace_count_template():
         "region_wait_complete": 0,
         "region_wait_complete_failures": 0,
         "dst_region_remap": 0,
+        "rdma_ready_regions": 0,
+        "rdma_ready_pages": 0,
+        "rdma_invalidated_regions": 0,
+        "rdma_ready_pages_lost": 0,
+        "cxl_republish_regions_due_to_rdma_invalidate": 0,
+        "cxl_republish_pages_due_to_rdma_invalidate": 0,
+        "rdma_invalidate_publish_amplification": 0.0,
         "ram_stream_publish_span": 0,
         "ram_stream_publish_span_pages": 0,
         "ram_stream_publish_span_max_pages": 0,
@@ -1012,6 +1022,25 @@ def parse_trace_log(trace_file: Path):
                 counts["region_wait_complete_failures"] += 1
         elif "cxl_hybrid_dst_region_remap " in line:
             counts["dst_region_remap"] += 1
+        elif "cxl_hybrid_rdma_ready " in line:
+            match = RDMA_REGION_TRACE_RE.search(line)
+            if match:
+                counts["rdma_ready_regions"] += 1
+                counts["rdma_ready_pages"] += int(match.group("pages"))
+        elif "cxl_hybrid_rdma_invalidate " in line:
+            match = RDMA_REGION_TRACE_RE.search(line)
+            if match:
+                counts["rdma_invalidated_regions"] += 1
+                counts["rdma_ready_pages_lost"] += int(match.group("pages"))
+        elif "cxl_hybrid_rdma_cxl_republish " in line:
+            match = RDMA_REGION_TRACE_RE.search(line)
+            if match:
+                counts[
+                    "cxl_republish_regions_due_to_rdma_invalidate"
+                ] += 1
+                counts[
+                    "cxl_republish_pages_due_to_rdma_invalidate"
+                ] += int(match.group("pages"))
         elif "cxl_hybrid_ram_stream_publish_span " in line:
             counts["ram_stream_publish_span"] += 1
             match = PUBLISH_SPAN_TRACE_RE.search(line)
@@ -1065,6 +1094,10 @@ def parse_trace_log(trace_file: Path):
             counts["get_queued_page_not_dirty"] += 1
         elif "get_queued_page " in line:
             counts["get_queued_page"] += 1
+    counts["rdma_invalidate_publish_amplification"] = (
+        counts["cxl_republish_pages_due_to_rdma_invalidate"] /
+        max(counts["rdma_ready_pages_lost"], 1)
+    )
     return counts
 
 
@@ -1962,6 +1995,12 @@ def extract_summary(samples):
     region_publish_requests = 0
     region_publish_pages = 0
     region_publish_time_ns = 0
+    rdma_ready_regions = 0
+    rdma_ready_pages = 0
+    rdma_invalidated_regions = 0
+    rdma_ready_pages_lost = 0
+    cxl_republish_regions_due_to_rdma_invalidate = 0
+    cxl_republish_pages_due_to_rdma_invalidate = 0
     fault_publish_primary_samples = 0
     fault_publish_primary_time_ns = 0
     max_fault_publish_primary_time_ns = 0
@@ -2127,6 +2166,30 @@ def extract_summary(samples):
             region_publish_time_ns,
             src_xcxl.get("region-publish-time-ns", 0),
             dst_xcxl.get("region-publish-time-ns", 0))
+        rdma_ready_regions = max(
+            rdma_ready_regions,
+            src_xcxl.get("rdma-ready-regions", 0),
+            dst_xcxl.get("rdma-ready-regions", 0))
+        rdma_ready_pages = max(
+            rdma_ready_pages,
+            src_xcxl.get("rdma-ready-pages", 0),
+            dst_xcxl.get("rdma-ready-pages", 0))
+        rdma_invalidated_regions = max(
+            rdma_invalidated_regions,
+            src_xcxl.get("rdma-invalidated-regions", 0),
+            dst_xcxl.get("rdma-invalidated-regions", 0))
+        rdma_ready_pages_lost = max(
+            rdma_ready_pages_lost,
+            src_xcxl.get("rdma-ready-pages-lost", 0),
+            dst_xcxl.get("rdma-ready-pages-lost", 0))
+        cxl_republish_regions_due_to_rdma_invalidate = max(
+            cxl_republish_regions_due_to_rdma_invalidate,
+            src_xcxl.get("cxl-republish-regions-due-to-rdma-invalidate", 0),
+            dst_xcxl.get("cxl-republish-regions-due-to-rdma-invalidate", 0))
+        cxl_republish_pages_due_to_rdma_invalidate = max(
+            cxl_republish_pages_due_to_rdma_invalidate,
+            src_xcxl.get("cxl-republish-pages-due-to-rdma-invalidate", 0),
+            dst_xcxl.get("cxl-republish-pages-due-to-rdma-invalidate", 0))
         fault_publish_primary_samples = max(
             fault_publish_primary_samples,
             src_xcxl.get("fault-publish-primary-samples", 0),
@@ -2340,6 +2403,18 @@ def extract_summary(samples):
         "region_publish_requests": region_publish_requests,
         "region_publish_pages": region_publish_pages,
         "region_publish_time_ns": region_publish_time_ns,
+        "rdma_ready_regions": rdma_ready_regions,
+        "rdma_ready_pages": rdma_ready_pages,
+        "rdma_invalidated_regions": rdma_invalidated_regions,
+        "rdma_ready_pages_lost": rdma_ready_pages_lost,
+        "cxl_republish_regions_due_to_rdma_invalidate":
+            cxl_republish_regions_due_to_rdma_invalidate,
+        "cxl_republish_pages_due_to_rdma_invalidate":
+            cxl_republish_pages_due_to_rdma_invalidate,
+        "rdma_invalidate_publish_amplification": (
+            cxl_republish_pages_due_to_rdma_invalidate /
+            max(rdma_ready_pages_lost, 1)
+        ),
         "fault_publish_primary_samples": fault_publish_primary_samples,
         "fault_publish_primary_time_ns": fault_publish_primary_time_ns,
         "max_fault_publish_primary_time_ns": max_fault_publish_primary_time_ns,
@@ -3284,6 +3359,19 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
             return 0
         return summary.get(total_key, 0) // samples
 
+    rdma_ready_pages_lost = max(
+        summary.get("rdma_ready_pages_lost", 0),
+        trace.get("rdma_ready_pages_lost", 0),
+    )
+    cxl_republish_pages_due_to_rdma_invalidate = max(
+        summary.get("cxl_republish_pages_due_to_rdma_invalidate", 0),
+        trace.get("cxl_republish_pages_due_to_rdma_invalidate", 0),
+    )
+    rdma_amplification = (
+        cxl_republish_pages_due_to_rdma_invalidate /
+        max(rdma_ready_pages_lost, 1)
+    )
+
     return {
         "pressure": pressure,
         "mode": mode,
@@ -3374,6 +3462,29 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
             summary.get("region_publish_time_ns", 0),
         "region_publish_mean_ns":
             mean_ns("region_publish_time_ns", "region_publish_requests"),
+        "rdma_ready_regions":
+            max(summary.get("rdma_ready_regions", 0),
+                trace.get("rdma_ready_regions", 0)),
+        "rdma_ready_pages":
+            max(summary.get("rdma_ready_pages", 0),
+                trace.get("rdma_ready_pages", 0)),
+        "rdma_invalidated_regions":
+            max(summary.get("rdma_invalidated_regions", 0),
+                trace.get("rdma_invalidated_regions", 0)),
+        "rdma_ready_pages_lost":
+            rdma_ready_pages_lost,
+        "cxl_republish_regions_due_to_rdma_invalidate":
+            max(
+                summary.get(
+                    "cxl_republish_regions_due_to_rdma_invalidate", 0),
+                trace.get(
+                    "cxl_republish_regions_due_to_rdma_invalidate", 0)),
+        "cxl_republish_pages_due_to_rdma_invalidate":
+            cxl_republish_pages_due_to_rdma_invalidate,
+        "rdma_invalidate_publish_amplification":
+            max(summary.get("rdma_invalidate_publish_amplification", 0.0),
+                trace.get("rdma_invalidate_publish_amplification", 0.0),
+                rdma_amplification),
         "trace_region_publish_complete":
             trace.get("region_publish_complete", 0),
         "trace_region_publish_pages":
@@ -3898,6 +4009,13 @@ def summarize_grouped_runs(pressure, mode, threshold_profile, run_results, rows)
         "region_publish_pages",
         "region_publish_time_ns",
         "region_publish_mean_ns",
+        "rdma_ready_regions",
+        "rdma_ready_pages",
+        "rdma_invalidated_regions",
+        "rdma_ready_pages_lost",
+        "cxl_republish_regions_due_to_rdma_invalidate",
+        "cxl_republish_pages_due_to_rdma_invalidate",
+        "rdma_invalidate_publish_amplification",
         "trace_dst_region_remap",
         "final_backing_write_bytes",
         "final_remap_coverage",

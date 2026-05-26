@@ -661,6 +661,32 @@
 # @region-publish-time-ns: cumulative nanoseconds spent handling
 #     source-side full-region publish requests
 #
+# @rdma-ready-regions: number of whole fault regions copied by the
+#     hybrid RDMA sidecar and still considered source-current when
+#     marked ready.  (Since 11.0)
+#
+# @rdma-ready-pages: number of guest pages covered by
+#     @rdma-ready-regions.  (Since 11.0)
+#
+# @rdma-invalidated-regions: number of RDMA-ready regions invalidated
+#     because later source dirties made the sidecar copy stale.
+#     (Since 11.0)
+#
+# @rdma-ready-pages-lost: number of guest pages lost from RDMA-ready
+#     state by whole-region invalidation.  (Since 11.0)
+#
+# @cxl-republish-regions-due-to-rdma-invalidate: number of invalidated
+#     RDMA-ready regions later republished by the CXL fallback path.
+#     (Since 11.0)
+#
+# @cxl-republish-pages-due-to-rdma-invalidate: number of CXL fallback
+#     pages republished because RDMA-ready regions became stale.
+#     (Since 11.0)
+#
+# @rdma-invalidate-publish-amplification: CXL fallback pages
+#     republished due to RDMA invalidation divided by
+#     max(@rdma-ready-pages-lost, 1).  (Since 11.0)
+#
 # @publish-memcpy-bytes: bytes copied by source-side CXL publish
 #     memcpy operations
 #
@@ -780,6 +806,11 @@
 #     @prefault-wait-time-ns, @prefault-errors,
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
+#     @rdma-ready-regions, @rdma-ready-pages,
+#     @rdma-invalidated-regions, @rdma-ready-pages-lost,
+#     @cxl-republish-regions-due-to-rdma-invalidate,
+#     @cxl-republish-pages-due-to-rdma-invalidate,
+#     @rdma-invalidate-publish-amplification,
 #     @publish-memcpy-bytes, @publish-memcpy-time-ns,
 #     @stream-publish-ranges, @stream-publish-pages,
 #     @stream-publish-time-ns, @stream-publish-local-bitmap-time-ns,
@@ -949,6 +980,20 @@
                                       'features': [ 'unstable' ] },
             'region-publish-time-ns': { 'type': 'uint64',
                                         'features': [ 'unstable' ] },
+            'rdma-ready-regions': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'rdma-ready-pages': { 'type': 'uint64',
+                                  'features': [ 'unstable' ] },
+            'rdma-invalidated-regions': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'rdma-ready-pages-lost': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'cxl-republish-regions-due-to-rdma-invalidate': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'cxl-republish-pages-due-to-rdma-invalidate': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-invalidate-publish-amplification': {
+                'type': 'number', 'features': [ 'unstable' ] },
             'publish-memcpy-bytes': { 'type': 'uint64',
                                       'features': [ 'unstable' ] },
             'publish-memcpy-time-ns': { 'type': 'uint64',
