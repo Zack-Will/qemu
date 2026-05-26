@@ -79,6 +79,9 @@ PUBLISH_WAIT_COMPLETE_TRACE_RE = re.compile(
 RDMA_REGION_TRACE_RE = re.compile(
     r"\bregion=(?P<region>\d+)\b.*\bpages=(?P<pages>\d+)\b"
 )
+RDMA_BULK_TRACE_RE = re.compile(
+    r"\bregion=(?P<region>\d+)\b.*\bbytes=(?P<bytes>\d+)\b"
+)
 PUBLISH_SPAN_TRACE_RE = re.compile(
     r"\blen=0x(?P<len>[0-9a-fA-F]+)\b"
     r"(?:.*\bkind=(?P<kind>\d+)\b)?"
@@ -228,6 +231,10 @@ def mode_uses_cxl_hybrid(mode: str) -> bool:
 
 def mode_uses_rdma(mode: str) -> bool:
     return mode == "native_rdma_precopy"
+
+
+def mode_uses_cxl_rdma_sidecar(mode: str) -> bool:
+    return mode == "hybrid_parallel_rdma_cxl"
 
 
 def mode_uses_postcopy(mode: str) -> bool:
@@ -700,6 +707,8 @@ def build_migration_parameters(args, mode: str, cxl_path=None,
             "x-cxl-prefetch-heat-window-ms": 250,
             "x-cxl-shared-backing": shared_backing,
         })
+        if mode_uses_cxl_rdma_sidecar(mode):
+            params["x-cxl-rdma-sidecar"] = True
         if remap_coverage is not None:
             params["x-cxl-switch-remap-coverage"] = remap_coverage
         if backing_rate is not None:
@@ -917,6 +926,8 @@ def trace_count_template():
         "region_wait_time_ns": 0,
         "max_region_wait_time_ns": 0,
         "dst_region_remap": 0,
+        "rdma_bulk_regions": 0,
+        "rdma_bulk_bytes": 0,
         "rdma_ready_regions": 0,
         "rdma_ready_pages": 0,
         "rdma_invalidated_regions": 0,
@@ -1046,6 +1057,11 @@ def parse_trace_log(trace_file: Path):
                         counts["max_region_wait_time_ns"], elapsed_ns)
         elif "cxl_hybrid_dst_region_remap " in line:
             counts["dst_region_remap"] += 1
+        elif "cxl_hybrid_rdma_bulk_region " in line:
+            match = RDMA_BULK_TRACE_RE.search(line)
+            if match:
+                counts["rdma_bulk_regions"] += 1
+                counts["rdma_bulk_bytes"] += int(match.group("bytes"))
         elif "cxl_hybrid_rdma_ready " in line:
             match = RDMA_REGION_TRACE_RE.search(line)
             if match:
@@ -2038,6 +2054,8 @@ def extract_summary(samples):
     region_publish_requests = 0
     region_publish_pages = 0
     region_publish_time_ns = 0
+    rdma_bulk_regions = 0
+    rdma_bulk_bytes = 0
     rdma_ready_regions = 0
     rdma_ready_pages = 0
     rdma_invalidated_regions = 0
@@ -2209,6 +2227,14 @@ def extract_summary(samples):
             region_publish_time_ns,
             src_xcxl.get("region-publish-time-ns", 0),
             dst_xcxl.get("region-publish-time-ns", 0))
+        rdma_bulk_regions = max(
+            rdma_bulk_regions,
+            src_xcxl.get("rdma-bulk-regions", 0),
+            dst_xcxl.get("rdma-bulk-regions", 0))
+        rdma_bulk_bytes = max(
+            rdma_bulk_bytes,
+            src_xcxl.get("rdma-bulk-bytes", 0),
+            dst_xcxl.get("rdma-bulk-bytes", 0))
         rdma_ready_regions = max(
             rdma_ready_regions,
             src_xcxl.get("rdma-ready-regions", 0),
@@ -2446,6 +2472,8 @@ def extract_summary(samples):
         "region_publish_requests": region_publish_requests,
         "region_publish_pages": region_publish_pages,
         "region_publish_time_ns": region_publish_time_ns,
+        "rdma_bulk_regions": rdma_bulk_regions,
+        "rdma_bulk_bytes": rdma_bulk_bytes,
         "rdma_ready_regions": rdma_ready_regions,
         "rdma_ready_pages": rdma_ready_pages,
         "rdma_invalidated_regions": rdma_invalidated_regions,
@@ -2962,6 +2990,10 @@ def run_case(base: Path, mode: str, pressure: str,
             "cxl_hybrid_publish_wait_begin",
             "cxl_hybrid_publish_wait_complete",
             "cxl_hybrid_region_publish_complete",
+            "cxl_hybrid_rdma_bulk_region",
+            "cxl_hybrid_rdma_ready",
+            "cxl_hybrid_rdma_invalidate",
+            "cxl_hybrid_rdma_cxl_republish",
             "cxl_hybrid_region_wait_begin",
             "cxl_hybrid_region_wait_begin_ts",
             "cxl_hybrid_region_wait_complete",
@@ -3505,6 +3537,12 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
             summary.get("region_publish_time_ns", 0),
         "region_publish_mean_ns":
             mean_ns("region_publish_time_ns", "region_publish_requests"),
+        "rdma_bulk_regions":
+            max(summary.get("rdma_bulk_regions", 0),
+                trace.get("rdma_bulk_regions", 0)),
+        "rdma_bulk_bytes":
+            max(summary.get("rdma_bulk_bytes", 0),
+                trace.get("rdma_bulk_bytes", 0)),
         "rdma_ready_regions":
             max(summary.get("rdma_ready_regions", 0),
                 trace.get("rdma_ready_regions", 0)),
@@ -4052,6 +4090,8 @@ def summarize_grouped_runs(pressure, mode, threshold_profile, run_results, rows)
         "region_publish_pages",
         "region_publish_time_ns",
         "region_publish_mean_ns",
+        "rdma_bulk_regions",
+        "rdma_bulk_bytes",
         "rdma_ready_regions",
         "rdma_ready_pages",
         "rdma_invalidated_regions",

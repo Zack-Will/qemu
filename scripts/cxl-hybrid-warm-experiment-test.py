@@ -656,6 +656,33 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(params["multifd-channels"], 2)
         self.assertFalse(params["x-cxl-brake-enable"])
         self.assertEqual(params["x-cxl-prefetch-batch-pages"], 128)
+        self.assertTrue(params["x-cxl-rdma-sidecar"])
+
+    def test_build_migration_parameters_normal_hybrid_does_not_enable_rdma_sidecar(self):
+        args = argparse.Namespace(
+            pressure="heavy",
+            threshold_profile="balanced",
+            x_cxl_switch_dirty_threshold=None,
+            x_cxl_switch_max_iters=None,
+            x_cxl_switch_max_precopy_ms=None,
+            x_cxl_switch_min_remaining=None,
+            x_cxl_switch_remap_coverage=None,
+            x_cxl_prefetch_rate=None,
+            x_cxl_dst_install_policy=None,
+            x_cxl_fault_control_plane=None,
+            x_cxl_fault_resolve_mode=None,
+            x_cxl_brake_remap_granule=2 * 1024 * 1024,
+            x_cxl_brake_enable=False,
+        )
+
+        params = self.mod.build_migration_parameters(
+            args,
+            "hybrid_postcopy_auto",
+            cxl_path="/tmp/cxl.img",
+            shared_backing=True,
+        )
+
+        self.assertNotIn("x-cxl-rdma-sidecar", params)
 
     def test_build_migration_parameters_accepts_postcopy_bandwidth_override(self):
         args = argparse.Namespace(
@@ -810,6 +837,101 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["modes"], ["hybrid_parallel_rdma_cxl"])
         self.assertFalse(calls[0]["brake_enable"])
+
+    def test_rdma_cxl_smoke_style_args_keep_no_brake(self):
+        calls = []
+
+        def fake_run_pressure_matrix(base, pressures, modes, threshold_profile=None,
+                                    repeat=1, migration_timeout=60.0,
+                                    **kwargs):
+            calls.append({
+                "base": str(base),
+                "pressures": list(pressures),
+                "modes": list(modes),
+                "threshold_profile": threshold_profile,
+                "repeat": repeat,
+                "migration_timeout": migration_timeout,
+                "brake_enable": kwargs.get("brake_enable"),
+                "accel": kwargs.get("accel"),
+                "max_bandwidth": kwargs.get("max_bandwidth"),
+                "cxl_path_override": kwargs.get("cxl_path_override"),
+                "in_memory_guest_latency": kwargs.get(
+                    "in_memory_guest_latency"
+                ),
+                "in_memory_guest_latency_source_first": kwargs.get(
+                    "in_memory_guest_latency_source_first"
+                ),
+            })
+            return {
+                "pressures": list(pressures),
+                "modes": list(modes),
+                "results": {},
+                "summary": [],
+                "summary_grouped": [],
+            }
+
+        argv = [
+            "cxl-hybrid-warm-experiment.py",
+            "--pressure", "remap_xlarge_random_rw",
+            "--mode", "hybrid_parallel_rdma_cxl",
+            "--repeat", "1",
+            "--migration-timeout", "120",
+            "--accel", "kvm",
+            "--max-bandwidth", "0",
+            "--cxl-path", "/dev/dax0.1",
+            "--x-cxl-brake-remap-granule", "262144",
+            "--x-cxl-switch-min-remaining", "0",
+            "--x-cxl-switch-remap-coverage", "50",
+            "--x-cxl-switch-max-precopy-ms", "50",
+            "--x-cxl-disable-brake",
+            "--in-memory-guest-latency",
+            "--in-memory-guest-latency-source-first",
+        ]
+        original_maybe_reexec = self.mod.maybe_reexec_with_sudo
+        original_qemu = self.mod.QEMU
+        original_trace_events = self.mod.TRACE_EVENTS
+        original_boot_asm = self.mod.BOOT_ASM
+        original_mkdtemp = self.mod.tempfile.mkdtemp
+        original_rmtree = self.mod.shutil.rmtree
+        had_print = hasattr(self.mod, "print")
+        original_print = getattr(self.mod, "print", None)
+        original_run_pressure_matrix = self.mod.run_pressure_matrix
+        original_argv = self.mod.sys.argv
+        try:
+            self.mod.maybe_reexec_with_sudo = lambda: None
+            self.mod.QEMU = SCRIPT_PATH
+            self.mod.TRACE_EVENTS = SCRIPT_PATH
+            self.mod.BOOT_ASM = SCRIPT_PATH
+            self.mod.tempfile.mkdtemp = (
+                lambda *args, **kwargs: "/tmp/cxl-exp-test"
+            )
+            self.mod.shutil.rmtree = lambda _path: None
+            self.mod.print = lambda *_args, **_kwargs: None
+            self.mod.run_pressure_matrix = fake_run_pressure_matrix
+            self.mod.sys.argv = argv
+            self.mod.main()
+        finally:
+            self.mod.maybe_reexec_with_sudo = original_maybe_reexec
+            self.mod.QEMU = original_qemu
+            self.mod.TRACE_EVENTS = original_trace_events
+            self.mod.BOOT_ASM = original_boot_asm
+            self.mod.tempfile.mkdtemp = original_mkdtemp
+            self.mod.shutil.rmtree = original_rmtree
+            if had_print:
+                self.mod.print = original_print
+            else:
+                delattr(self.mod, "print")
+            self.mod.run_pressure_matrix = original_run_pressure_matrix
+            self.mod.sys.argv = original_argv
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["modes"], ["hybrid_parallel_rdma_cxl"])
+        self.assertFalse(calls[0]["brake_enable"])
+        self.assertEqual(calls[0]["accel"], "kvm")
+        self.assertEqual(calls[0]["max_bandwidth"], 0)
+        self.assertEqual(calls[0]["cxl_path_override"], "/dev/dax0.1")
+        self.assertTrue(calls[0]["in_memory_guest_latency"])
+        self.assertTrue(calls[0]["in_memory_guest_latency_source_first"])
 
     def test_clean_remap_debug_mode_sets_source_env_only(self):
         src_env = self.mod.build_qemu_env(
@@ -1403,6 +1525,56 @@ class WarmExperimentScriptTest(unittest.TestCase):
             summary["cxl_republish_pages_due_to_rdma_invalidate"], 2048
         )
         self.assertEqual(summary["rdma_invalidate_publish_amplification"], 2.0)
+
+    def test_rdma_bulk_stats_are_exported_to_qapi_and_summary(self):
+        qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
+        cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        for field in (
+            "rdma-bulk-regions",
+            "rdma-bulk-bytes",
+        ):
+            self.assertIn(f"'{field}'", qapi_text)
+
+        self.assertIn("info->x_cxl->rdma_bulk_regions", cxl_text)
+        self.assertIn("info->x_cxl->rdma_bulk_bytes", cxl_text)
+
+        summary = self.mod.extract_summary([
+            {
+                "x-cxl": {
+                    "rdma-bulk-regions": 1,
+                    "rdma-bulk-bytes": 2 * 1024 * 1024,
+                    "rdma-ready-regions": 1,
+                    "rdma-ready-pages": 512,
+                },
+                "dst-query-migrate": {
+                    "x-cxl": {
+                        "rdma-bulk-regions": 3,
+                        "rdma-bulk-bytes": 6 * 1024 * 1024,
+                        "rdma-ready-regions": 3,
+                        "rdma-ready-pages": 1536,
+                    }
+                },
+            }
+        ])
+
+        self.assertEqual(summary["rdma_bulk_regions"], 3)
+        self.assertEqual(summary["rdma_bulk_bytes"], 6 * 1024 * 1024)
+        self.assertEqual(summary["rdma_ready_regions"], 3)
+        self.assertEqual(summary["rdma_ready_pages"], 1536)
+
+    def test_rdma_bulk_trace_events_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace = Path(tmpdir) / "trace.log"
+            trace.write_text(
+                "cxl_hybrid_rdma_bulk_region region=2 bytes=2097152\n",
+                encoding="ascii",
+            )
+
+            counts = self.mod.parse_trace_log(trace)
+
+        self.assertEqual(counts["rdma_bulk_regions"], 1)
+        self.assertEqual(counts["rdma_bulk_bytes"], 2 * 1024 * 1024)
 
     def test_rdma_fallback_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3146,6 +3318,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
     def test_summarize_single_result_exports_rdma_fallback_metrics(self):
         result = {
             "summary": {
+                "rdma_bulk_regions": 4,
+                "rdma_bulk_bytes": 8 * 1024 * 1024,
                 "rdma_ready_regions": 3,
                 "rdma_ready_pages": 1536,
                 "rdma_invalidated_regions": 2,
@@ -3166,6 +3340,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
             result,
         )
 
+        self.assertEqual(row["rdma_bulk_regions"], 4)
+        self.assertEqual(row["rdma_bulk_bytes"], 8 * 1024 * 1024)
         self.assertEqual(row["rdma_ready_regions"], 3)
         self.assertEqual(row["rdma_ready_pages"], 1536)
         self.assertEqual(row["rdma_invalidated_regions"], 2)

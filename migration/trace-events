@@ -70,6 +70,7 @@ cxl_hybrid_publish_request_recv(const char *ramblock, uint64_t guest_offset, uin
 cxl_hybrid_region_request_enqueue(uint64_t first_page, uint32_t nr_pages, uint32_t generation) "first-page=%" PRIu64 " pages=%u gen=%u"
 cxl_hybrid_region_request_dequeue(uint64_t first_page, uint32_t nr_pages, uint32_t generation) "first-page=%" PRIu64 " pages=%u gen=%u"
 cxl_hybrid_region_publish_complete(uint64_t first_page, uint32_t nr_pages, int published, uint32_t generation, uint64_t elapsed_ns) "first-page=%" PRIu64 " pages=%u published=%d gen=%u elapsed_ns=%" PRIu64
+cxl_hybrid_rdma_bulk_region(uint64_t region_index, uint64_t bytes) "region=%" PRIu64 " bytes=%" PRIu64
 cxl_hybrid_rdma_ready(uint64_t region_index, uint64_t pages) "region=%" PRIu64 " pages=%" PRIu64
 cxl_hybrid_rdma_invalidate(uint64_t region_index, uint64_t pages) "region=%" PRIu64 " pages=%" PRIu64
 cxl_hybrid_rdma_cxl_republish(uint64_t region_index, uint64_t pages) "region=%" PRIu64 " pages=%" PRIu64

@@ -12,6 +12,7 @@
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "migration/cxl.h"
+#include "migration/cxl-rdma.h"
 
 #define TEST_TARGET_PAGE_SIZE (4 * KiB)
 
@@ -559,6 +560,34 @@ static void test_rdma_sidecar_global_accounting_exports_stats(void)
     cxl_hybrid_reset_rdma_sidecar_stats_for_test();
 }
 
+static void test_rdma_sidecar_bulk_submit_marks_ready_without_commit(void)
+{
+    CXLHybridRDMASidecarBulkStats bulk_stats = { 0 };
+    CXLHybridRDMASidecarStats ready_stats = { 0 };
+
+    cxl_hybrid_reset_rdma_sidecar_stats_for_test();
+    cxl_hybrid_rdma_sidecar_global_init(4, 512);
+    cxl_rdma_sidecar_init(4, 2 * MiB, 512);
+
+    g_assert_true(cxl_rdma_sidecar_submit_shadow_region(1));
+    g_assert_false(cxl_rdma_sidecar_submit_shadow_region(1));
+    g_assert_false(cxl_hybrid_region_commit_rdma_ready(2));
+
+    cxl_rdma_sidecar_get_stats(&bulk_stats);
+    cxl_hybrid_get_rdma_sidecar_stats(&ready_stats);
+
+    g_assert_cmpuint(bulk_stats.rdma_bulk_regions, ==, 1);
+    g_assert_cmpuint(bulk_stats.rdma_bulk_bytes, ==, 2 * MiB);
+    g_assert_cmpuint(ready_stats.rdma_ready_regions, ==, 1);
+    g_assert_cmpuint(ready_stats.rdma_ready_pages, ==, 512);
+    g_assert_true(cxl_hybrid_region_commit_rdma_ready(1));
+    g_assert_false(cxl_hybrid_region_commit_rdma_ready(1));
+
+    cxl_rdma_sidecar_destroy();
+    cxl_hybrid_rdma_sidecar_global_destroy();
+    cxl_hybrid_reset_rdma_sidecar_stats_for_test();
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -628,5 +657,7 @@ int main(int argc, char **argv)
                     test_rdma_sidecar_brake_fallback_requires_brake_enabled);
     g_test_add_func("/cxl/region/rdma-sidecar-global-accounting",
                     test_rdma_sidecar_global_accounting_exports_stats);
+    g_test_add_func("/cxl/region/rdma-sidecar-bulk-submit",
+                    test_rdma_sidecar_bulk_submit_marks_ready_without_commit);
     return g_test_run();
 }

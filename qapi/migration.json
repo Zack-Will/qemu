@@ -661,6 +661,11 @@
 # @region-publish-time-ns: cumulative nanoseconds spent handling
 #     source-side full-region publish requests
 #
+# @rdma-bulk-regions: number of whole fault regions accepted by the
+#     measurement-only hybrid RDMA sidecar.  (Since 11.0)
+#
+# @rdma-bulk-bytes: bytes covered by @rdma-bulk-regions.  (Since 11.0)
+#
 # @rdma-ready-regions: number of whole fault regions copied by the
 #     hybrid RDMA sidecar and still considered source-current when
 #     marked ready.  (Since 11.0)
@@ -806,6 +811,7 @@
 #     @prefault-wait-time-ns, @prefault-errors,
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
+#     @rdma-bulk-regions, @rdma-bulk-bytes,
 #     @rdma-ready-regions, @rdma-ready-pages,
 #     @rdma-invalidated-regions, @rdma-ready-pages-lost,
 #     @cxl-republish-regions-due-to-rdma-invalidate,
@@ -980,6 +986,10 @@
                                       'features': [ 'unstable' ] },
             'region-publish-time-ns': { 'type': 'uint64',
                                         'features': [ 'unstable' ] },
+            'rdma-bulk-regions': { 'type': 'uint64',
+                                   'features': [ 'unstable' ] },
+            'rdma-bulk-bytes': { 'type': 'uint64',
+                                 'features': [ 'unstable' ] },
             'rdma-ready-regions': { 'type': 'uint64',
                                     'features': [ 'unstable' ] },
             'rdma-ready-pages': { 'type': 'uint64',

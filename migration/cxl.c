@@ -21,6 +21,7 @@
 #include "qapi/qapi-visit-migration.h"
 #include "channel.h"
 #include "cxl.h"
+#include "cxl-rdma.h"
 #include "migration.h"
 #include "postcopy.h"
 #include "qemu-file.h"
@@ -1952,9 +1953,11 @@ uint64_t cxl_hybrid_reserved_region_bytes(uint64_t align,
 void cxl_populate_migration_info(MigrationInfo *info)
 {
     CXLHybridDstStagingStats dst_stats = { 0 };
+    CXLHybridRDMASidecarBulkStats rdma_bulk_stats = { 0 };
     CXLHybridRDMASidecarStats rdma_stats = { 0 };
 
     cxl_hybrid_dst_staging_get_stats(&dst_stats);
+    cxl_rdma_sidecar_get_stats(&rdma_bulk_stats);
     cxl_hybrid_get_rdma_sidecar_stats(&rdma_stats);
     if (!cxl_state.active && cxl_cleanup_snapshot) {
         info->x_cxl = QAPI_CLONE(CXLMigrationStats, cxl_cleanup_snapshot);
@@ -2127,6 +2130,10 @@ void cxl_populate_migration_info(MigrationInfo *info)
         qatomic_read(&cxl_state.region_publish_pages);
     info->x_cxl->region_publish_time_ns =
         qatomic_read(&cxl_state.region_publish_time_ns);
+    info->x_cxl->rdma_bulk_regions =
+        rdma_bulk_stats.rdma_bulk_regions;
+    info->x_cxl->rdma_bulk_bytes =
+        rdma_bulk_stats.rdma_bulk_bytes;
     info->x_cxl->rdma_ready_regions =
         rdma_stats.rdma_ready_regions;
     info->x_cxl->rdma_ready_pages =
@@ -4234,6 +4241,7 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
 
     cxl_hybrid_clear_cleanup_snapshot();
     cxl_hybrid_reset_rdma_sidecar_stats();
+    cxl_rdma_sidecar_destroy();
     cxl_hybrid_rdma_sidecar_global_destroy();
     cxl_state.align = align;
     cxl_state.remap_granule = cxl_choose_fault_region_granule(align,
@@ -4249,6 +4257,10 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
         cxl_hybrid_rdma_sidecar_global_init(
             cxl_state.total_regions,
             DIV_ROUND_UP(cxl_state.remap_granule, TARGET_PAGE_SIZE));
+        cxl_rdma_sidecar_init(
+            cxl_state.total_regions, cxl_state.remap_granule,
+            DIV_ROUND_UP(cxl_state.remap_granule, TARGET_PAGE_SIZE));
+        cxl_rdma_sidecar_submit_shadow_region(0);
     }
     cxl_state.phase = CXL_HYBRID_PHASE_DISABLED;
     if (cxl_state.hybrid_enabled) {
@@ -4420,6 +4432,7 @@ static void cxl_remap_state_cleanup(void)
     g_free(cxl_state.remapped_bmap);
     g_free(cxl_state.remapped_pages_bmap);
     g_free(cxl_state.published_page_state);
+    cxl_rdma_sidecar_destroy();
     cxl_hybrid_rdma_sidecar_global_destroy();
     cxl_hybrid_prefault_reset();
     memset(&cxl_state, 0, sizeof(cxl_state));
@@ -5137,8 +5150,8 @@ static void cxl_process_pending_remaps(void)
     size_t region_idx;
     bool profile_enabled =
         trace_event_get_state(TRACE_CXL_HYBRID_REMAP_DRAIN_PROFILE);
-    uint64_t total_start_ns;
-    uint64_t op_start_ns;
+    uint64_t total_start_ns = 0;
+    uint64_t op_start_ns = 0;
     uint64_t first_dirty_sync_ns = 0;
     uint64_t clean_scan_ns = 0;
     uint64_t quiesce_ns = 0;

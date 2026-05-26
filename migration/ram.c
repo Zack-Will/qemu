@@ -2833,7 +2833,7 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
         qemu_ram_pagesize(pss->block) >> TARGET_PAGE_BITS;
     unsigned long start_page = pss->page;
     int res;
-    uint64_t op_start_ns;
+    uint64_t op_start_ns = 0;
 
     if (migrate_ram_is_ignored(pss->block)) {
         error_report("block %s should not be migrated !", pss->block->idstr);
@@ -2958,7 +2958,7 @@ static int ram_find_and_save_block(RAMState *rs)
     unsigned long next_page;
     RAMBlock *next_block;
     int pages = 0;
-    uint64_t op_start_ns;
+    uint64_t op_start_ns = 0;
 
     /* No dirty page as there is zero RAM */
     if (!rs->ram_bytes_total) {
@@ -3994,7 +3994,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     RAMState **temp = opaque;
     RAMState *rs = *temp;
     int ret = 0;
-    int i;
+    int i = 0;
     int64_t loop_start_ns;
     int done = 0;
     int pages_sent = 0;
@@ -4020,8 +4020,8 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     uint64_t span_flush_ns = 0;
     uint64_t multifd_sync_ns = 0;
     uint64_t fflush_ns = 0;
-    uint64_t op_start_ns;
-    uint64_t profile_ns;
+    uint64_t op_start_ns = 0;
+    uint64_t profile_ns = 0;
     uint64_t queue_ns;
     uint64_t find_dirty_ns;
     uint64_t save_host_ns;
