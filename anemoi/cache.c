@@ -592,6 +592,89 @@ int anemoi_cache_flush_all(AnemoiCache *cache, Error **errp)
     return 0;
 }
 
+static int anemoi_cache_validate_metadata(AnemoiCache *cache,
+                                          const AnemoiCacheMetadata *metadata,
+                                          Error **errp)
+{
+    uint64_t expected_lines;
+    uint64_t pos = 0;
+    GHashTable *seen;
+
+    if (!cache || !metadata) {
+        error_setg(errp, "invalid AnemoiCache metadata import request");
+        return -1;
+    }
+    if (metadata->ways != ANEMOI_CACHE_WAYS) {
+        error_setg(errp, "AnemoiCache metadata ways mismatch: got %u expected %u",
+                   metadata->ways, ANEMOI_CACHE_WAYS);
+        return -1;
+    }
+    if (metadata->num_sets != cache->num_sets) {
+        error_setg(errp, "AnemoiCache metadata set count mismatch: got %" PRIu64
+                   " expected %" PRIu64, metadata->num_sets, cache->num_sets);
+        return -1;
+    }
+    if (metadata->num_sets > UINT64_MAX / metadata->ways) {
+        error_setg(errp, "AnemoiCache metadata line count overflows");
+        return -1;
+    }
+
+    expected_lines = metadata->num_sets * metadata->ways;
+    if (metadata->nr_lines != expected_lines) {
+        error_setg(errp, "AnemoiCache metadata line count mismatch: got %" PRIu64
+                   " expected %" PRIu64, metadata->nr_lines, expected_lines);
+        return -1;
+    }
+    if (metadata->nr_lines && !metadata->lines) {
+        error_setg(errp, "AnemoiCache metadata has no line array");
+        return -1;
+    }
+
+    seen = g_hash_table_new(g_int64_hash, g_int64_equal);
+    for (uint64_t i = 0; i < metadata->num_sets; i++) {
+        for (uint32_t w = 0; w < metadata->ways; w++, pos++) {
+            const AnemoiCacheLineSnapshot *snap = &metadata->lines[pos];
+
+            if (snap->valid > 1 || snap->dirty > 1 || snap->pinned > 1) {
+                error_setg(errp, "AnemoiCache metadata line %" PRIu64
+                           " has non-boolean flags", pos);
+                goto fail;
+            }
+            if (!snap->valid) {
+                if (snap->dirty || snap->pinned) {
+                    error_setg(errp, "AnemoiCache metadata line %" PRIu64
+                               " has invalid-line state", pos);
+                    goto fail;
+                }
+                continue;
+            }
+            if (!anemoi_cache_gfn_valid(cache, snap->gfn, errp)) {
+                goto fail;
+            }
+            if (snap->gfn % cache->num_sets != i) {
+                error_setg(errp, "AnemoiCache metadata line %" PRIu64
+                           " gfn=%" PRIu64 " belongs to set %" PRIu64
+                           ", not set %" PRIu64, pos, snap->gfn,
+                           snap->gfn % cache->num_sets, i);
+                goto fail;
+            }
+            if (g_hash_table_contains(seen, &snap->gfn)) {
+                error_setg(errp, "AnemoiCache metadata duplicates gfn=%" PRIu64,
+                           snap->gfn);
+                goto fail;
+            }
+            g_hash_table_add(seen, (gpointer)&snap->gfn);
+        }
+    }
+
+    g_hash_table_destroy(seen);
+    return 0;
+
+fail:
+    g_hash_table_destroy(seen);
+    return -1;
+}
+
 int anemoi_cache_export_metadata(AnemoiCache *cache,
                                  AnemoiCacheMetadata *metadata, Error **errp)
 {
@@ -630,6 +713,30 @@ int anemoi_cache_export_metadata(AnemoiCache *cache,
         }
         qemu_mutex_unlock(&set->lock);
     }
+    return 0;
+}
+
+int anemoi_cache_import_metadata(AnemoiCache *cache,
+                                 const AnemoiCacheMetadata *metadata,
+                                 Error **errp)
+{
+    if (anemoi_cache_validate_metadata(cache, metadata, errp) != 0) {
+        return -1;
+    }
+
+    /*
+     * P2 receives source cache metadata before the destination has local HVA
+     * copies.  Until metadata has a separate materialized bit, importing
+     * valid lines would turn first destination UFFD misses into false hits.
+     */
+    for (uint64_t i = 0; i < cache->num_sets; i++) {
+        AnemoiCacheSet *set = &cache->sets[i];
+
+        qemu_mutex_lock(&set->lock);
+        memset(set->ways, 0, sizeof(*set->ways) * ANEMOI_CACHE_WAYS);
+        qemu_mutex_unlock(&set->lock);
+    }
+    qatomic_set(&cache->clock, 0);
     return 0;
 }
 

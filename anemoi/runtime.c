@@ -16,6 +16,7 @@ typedef struct AnemoiRuntimeBlock {
 
 struct AnemoiRuntime {
     uint32_t vmid;
+    AnemoiRuntimeBootMode boot_mode;
     uint64_t guest_pages;
     uint64_t local_cache_pages;
     AnemoiBackend *backend;
@@ -245,6 +246,8 @@ static int anemoi_runtime_discard_ramblocks(AnemoiRuntime *runtime,
 
 static int anemoi_runtime_create_core(AnemoiRuntime *runtime, Error **errp)
 {
+    bool rmap_initially_readonly =
+        runtime->boot_mode == ANEMOI_RUNTIME_BOOT_SOURCE_SEED;
     AnemoiCacheConfig cache_cfg = {
         .vmid = runtime->vmid,
         .guest_pages = runtime->guest_pages,
@@ -258,7 +261,8 @@ static int anemoi_runtime_create_core(AnemoiRuntime *runtime, Error **errp)
         .guest_pages = runtime->guest_pages,
     };
 
-    runtime->rmap = anemoi_rmap_new(runtime->guest_pages, true, errp);
+    runtime->rmap = anemoi_rmap_new(runtime->guest_pages,
+                                    rmap_initially_readonly, errp);
     if (!runtime->rmap) {
         return -1;
     }
@@ -301,6 +305,7 @@ AnemoiRuntime *anemoi_runtime_start(const AnemoiRuntimeConfig *cfg,
 
     runtime = g_new0(AnemoiRuntime, 1);
     runtime->vmid = cfg->vmid;
+    runtime->boot_mode = cfg->boot_mode;
     runtime->local_cache_pages = cfg->local_cache_pages;
     runtime->backend = cfg->backend;
     runtime->backend_owned = cfg->backend_owned;
@@ -330,8 +335,12 @@ AnemoiRuntime *anemoi_runtime_start(const AnemoiRuntimeConfig *cfg,
     if (anemoi_runtime_create_backend(runtime, cfg, errp) != 0) {
         goto fail_resume;
     }
-    if (anemoi_runtime_seed_backend(runtime, errp) != 0 ||
-        anemoi_runtime_create_core(runtime, errp) != 0 ||
+    if (runtime->boot_mode == ANEMOI_RUNTIME_BOOT_SOURCE_SEED &&
+        anemoi_runtime_seed_backend(runtime, errp) != 0) {
+        goto fail_resume;
+    }
+
+    if (anemoi_runtime_create_core(runtime, errp) != 0 ||
         anemoi_runtime_start_fault_service(runtime, errp) != 0 ||
         anemoi_runtime_discard_ramblocks(runtime, errp) != 0) {
         goto fail_resume;
@@ -405,6 +414,7 @@ void anemoi_runtime_get_stats(AnemoiRuntime *runtime,
     }
 
     stats->vmid = runtime->vmid;
+    stats->boot_mode = runtime->boot_mode;
     stats->guest_pages = runtime->guest_pages;
     stats->local_cache_pages = runtime->local_cache_pages;
     stats->nr_ramblocks = runtime->nr_blocks;

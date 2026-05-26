@@ -73,6 +73,9 @@ int anemoi_cache_flush_all(AnemoiCache *cache, Error **errp);
 
 int anemoi_cache_export_metadata(AnemoiCache *cache,
                                  AnemoiCacheMetadata *metadata, Error **errp);
+int anemoi_cache_import_metadata(AnemoiCache *cache,
+                                 const AnemoiCacheMetadata *metadata,
+                                 Error **errp);
 void anemoi_cache_metadata_destroy(AnemoiCacheMetadata *metadata);
 
 #endif /* ANEMOI_CACHE_H */

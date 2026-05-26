@@ -18,9 +18,15 @@ typedef enum AnemoiRuntimeBackendKind {
     ANEMOI_RUNTIME_BACKEND_RDMA,
 } AnemoiRuntimeBackendKind;
 
+typedef enum AnemoiRuntimeBootMode {
+    ANEMOI_RUNTIME_BOOT_SOURCE_SEED = 0,
+    ANEMOI_RUNTIME_BOOT_DESTINATION_ATTACH,
+} AnemoiRuntimeBootMode;
+
 typedef struct AnemoiRuntimeConfig {
     uint32_t vmid;
     uint64_t local_cache_pages;
+    AnemoiRuntimeBootMode boot_mode;
     AnemoiRuntimeBackendKind backend_kind;
     AnemoiRDMAConfig rdma;
     AnemoiBackend *backend;
@@ -31,6 +37,7 @@ typedef struct AnemoiRuntimeConfig {
 
 typedef struct AnemoiRuntimeStats {
     uint32_t vmid;
+    AnemoiRuntimeBootMode boot_mode;
     uint64_t guest_pages;
     uint64_t local_cache_pages;
     uint64_t nr_ramblocks;

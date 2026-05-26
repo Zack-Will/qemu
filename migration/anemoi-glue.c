@@ -5,6 +5,18 @@
 
 static AnemoiRuntime *anemoi_global_runtime;
 
+static const char *anemoi_boot_mode_to_qapi(AnemoiRuntimeBootMode mode)
+{
+    switch (mode) {
+    case ANEMOI_RUNTIME_BOOT_SOURCE_SEED:
+        return "source-seed";
+    case ANEMOI_RUNTIME_BOOT_DESTINATION_ATTACH:
+        return "destination-attach";
+    default:
+        return "unknown";
+    }
+}
+
 static bool anemoi_parse_backend_kind(const char *backend,
                                       AnemoiRuntimeBackendKind *kind,
                                       Error **errp)
@@ -49,29 +61,33 @@ int anemoi_migration_switchover_hook(Error **errp)
                                              errp);
 }
 
-void qmp_x_anemoi_start(bool has_vmid, uint32_t vmid,
-                        bool has_local_cache_pages,
-                        uint64_t local_cache_pages,
-                        const char *backend,
-                        const char *rdma_role,
-                        const char *rdma_peer_host,
-                        bool has_rdma_port, uint16_t rdma_port,
-                        const char *rdma_dev,
-                        bool has_rdma_ib_port, uint8_t rdma_ib_port,
-                        bool has_rdma_gid_idx, int64_t rdma_gid_idx,
-                        bool has_rdma_vm_capacity,
-                        uint32_t rdma_vm_capacity,
-                        bool has_rdma_pages_per_vm,
-                        uint64_t rdma_pages_per_vm,
-                        bool has_auto_pause, bool auto_pause,
-                        bool has_auto_resume, bool auto_resume,
-                        Error **errp)
+static void anemoi_qmp_start_runtime(AnemoiRuntimeBootMode boot_mode,
+                                     bool has_vmid, uint32_t vmid,
+                                     bool has_local_cache_pages,
+                                     uint64_t local_cache_pages,
+                                     const char *backend,
+                                     const char *rdma_role,
+                                     const char *rdma_peer_host,
+                                     bool has_rdma_port, uint16_t rdma_port,
+                                     const char *rdma_dev,
+                                     bool has_rdma_ib_port,
+                                     uint8_t rdma_ib_port,
+                                     bool has_rdma_gid_idx,
+                                     int64_t rdma_gid_idx,
+                                     bool has_rdma_vm_capacity,
+                                     uint32_t rdma_vm_capacity,
+                                     bool has_rdma_pages_per_vm,
+                                     uint64_t rdma_pages_per_vm,
+                                     bool has_auto_pause, bool auto_pause,
+                                     bool has_auto_resume, bool auto_resume,
+                                     Error **errp)
 {
     AnemoiRuntimeBackendKind backend_kind;
     AnemoiRDMARole parsed_rdma_role;
     AnemoiRuntimeConfig cfg = {
         .vmid = has_vmid ? vmid : 0,
         .local_cache_pages = has_local_cache_pages ? local_cache_pages : 0,
+        .boot_mode = boot_mode,
         .auto_pause = has_auto_pause ? auto_pause : true,
         .auto_resume = has_auto_resume ? auto_resume : true,
     };
@@ -115,6 +131,70 @@ void qmp_x_anemoi_start(bool has_vmid, uint32_t vmid,
     anemoi_global_runtime = anemoi_runtime_start(&cfg, errp);
 }
 
+void qmp_x_anemoi_start(bool has_vmid, uint32_t vmid,
+                        bool has_local_cache_pages,
+                        uint64_t local_cache_pages,
+                        const char *backend,
+                        const char *rdma_role,
+                        const char *rdma_peer_host,
+                        bool has_rdma_port, uint16_t rdma_port,
+                        const char *rdma_dev,
+                        bool has_rdma_ib_port, uint8_t rdma_ib_port,
+                        bool has_rdma_gid_idx, int64_t rdma_gid_idx,
+                        bool has_rdma_vm_capacity,
+                        uint32_t rdma_vm_capacity,
+                        bool has_rdma_pages_per_vm,
+                        uint64_t rdma_pages_per_vm,
+                        bool has_auto_pause, bool auto_pause,
+                        bool has_auto_resume, bool auto_resume,
+                        Error **errp)
+{
+    anemoi_qmp_start_runtime(ANEMOI_RUNTIME_BOOT_SOURCE_SEED,
+                             has_vmid, vmid,
+                             has_local_cache_pages, local_cache_pages,
+                             backend, rdma_role, rdma_peer_host,
+                             has_rdma_port, rdma_port, rdma_dev,
+                             has_rdma_ib_port, rdma_ib_port,
+                             has_rdma_gid_idx, rdma_gid_idx,
+                             has_rdma_vm_capacity, rdma_vm_capacity,
+                             has_rdma_pages_per_vm, rdma_pages_per_vm,
+                             has_auto_pause, auto_pause,
+                             has_auto_resume, auto_resume, errp);
+}
+
+void qmp_x_anemoi_prepare_incoming(bool has_vmid, uint32_t vmid,
+                                   bool has_local_cache_pages,
+                                   uint64_t local_cache_pages,
+                                   const char *backend,
+                                   const char *rdma_role,
+                                   const char *rdma_peer_host,
+                                   bool has_rdma_port, uint16_t rdma_port,
+                                   const char *rdma_dev,
+                                   bool has_rdma_ib_port,
+                                   uint8_t rdma_ib_port,
+                                   bool has_rdma_gid_idx,
+                                   int64_t rdma_gid_idx,
+                                   bool has_rdma_vm_capacity,
+                                   uint32_t rdma_vm_capacity,
+                                   bool has_rdma_pages_per_vm,
+                                   uint64_t rdma_pages_per_vm,
+                                   bool has_auto_pause, bool auto_pause,
+                                   bool has_auto_resume, bool auto_resume,
+                                   Error **errp)
+{
+    anemoi_qmp_start_runtime(ANEMOI_RUNTIME_BOOT_DESTINATION_ATTACH,
+                             has_vmid, vmid,
+                             has_local_cache_pages, local_cache_pages,
+                             backend, rdma_role, rdma_peer_host,
+                             has_rdma_port, rdma_port, rdma_dev,
+                             has_rdma_ib_port, rdma_ib_port,
+                             has_rdma_gid_idx, rdma_gid_idx,
+                             has_rdma_vm_capacity, rdma_vm_capacity,
+                             has_rdma_pages_per_vm, rdma_pages_per_vm,
+                             has_auto_pause, auto_pause,
+                             has_auto_resume, auto_resume, errp);
+}
+
 void qmp_x_anemoi_stop(Error **errp)
 {
     if (!anemoi_global_runtime) {
@@ -141,6 +221,7 @@ XAnemoiInfo *qmp_query_anemoi(Error **errp)
     anemoi_runtime_get_stats(anemoi_global_runtime, &stats);
     info->enabled = true;
     info->vmid = stats.vmid;
+    info->boot_mode = g_strdup(anemoi_boot_mode_to_qapi(stats.boot_mode));
     info->guest_pages = stats.guest_pages;
     info->local_cache_pages = stats.local_cache_pages;
     info->ramblocks = stats.nr_ramblocks;
@@ -156,4 +237,142 @@ XAnemoiInfo *qmp_query_anemoi(Error **errp)
     info->backend_failed_fetches = stats.backend.failed_fetches;
     info->backend_failed_writebacks = stats.backend.failed_writebacks;
     return info;
+}
+
+void qmp_x_anemoi_prepare_switchover(Error **errp)
+{
+    if (!anemoi_global_runtime) {
+        error_setg(errp, "Anemoi runtime is not active");
+        return;
+    }
+
+    anemoi_runtime_prepare_switchover(anemoi_global_runtime,
+                                      ANEMOI_LM_BRANCH_NO_REPLICA, errp);
+}
+
+static XAnemoiCacheMetadata *
+anemoi_qapi_cache_metadata_from_internal(const AnemoiCacheMetadata *metadata)
+{
+    XAnemoiCacheMetadata *qapi = g_new0(XAnemoiCacheMetadata, 1);
+    XAnemoiCacheLineList **tail = &qapi->lines;
+
+    qapi->ways = metadata->ways;
+    qapi->num_sets = metadata->num_sets;
+    qapi->nr_lines = metadata->nr_lines;
+
+    for (uint64_t i = 0; i < metadata->nr_lines; i++) {
+        const AnemoiCacheLineSnapshot *snap = &metadata->lines[i];
+        XAnemoiCacheLineList *node = g_new0(XAnemoiCacheLineList, 1);
+        XAnemoiCacheLine *line = g_new0(XAnemoiCacheLine, 1);
+
+        line->gfn = snap->gfn;
+        line->valid = !!snap->valid;
+        line->dirty = !!snap->dirty;
+        line->pinned = !!snap->pinned;
+        line->lruk_ts0 = snap->lruk_ts[0];
+        line->lruk_ts1 = snap->lruk_ts[1];
+
+        node->value = line;
+        *tail = node;
+        tail = &node->next;
+    }
+
+    return qapi;
+}
+
+static int anemoi_qapi_cache_metadata_to_internal(
+    const XAnemoiCacheMetadata *qapi, AnemoiCacheMetadata *metadata,
+    Error **errp)
+{
+    const XAnemoiCacheLineList *node;
+    uint64_t pos = 0;
+
+    if (!qapi || !metadata) {
+        error_setg(errp, "invalid AnemoiCache metadata QMP payload");
+        return -1;
+    }
+    if (qapi->nr_lines > SIZE_MAX / sizeof(*metadata->lines)) {
+        error_setg(errp, "AnemoiCache metadata QMP payload is too large");
+        return -1;
+    }
+
+    memset(metadata, 0, sizeof(*metadata));
+    metadata->ways = qapi->ways;
+    metadata->num_sets = qapi->num_sets;
+    metadata->nr_lines = qapi->nr_lines;
+    metadata->lines = qapi->nr_lines ?
+                      g_new0(AnemoiCacheLineSnapshot, qapi->nr_lines) : NULL;
+
+    for (node = qapi->lines; node; node = node->next) {
+        const XAnemoiCacheLine *line = node->value;
+        AnemoiCacheLineSnapshot *snap;
+
+        if (pos == metadata->nr_lines) {
+            error_setg(errp, "AnemoiCache metadata QMP payload has too many lines");
+            goto fail;
+        }
+        if (!line) {
+            error_setg(errp, "AnemoiCache metadata QMP payload has a null line");
+            goto fail;
+        }
+
+        snap = &metadata->lines[pos++];
+        snap->gfn = line->gfn;
+        snap->valid = line->valid;
+        snap->dirty = line->dirty;
+        snap->pinned = line->pinned;
+        snap->lruk_ts[0] = line->lruk_ts0;
+        snap->lruk_ts[1] = line->lruk_ts1;
+    }
+
+    if (pos != metadata->nr_lines) {
+        error_setg(errp, "AnemoiCache metadata QMP payload has only %" PRIu64
+                   " lines, expected %" PRIu64, pos, metadata->nr_lines);
+        goto fail;
+    }
+
+    return 0;
+
+fail:
+    anemoi_cache_metadata_destroy(metadata);
+    return -1;
+}
+
+XAnemoiCacheMetadata *qmp_x_anemoi_export_cache_metadata(Error **errp)
+{
+    AnemoiCacheMetadata metadata;
+    XAnemoiCacheMetadata *qapi;
+
+    if (!anemoi_global_runtime) {
+        error_setg(errp, "Anemoi runtime is not active");
+        return NULL;
+    }
+
+    if (anemoi_cache_export_metadata(
+            anemoi_runtime_cache(anemoi_global_runtime), &metadata, errp) != 0) {
+        return NULL;
+    }
+
+    qapi = anemoi_qapi_cache_metadata_from_internal(&metadata);
+    anemoi_cache_metadata_destroy(&metadata);
+    return qapi;
+}
+
+void qmp_x_anemoi_import_cache_metadata(XAnemoiCacheMetadata *metadata,
+                                        Error **errp)
+{
+    AnemoiCacheMetadata internal;
+
+    if (!anemoi_global_runtime) {
+        error_setg(errp, "Anemoi runtime is not active");
+        return;
+    }
+
+    if (anemoi_qapi_cache_metadata_to_internal(metadata, &internal, errp) != 0) {
+        return;
+    }
+
+    anemoi_cache_import_metadata(anemoi_runtime_cache(anemoi_global_runtime),
+                                 &internal, errp);
+    anemoi_cache_metadata_destroy(&internal);
 }

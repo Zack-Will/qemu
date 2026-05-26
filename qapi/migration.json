@@ -438,6 +438,10 @@
 #
 # @vmid: Anemoi VM identifier.
 #
+# @boot-mode: Runtime boot mode.  'source-seed' keeps the current
+#     source boot path, while 'destination-attach' makes the incoming
+#     side attach an existing AnemoiM image.
+#
 # @guest-pages: Total guest RAM pages covered by Anemoi.
 #
 # @local-cache-pages: Local AnemoiCache capacity in 4 KiB pages.
@@ -472,6 +476,7 @@
 { 'struct': 'XAnemoiInfo',
   'data': { 'enabled': 'bool',
             'vmid': 'uint32',
+            '*boot-mode': 'str',
             'guest-pages': 'uint64',
             'local-cache-pages': 'uint64',
             'ramblocks': 'uint64',
@@ -486,6 +491,113 @@
             'backend-prefetches': 'uint64',
             'backend-failed-fetches': 'uint64',
             'backend-failed-writebacks': 'uint64' } }
+
+##
+# @XAnemoiCacheLine:
+#
+# One AnemoiCache metadata line snapshot used by the P2 sideband.
+# The destination validates this metadata but does not install valid
+# lines as resident cache entries because local HVA pages have not
+# been materialized yet.
+#
+# @gfn: Guest frame number recorded in this cache way.
+#
+# @valid: Whether this cache way was valid on the source.
+#
+# @dirty: Whether this cache way was dirty on the source.
+#
+# @pinned: Whether this cache way was pinned on the source.
+#
+# @lruk-ts0: Most recent LRU-K timestamp.
+#
+# @lruk-ts1: Second most recent LRU-K timestamp.
+#
+# Since: 10.2
+##
+{ 'struct': 'XAnemoiCacheLine',
+  'data': { 'gfn': 'uint64',
+            'valid': 'bool',
+            'dirty': 'bool',
+            'pinned': 'bool',
+            'lruk-ts0': 'uint64',
+            'lruk-ts1': 'uint64' } }
+
+##
+# @XAnemoiCacheMetadata:
+#
+# Full AnemoiCache metadata snapshot for the P2 sideband path.
+#
+# @ways: Number of ways per cache set.  Must match the baseline's
+#     4096-way constant.
+#
+# @num-sets: Number of cache sets in the source runtime.
+#
+# @nr-lines: Total number of line entries in @lines.
+#
+# @lines: Cache line snapshots in set-major, way-minor order.
+#
+# Since: 10.2
+##
+{ 'struct': 'XAnemoiCacheMetadata',
+  'data': { 'ways': 'uint32',
+            'num-sets': 'uint64',
+            'nr-lines': 'uint64',
+            'lines': [ 'XAnemoiCacheLine' ] } }
+
+##
+# @x-anemoi-export-cache-metadata:
+#
+# Export the active source AnemoiCache metadata for the P2 QMP
+# sideband.  Operators should call this after the source has
+# flushed dirty cachelines at switchover.
+#
+# Features:
+#
+# @unstable: This command is experimental.
+#
+# Since: 10.2
+##
+{ 'command': 'x-anemoi-export-cache-metadata',
+  'returns': 'XAnemoiCacheMetadata',
+  'features': [ 'unstable' ] }
+
+##
+# @x-anemoi-import-cache-metadata:
+#
+# Import a source AnemoiCache metadata snapshot on the destination
+# side.
+# The current P2 implementation validates the shape and keeps the
+# destination cache non-resident.  First accesses fault and fetch
+# from AnemoiM instead of becoming false metadata hits.
+#
+# @metadata: Metadata returned by @x-anemoi-export-cache-metadata.
+#
+# Features:
+#
+# @unstable: This command is experimental.
+#
+# Since: 10.2
+##
+{ 'command': 'x-anemoi-import-cache-metadata',
+  'data': { 'metadata': 'XAnemoiCacheMetadata' },
+  'features': [ 'unstable' ] }
+
+##
+# @x-anemoi-prepare-switchover:
+#
+# Flush dirty AnemoiCache lines into AnemoiM for the no-replica P2
+# path.  This is the QMP-accessible form of the migration switchover
+# hook for smoke-test harnesses that export/import the metadata
+# sideband explicitly.
+#
+# Features:
+#
+# @unstable: This command is experimental.
+#
+# Since: 10.2
+##
+{ 'command': 'x-anemoi-prepare-switchover',
+  'features': [ 'unstable' ] }
 
 ##
 # @x-anemoi-start:
@@ -535,6 +647,76 @@
 # Since: 10.2
 ##
 { 'command': 'x-anemoi-start',
+  'data': { '*vmid': 'uint32',
+            '*local-cache-pages': 'uint64',
+            '*backend': 'str',
+            '*rdma-role': 'str',
+            '*rdma-peer-host': 'str',
+            '*rdma-port': 'uint16',
+            '*rdma-dev': 'str',
+            '*rdma-ib-port': 'uint8',
+            '*rdma-gid-idx': 'int',
+            '*rdma-vm-capacity': 'uint32',
+            '*rdma-pages-per-vm': 'uint64',
+            '*auto-pause': 'bool',
+            '*auto-resume': 'bool' },
+  'features': [ 'unstable' ] }
+
+##
+# @x-anemoi-prepare-incoming:
+#
+# Start the experimental Anemoi baseline runtime on an incoming
+# migration target.  This command attaches the destination QEMU to an
+# existing AnemoiM backend and registers userfaultfd over migratable
+# RAMBlocks, but it deliberately does not seed RAMBlock contents back
+# into AnemoiM.
+#
+# Arguments are the same as @x-anemoi-start.  The default backend is
+# still 'memory' for local smoke tests, while the paper path is
+# @backend='rdma' with the same VM slot as the source side.
+#
+# @vmid: Anemoi VM identifier.  Defaults to 0.
+#
+# @local-cache-pages: Local AnemoiCache capacity in 4 KiB pages.
+#     0 or absent means the whole guest RAM footprint.
+#
+# @backend: Fetch backend: 'memory' or 'rdma'.  Defaults to
+#     'memory'.
+#
+# @rdma-role: Bootstrap role for the QEMU-side RDMA endpoint:
+#     'client' or 'server'.  Defaults to 'client'.
+#
+# @rdma-peer-host: Peer TCP bootstrap host for
+#     @rdma-role='client'.
+#
+# @rdma-port: TCP bootstrap port for AnemoiM.  Defaults to 18515.
+#
+# @rdma-dev: RDMA device name.  Defaults to 'mlx5_0'.
+#
+# @rdma-ib-port: RDMA HCA port.  Defaults to 1.
+#
+# @rdma-gid-idx: GID index for RoCE.  Defaults to 3; use -1 for
+#     LID-only InfiniBand.
+#
+# @rdma-vm-capacity: Number of VM slots in the remote pool.
+#     Defaults to @vmid + 1.
+#
+# @rdma-pages-per-vm: Pages per VM slot in the remote pool.
+#     Defaults to the discovered guest RAM page count.
+#
+# @auto-pause: Pause the VM before registering userfaultfd.
+#     Defaults to true.
+#
+# @auto-resume: Resume the VM after Anemoi setup if @auto-pause
+#     stopped it.  Defaults to true.
+#
+# Features:
+#
+# @unstable: This command is experimental.
+#
+# Since: 10.2
+##
+{ 'command': 'x-anemoi-prepare-incoming',
   'data': { '*vmid': 'uint32',
             '*local-cache-pages': 'uint64',
             '*backend': 'str',
