@@ -4111,6 +4111,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
                     "cxl_hybrid_completion_prepare_end remaining=0 ready=0 pending=0 ret=0",
                     "cxl_hybrid_publish_wait_begin pc.ram guest=0x2000 generation=7",
                     "cxl_hybrid_publish_wait_complete pc.ram guest=0x2000 generation=7 wait_time_ns=12 ret=0",
+                    "cxl_hybrid_region_publish_complete first-page=0 pages=512 published=128 gen=7 elapsed_ns=9000",
+                    "cxl_hybrid_region_wait_complete first-page=0 pages=512 gen=7 ret=0 elapsed_ns=5000",
                 ]) + "\n",
                 encoding="utf-8",
             )
@@ -4140,6 +4142,11 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(counts["completion_prepare_end"], 1)
         self.assertEqual(counts["publish_wait_begin"], 1)
         self.assertEqual(counts["publish_wait_complete"], 1)
+        self.assertEqual(counts["publish_wait_time_ns"], 12)
+        self.assertEqual(counts["max_publish_wait_time_ns"], 12)
+        self.assertEqual(counts["region_publish_time_ns"], 9000)
+        self.assertEqual(counts["region_wait_time_ns"], 5000)
+        self.assertEqual(counts["max_region_wait_time_ns"], 5000)
         self.assertEqual(counts["phase_postcopy_warm"], 1)
 
     def test_parse_postcopy_timeline_extracts_control_breakdown(self):
@@ -4242,6 +4249,79 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertTrue(breakdown["post_vm_start_wallclock_alignment_available"])
         self.assertEqual(
             breakdown["post_vm_start_to_first_dst_heartbeat_ms"], 0.5)
+
+    def test_synthetic_trace_reports_handoff_cxl_capacity_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_trace = Path(tmpdir) / "src-trace.bin"
+            dst_trace = Path(tmpdir) / "dst-trace.bin"
+            src_trace.write_text(
+                "\n".join([
+                    "migration_postcopy_timeline start now_ns=1000000 state=4 iteration=2 pending=0 package_loaded=0",
+                    "migration_postcopy_timeline downtime-end now_ns=1800000 state=15 iteration=2 pending=0 package_loaded=0",
+                    "migration_postcopy_timeline state-postcopy-active now_ns=3300000 state=6 iteration=2 pending=0 package_loaded=1",
+                    "migration_postcopy_timeline completion-enter now_ns=4200000 state=6 iteration=2 pending=0 package_loaded=1",
+                    "migration_postcopy_timeline completed now_ns=5000000 state=7 iteration=2 pending=0 package_loaded=1",
+                    "cxl_hybrid_region_publish_complete first-page=0 pages=512 published=256 gen=1 elapsed_ns=9000",
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            dst_trace.write_text(
+                "\n".join([
+                    "migration_postcopy_timeline dst-postcopy-bh-vm-started now_ns=3100000 state=6 iteration=0 pending=0 package_loaded=0",
+                    "migration_postcopy_timeline dst-postcopy-bh-ack-sent now_ns=3200000 state=6 iteration=0 pending=0 package_loaded=0",
+                    "cxl_hybrid_fault_hit pc.ram offset=0x1000 len=4096 read_time_ns=800",
+                    "cxl_hybrid_fault_place pc.ram offset=0x1000 place_time_ns=900 ret=0",
+                    "cxl_hybrid_publish_wait_complete pc.ram guest=0x1000 generation=1 wait_time_ns=1100 ret=0",
+                    "cxl_hybrid_region_wait_complete first-page=0 pages=512 gen=1 ret=0 elapsed_ns=1000",
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            trace_counts = {
+                "src": self.mod.parse_trace_log(src_trace),
+                "dst": self.mod.parse_trace_log(dst_trace),
+                "combined": self.mod.trace_count_template(),
+            }
+            for key in trace_counts["src"]:
+                trace_counts["combined"][key] = (
+                    trace_counts["src"].get(key, 0) +
+                    trace_counts["dst"].get(key, 0)
+                )
+            handoff_breakdown = self.mod.summarize_handoff_breakdown(
+                src_trace,
+                dst_trace,
+                trace_counts=trace_counts,
+                summary=self.mod.extract_summary([]),
+            )
+
+        row = self.mod.summarize_single_result(
+            "remap_xlarge_random_rw",
+            "hybrid_parallel_rdma_cxl",
+            self.mod.resolve_threshold_profile("balanced"),
+            1,
+            {
+                "summary": {},
+                "trace": trace_counts,
+                "latency": {},
+                "handoff_breakdown": handoff_breakdown,
+            },
+        )
+
+        self.assertEqual(row["handoff_control_src_start_to_dst_vm_started_ms"], 2.1)
+        self.assertEqual(row["handoff_control_src_start_to_dst_ack_ms"], 2.2)
+        self.assertEqual(row["handoff_control_src_start_to_downtime_end_ms"], 0.8)
+        self.assertEqual(
+            row["handoff_control_src_downtime_end_to_postcopy_active_ms"], 1.5
+        )
+        self.assertEqual(
+            row["handoff_control_src_postcopy_active_to_completion_enter_ms"], 0.9
+        )
+        self.assertEqual(
+            row["handoff_control_src_completion_enter_to_completed_ms"], 0.8
+        )
+        self.assertEqual(row["handoff_region_publish_pages"], 512)
+        self.assertEqual(row["handoff_region_publish_time_ns"], 9000)
+        self.assertEqual(row["handoff_postcopy_region_wait_time_ns"], 1000)
+        self.assertEqual(row["handoff_postcopy_fault_total_time_ns"], 2800)
 
     def test_extract_summary_uses_destination_x_cxl_counters(self):
         samples = [

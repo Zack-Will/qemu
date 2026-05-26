@@ -72,6 +72,10 @@ REGION_WAIT_COMPLETE_TRACE_RE = re.compile(
     r"\bret=(?P<ret>-?\d+)\b"
     r"(?:.*\belapsed_ns=(?P<elapsed_ns>\d+)\b)?"
 )
+PUBLISH_WAIT_COMPLETE_TRACE_RE = re.compile(
+    r"\bwait_time_ns=(?P<wait_time_ns>\d+)\b"
+    r".*\bret=(?P<ret>-?\d+)\b"
+)
 RDMA_REGION_TRACE_RE = re.compile(
     r"\bregion=(?P<region>\d+)\b.*\bpages=(?P<pages>\d+)\b"
 )
@@ -901,12 +905,17 @@ def trace_count_template():
         "completion_prepare_end": 0,
         "publish_wait_begin": 0,
         "publish_wait_complete": 0,
+        "publish_wait_time_ns": 0,
+        "max_publish_wait_time_ns": 0,
         "region_publish_complete": 0,
         "region_publish_pages": 0,
         "region_publish_published_pages": 0,
+        "region_publish_time_ns": 0,
         "region_wait_begin": 0,
         "region_wait_complete": 0,
         "region_wait_complete_failures": 0,
+        "region_wait_time_ns": 0,
+        "max_region_wait_time_ns": 0,
         "dst_region_remap": 0,
         "rdma_ready_regions": 0,
         "rdma_ready_pages": 0,
@@ -1006,6 +1015,12 @@ def parse_trace_log(trace_file: Path):
             counts["publish_wait_begin"] += 1
         elif "cxl_hybrid_publish_wait_complete " in line:
             counts["publish_wait_complete"] += 1
+            match = PUBLISH_WAIT_COMPLETE_TRACE_RE.search(line)
+            if match:
+                wait_time_ns = int(match.group("wait_time_ns"))
+                counts["publish_wait_time_ns"] += wait_time_ns
+                counts["max_publish_wait_time_ns"] = max(
+                    counts["max_publish_wait_time_ns"], wait_time_ns)
         elif "cxl_hybrid_region_publish_complete " in line:
             counts["region_publish_complete"] += 1
             match = REGION_PUBLISH_TRACE_RE.search(line)
@@ -1013,13 +1028,22 @@ def parse_trace_log(trace_file: Path):
                 counts["region_publish_pages"] += int(match.group("pages"))
                 counts["region_publish_published_pages"] += int(
                     match.group("published"))
+                if match.group("elapsed_ns") is not None:
+                    counts["region_publish_time_ns"] += int(
+                        match.group("elapsed_ns"))
         elif "cxl_hybrid_region_wait_begin " in line:
             counts["region_wait_begin"] += 1
         elif "cxl_hybrid_region_wait_complete " in line:
             counts["region_wait_complete"] += 1
             match = REGION_WAIT_COMPLETE_TRACE_RE.search(line)
-            if match and int(match.group("ret")) != 0:
-                counts["region_wait_complete_failures"] += 1
+            if match:
+                if int(match.group("ret")) != 0:
+                    counts["region_wait_complete_failures"] += 1
+                if match.group("elapsed_ns") is not None:
+                    elapsed_ns = int(match.group("elapsed_ns"))
+                    counts["region_wait_time_ns"] += elapsed_ns
+                    counts["max_region_wait_time_ns"] = max(
+                        counts["max_region_wait_time_ns"], elapsed_ns)
         elif "cxl_hybrid_dst_region_remap " in line:
             counts["dst_region_remap"] += 1
         elif "cxl_hybrid_rdma_ready " in line:
@@ -1742,6 +1766,27 @@ def summarize_handoff_breakdown(src_trace_file: Path, dst_trace_file: Path,
     combined_trace = ((trace_counts or {}).get("combined") or {})
     src_timeline = parse_postcopy_timeline(src_trace_file)
     dst_timeline = parse_postcopy_timeline(dst_trace_file)
+    fault_publish_wait_time_ns = (
+        summary.get("max_fault_publish_wait_time_ns", 0) or
+        combined_trace.get("max_publish_wait_time_ns", 0)
+    )
+    region_wait_samples = summary.get("dst_region_wait_samples", 0)
+    if region_wait_samples:
+        region_wait_time_ns = summary.get("dst_region_wait_time_ns", 0)
+        max_region_wait_time_ns = summary.get("max_dst_region_wait_time_ns", 0)
+    else:
+        region_wait_samples = combined_trace.get("region_wait_complete", 0)
+        region_wait_time_ns = combined_trace.get("region_wait_time_ns", 0)
+        max_region_wait_time_ns = combined_trace.get("max_region_wait_time_ns", 0)
+
+    region_publish_requests = summary.get("region_publish_requests", 0)
+    if region_publish_requests:
+        region_publish_pages = summary.get("region_publish_pages", 0)
+        region_publish_time_ns = summary.get("region_publish_time_ns", 0)
+    else:
+        region_publish_requests = combined_trace.get("region_publish_complete", 0)
+        region_publish_pages = combined_trace.get("region_publish_pages", 0)
+        region_publish_time_ns = combined_trace.get("region_publish_time_ns", 0)
 
     src_estimate_ns = first_timeline_ns(src_timeline, "estimate")
     src_enter_brake_ns = first_timeline_ns(src_timeline, "enter-brake")
@@ -1824,36 +1869,34 @@ def summarize_handoff_breakdown(src_trace_file: Path, dst_trace_file: Path,
         "postcopy_fault_place_time_ns":
             combined_trace.get("fault_place_time_ns", 0),
         "postcopy_fault_publish_wait_time_ns":
-            summary.get("max_fault_publish_wait_time_ns", 0),
+            fault_publish_wait_time_ns,
         "postcopy_fault_total_time_ns":
             combined_trace.get("fault_hit_read_time_ns", 0) +
             combined_trace.get("fault_place_time_ns", 0) +
-            summary.get("max_fault_publish_wait_time_ns", 0),
+            fault_publish_wait_time_ns,
         "trace_dst_region_remap": combined_trace.get("dst_region_remap", 0),
         "postcopy_region_wait_samples":
-            summary.get("dst_region_wait_samples", 0),
+            region_wait_samples,
         "dst_region_wait_time_ns":
-            summary.get("dst_region_wait_time_ns", 0),
+            region_wait_time_ns,
         "postcopy_region_wait_time_ns":
-            summary.get("dst_region_wait_time_ns", 0),
+            region_wait_time_ns,
         "max_dst_region_wait_time_ns":
-            summary.get("max_dst_region_wait_time_ns", 0),
+            max_region_wait_time_ns,
         "postcopy_region_publish_requests":
-            summary.get("region_publish_requests", 0),
+            region_publish_requests,
         "postcopy_region_publish_pages":
-            summary.get("region_publish_pages",
-                        combined_trace.get("region_publish_pages", 0)),
+            region_publish_pages,
         "postcopy_region_publish_time_ns":
-            summary.get("region_publish_time_ns", 0),
+            region_publish_time_ns,
         "max_dst_region_map_time_ns":
             summary.get("max_dst_region_map_time_ns", 0),
         "ram_save_queue_pages": combined_trace.get("ram_save_queue_pages", 0),
         "get_queued_page": combined_trace.get("get_queued_page", 0),
         "region_publish_pages":
-            summary.get("region_publish_pages",
-                        combined_trace.get("region_publish_pages", 0)),
+            region_publish_pages,
         "region_publish_time_ns":
-            summary.get("region_publish_time_ns", 0),
+            region_publish_time_ns,
         "ram_stream_publish_span_pages":
             combined_trace.get("ram_stream_publish_span_pages", 0),
         "ram_stream_publish_span_written_pages":
