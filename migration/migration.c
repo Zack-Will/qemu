@@ -14,6 +14,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "anemoi/glue.h"
 #include "qemu/ctype.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
@@ -2743,6 +2744,7 @@ static bool migration_switchover_start(MigrationState *s, Error **errp)
 static int migration_completion_precopy(MigrationState *s)
 {
     int ret;
+    Error *local_err = NULL;
 
     bql_lock();
 
@@ -2751,6 +2753,12 @@ static int migration_completion_precopy(MigrationState *s)
         if (ret < 0) {
             goto out_unlock;
         }
+    }
+
+    if (anemoi_migration_switchover_hook(&local_err) != 0) {
+        migrate_error_propagate(s, local_err);
+        ret = -EFAULT;
+        goto out_unlock;
     }
 
     if (!migration_switchover_start(s, NULL)) {

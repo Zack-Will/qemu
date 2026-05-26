@@ -430,6 +430,152 @@
 { 'command': 'query-migrate', 'returns': 'MigrationInfo' }
 
 ##
+# @XAnemoiInfo:
+#
+# Experimental Anemoi baseline runtime state and counters.
+#
+# @enabled: true when Anemoi runtime is active.
+#
+# @vmid: Anemoi VM identifier.
+#
+# @guest-pages: Total guest RAM pages covered by Anemoi.
+#
+# @local-cache-pages: Local AnemoiCache capacity in 4 KiB pages.
+#
+# @ramblocks: Number of QEMU RAMBlocks registered with Anemoi.
+#
+# @fault-service-failed: true if the userfaultfd thread reported an
+#     error.
+#
+# @cache-hits: AnemoiCache metadata hits.
+#
+# @cache-misses: AnemoiCache metadata misses.
+#
+# @cache-evictions: AnemoiCache evictions.
+#
+# @cache-dirty-writebacks: Dirty cacheline writebacks to AnemoiM.
+#
+# @cache-install-errors: Failed cache page installs.
+#
+# @backend-fetches: Successful backend page fetches.
+#
+# @backend-writebacks: Successful backend page writebacks.
+#
+# @backend-prefetches: Backend prefetch page requests.
+#
+# @backend-failed-fetches: Failed backend page fetches.
+#
+# @backend-failed-writebacks: Failed backend page writebacks.
+#
+# Since: 10.2
+##
+{ 'struct': 'XAnemoiInfo',
+  'data': { 'enabled': 'bool',
+            'vmid': 'uint32',
+            'guest-pages': 'uint64',
+            'local-cache-pages': 'uint64',
+            'ramblocks': 'uint64',
+            'fault-service-failed': 'bool',
+            'cache-hits': 'uint64',
+            'cache-misses': 'uint64',
+            'cache-evictions': 'uint64',
+            'cache-dirty-writebacks': 'uint64',
+            'cache-install-errors': 'uint64',
+            'backend-fetches': 'uint64',
+            'backend-writebacks': 'uint64',
+            'backend-prefetches': 'uint64',
+            'backend-failed-fetches': 'uint64',
+            'backend-failed-writebacks': 'uint64' } }
+
+##
+# @x-anemoi-start:
+#
+# Start the experimental Anemoi baseline runtime over all migratable
+# RAMBlocks.  The default backend is the in-process memory pool for
+# sanity testing.  The baseline paper path is @backend='rdma' plus an
+# external anemoi-pool process.
+#
+# @vmid: Anemoi VM identifier.  Defaults to 0.
+#
+# @local-cache-pages: Local AnemoiCache capacity in 4 KiB pages.  0
+#     or absent means the whole guest RAM footprint.
+#
+# @backend: Fetch backend: 'memory' or 'rdma'.  Defaults to 'memory'.
+#
+# @rdma-role: Bootstrap role for the QEMU-side RDMA endpoint: 'client'
+#     or 'server'.  Defaults to 'client'.
+#
+# @rdma-peer-host: Peer TCP bootstrap host for @rdma-role='client'.
+#
+# @rdma-port: TCP bootstrap port for AnemoiM.  Defaults to 18515.
+#
+# @rdma-dev: RDMA device name.  Defaults to 'mlx5_0'.
+#
+# @rdma-ib-port: RDMA HCA port.  Defaults to 1.
+#
+# @rdma-gid-idx: GID index for RoCE.  Defaults to 3; use -1 for
+#     LID-only InfiniBand.
+#
+# @rdma-vm-capacity: Number of VM slots in the remote pool.  Defaults
+#     to @vmid + 1.
+#
+# @rdma-pages-per-vm: Pages per VM slot in the remote pool.  Defaults
+#     to the discovered guest RAM page count.
+#
+# @auto-pause: Pause the VM before seeding AnemoiM and registering
+#     userfaultfd.  Defaults to true.
+#
+# @auto-resume: Resume the VM after Anemoi setup if @auto-pause
+#     stopped it.  Defaults to true.
+#
+# Features:
+#
+# @unstable: This command is experimental.
+#
+# Since: 10.2
+##
+{ 'command': 'x-anemoi-start',
+  'data': { '*vmid': 'uint32',
+            '*local-cache-pages': 'uint64',
+            '*backend': 'str',
+            '*rdma-role': 'str',
+            '*rdma-peer-host': 'str',
+            '*rdma-port': 'uint16',
+            '*rdma-dev': 'str',
+            '*rdma-ib-port': 'uint8',
+            '*rdma-gid-idx': 'int',
+            '*rdma-vm-capacity': 'uint32',
+            '*rdma-pages-per-vm': 'uint64',
+            '*auto-pause': 'bool',
+            '*auto-resume': 'bool' },
+  'features': [ 'unstable' ] }
+
+##
+# @x-anemoi-stop:
+#
+# Stop the experimental Anemoi baseline runtime and unregister
+# userfaultfd.
+#
+# Features:
+#
+# @unstable: This command is experimental.
+#
+# Since: 10.2
+##
+{ 'command': 'x-anemoi-stop',
+  'features': [ 'unstable' ] }
+
+##
+# @query-anemoi:
+#
+# Query the experimental Anemoi baseline runtime state.
+#
+# Since: 10.2
+##
+{ 'command': 'query-anemoi',
+  'returns': 'XAnemoiInfo' }
+
+##
 # @MigrationCapability:
 #
 # Migration capabilities enumeration

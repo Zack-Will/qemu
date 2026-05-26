@@ -1,0 +1,159 @@
+#include "qemu/osdep.h"
+#include "anemoi/glue.h"
+#include "anemoi/runtime.h"
+#include "qapi/qapi-commands-migration.h"
+
+static AnemoiRuntime *anemoi_global_runtime;
+
+static bool anemoi_parse_backend_kind(const char *backend,
+                                      AnemoiRuntimeBackendKind *kind,
+                                      Error **errp)
+{
+    if (!backend || !g_strcmp0(backend, "memory")) {
+        *kind = ANEMOI_RUNTIME_BACKEND_MEMORY;
+        return true;
+    }
+    if (!g_strcmp0(backend, "rdma")) {
+        *kind = ANEMOI_RUNTIME_BACKEND_RDMA;
+        return true;
+    }
+
+    error_setg(errp, "unknown Anemoi backend '%s'", backend);
+    return false;
+}
+
+static bool anemoi_parse_rdma_role(const char *role,
+                                   AnemoiRDMARole *rdma_role,
+                                   Error **errp)
+{
+    if (!role || !g_strcmp0(role, "client")) {
+        *rdma_role = ANEMOI_RDMA_ROLE_CLIENT;
+        return true;
+    }
+    if (!g_strcmp0(role, "server")) {
+        *rdma_role = ANEMOI_RDMA_ROLE_SERVER;
+        return true;
+    }
+
+    error_setg(errp, "unknown Anemoi RDMA role '%s'", role);
+    return false;
+}
+
+int anemoi_migration_switchover_hook(Error **errp)
+{
+    if (!anemoi_global_runtime) {
+        return 0;
+    }
+    return anemoi_runtime_prepare_switchover(anemoi_global_runtime,
+                                             ANEMOI_LM_BRANCH_NO_REPLICA,
+                                             errp);
+}
+
+void qmp_x_anemoi_start(bool has_vmid, uint32_t vmid,
+                        bool has_local_cache_pages,
+                        uint64_t local_cache_pages,
+                        const char *backend,
+                        const char *rdma_role,
+                        const char *rdma_peer_host,
+                        bool has_rdma_port, uint16_t rdma_port,
+                        const char *rdma_dev,
+                        bool has_rdma_ib_port, uint8_t rdma_ib_port,
+                        bool has_rdma_gid_idx, int64_t rdma_gid_idx,
+                        bool has_rdma_vm_capacity,
+                        uint32_t rdma_vm_capacity,
+                        bool has_rdma_pages_per_vm,
+                        uint64_t rdma_pages_per_vm,
+                        bool has_auto_pause, bool auto_pause,
+                        bool has_auto_resume, bool auto_resume,
+                        Error **errp)
+{
+    AnemoiRuntimeBackendKind backend_kind;
+    AnemoiRDMARole parsed_rdma_role;
+    AnemoiRuntimeConfig cfg = {
+        .vmid = has_vmid ? vmid : 0,
+        .local_cache_pages = has_local_cache_pages ? local_cache_pages : 0,
+        .auto_pause = has_auto_pause ? auto_pause : true,
+        .auto_resume = has_auto_resume ? auto_resume : true,
+    };
+
+    if (!anemoi_parse_backend_kind(backend, &backend_kind, errp) ||
+        !anemoi_parse_rdma_role(rdma_role, &parsed_rdma_role, errp)) {
+        return;
+    }
+
+    if (has_rdma_gid_idx &&
+        (rdma_gid_idx < INT_MIN || rdma_gid_idx > INT_MAX)) {
+        error_setg(errp, "Anemoi RDMA gid index is out of int range");
+        return;
+    }
+
+    if (backend_kind == ANEMOI_RUNTIME_BACKEND_RDMA &&
+        parsed_rdma_role == ANEMOI_RDMA_ROLE_CLIENT && !rdma_peer_host) {
+        error_setg(errp, "Anemoi RDMA client backend requires rdma-peer-host");
+        return;
+    }
+
+    if (anemoi_global_runtime) {
+        error_setg(errp, "Anemoi runtime is already active");
+        return;
+    }
+
+    cfg.backend_kind = backend_kind;
+    cfg.rdma = (AnemoiRDMAConfig) {
+        .role = parsed_rdma_role,
+        .peer_host = rdma_peer_host,
+        .tcp_port = has_rdma_port ? rdma_port : ANEMOI_RDMA_DEFAULT_TCP_PORT,
+        .rdma_dev = rdma_dev,
+        .ib_port = has_rdma_ib_port ? rdma_ib_port :
+                   ANEMOI_RDMA_DEFAULT_IB_PORT,
+        .gid_idx = has_rdma_gid_idx ? (int)rdma_gid_idx :
+                   ANEMOI_RDMA_DEFAULT_GID_IDX,
+        .vm_capacity = has_rdma_vm_capacity ? rdma_vm_capacity : 0,
+        .pages_per_vm = has_rdma_pages_per_vm ? rdma_pages_per_vm : 0,
+    };
+
+    anemoi_global_runtime = anemoi_runtime_start(&cfg, errp);
+}
+
+void qmp_x_anemoi_stop(Error **errp)
+{
+    if (!anemoi_global_runtime) {
+        error_setg(errp, "Anemoi runtime is not active");
+        return;
+    }
+
+    anemoi_runtime_stop(anemoi_global_runtime);
+    anemoi_global_runtime = NULL;
+}
+
+XAnemoiInfo *qmp_query_anemoi(Error **errp)
+{
+    XAnemoiInfo *info = g_new0(XAnemoiInfo, 1);
+    AnemoiRuntimeStats stats;
+
+    (void)errp;
+
+    if (!anemoi_global_runtime) {
+        info->enabled = false;
+        return info;
+    }
+
+    anemoi_runtime_get_stats(anemoi_global_runtime, &stats);
+    info->enabled = true;
+    info->vmid = stats.vmid;
+    info->guest_pages = stats.guest_pages;
+    info->local_cache_pages = stats.local_cache_pages;
+    info->ramblocks = stats.nr_ramblocks;
+    info->fault_service_failed = stats.fault_service_failed;
+    info->cache_hits = stats.cache.hits;
+    info->cache_misses = stats.cache.misses;
+    info->cache_evictions = stats.cache.evictions;
+    info->cache_dirty_writebacks = stats.cache.dirty_writebacks;
+    info->cache_install_errors = stats.cache.install_errors;
+    info->backend_fetches = stats.backend.fetches;
+    info->backend_writebacks = stats.backend.writebacks;
+    info->backend_prefetches = stats.backend.prefetches;
+    info->backend_failed_fetches = stats.backend.failed_fetches;
+    info->backend_failed_writebacks = stats.backend.failed_writebacks;
+    return info;
+}
