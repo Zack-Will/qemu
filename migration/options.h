@@ -109,6 +109,7 @@ uint32_t migrate_cxl_prefetch_batch_pages(void);
 uint64_t migrate_cxl_dst_cache_size(void);
 bool migrate_cxl_shared_backing(void);
 bool migrate_cxl_shared_bitmap(void);
+bool migrate_cxl_rdma_sidecar(void);
 CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void);
 bool migrate_cxl_fault_resolve_copy(void);
 bool migrate_cxl_fault_resolve_region_remap(void);

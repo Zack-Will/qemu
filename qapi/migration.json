@@ -1696,7 +1696,8 @@
 #     @x-cxl-prefetch-rate,
 #     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
 #     @x-cxl-dst-cache-size,
-#     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
+#     @x-cxl-shared-backing, @x-cxl-rdma-sidecar, and
+#     @x-cxl-fault-resolve-mode are
 #     experimental.
 #
 # Since: 2.4
@@ -1757,6 +1758,8 @@
            { 'name': 'x-cxl-dst-cache-size',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-shared-backing',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-fault-resolve-mode',
              'features': [ 'unstable' ] },
@@ -2014,6 +2017,10 @@
 #     and visibility state to be observed consistently across
 #     endpoints.  Default is false.  (Since 11.0)
 #
+# @x-cxl-rdma-sidecar: Enable the experimental CXL hybrid RDMA
+#     sidecar.  The sidecar is valid only when @x-cxl-hybrid is
+#     enabled and remains off by default.  (Since 11.0)
+#
 # @x-cxl-fault-resolve-mode: Experimental destination fault
 #     resolution policy for CXL hybrid postcopy.  (Since 11.0)
 #
@@ -2035,7 +2042,8 @@
 #     @x-cxl-prefetch-rate,
 #     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
 #     @x-cxl-dst-cache-size,
-#     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
+#     @x-cxl-shared-backing, @x-cxl-rdma-sidecar, and
+#     @x-cxl-fault-resolve-mode are
 #     experimental.
 #
 # Since: 2.4
@@ -2109,6 +2117,8 @@
             '*x-cxl-dst-cache-size': {
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-shared-backing': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar': {
                 'type': 'bool', 'features': [ 'unstable' ] },
             '*x-cxl-fault-resolve-mode': {
                 'type': 'CXLHybridFaultResolveMode',

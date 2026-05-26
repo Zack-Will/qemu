@@ -108,6 +108,9 @@ static bool cxl_lookup_source_remap_region(size_t region_idx,
 static void cxl_hybrid_ctrl_publish_pages_visible(size_t first_page,
                                                   size_t npages,
                                                   uint32_t generation);
+static bool cxl_hybrid_region_page_span(size_t region_idx,
+                                        size_t *first_pagep,
+                                        size_t *npagesp);
 static void cxl_try_remap_region(size_t region_idx);
 
 #define CXL_HYBRID_FAULT_BURST_PAGES 4
@@ -540,6 +543,51 @@ static void cxl_hybrid_ctrl_publish_pages_visible(size_t first_page,
                                                   generation);
         page = region_first + region_pages;
     }
+}
+
+static bool cxl_hybrid_region_page_span(size_t region_idx,
+                                        size_t *first_pagep,
+                                        size_t *npagesp)
+{
+    uint64_t first_page;
+    uint64_t pages_per_region;
+
+    if (!first_pagep || !npagesp ||
+        !cxl_state.remap_granule ||
+        !QEMU_IS_ALIGNED(cxl_state.remap_granule, TARGET_PAGE_SIZE)) {
+        return false;
+    }
+
+    pages_per_region = cxl_state.remap_granule >> TARGET_PAGE_BITS;
+    first_page = (uint64_t)region_idx * pages_per_region;
+    if (!pages_per_region || first_page >= cxl_state.total_pages) {
+        return false;
+    }
+
+    *first_pagep = first_page;
+    *npagesp = MIN(pages_per_region, cxl_state.total_pages - first_page);
+    return *npagesp != 0;
+}
+
+bool cxl_hybrid_commit_rdma_ready_region(uint64_t region_index,
+                                         uint32_t generation)
+{
+    size_t first_page;
+    size_t npages;
+
+    if (!migrate_cxl_rdma_sidecar()) {
+        return false;
+    }
+
+    if (!cxl_hybrid_region_page_span(region_index, &first_page, &npages)) {
+        return false;
+    }
+    if (!cxl_hybrid_region_commit_rdma_ready(region_index)) {
+        return false;
+    }
+
+    cxl_hybrid_ctrl_publish_pages_visible(first_page, npages, generation);
+    return true;
 }
 
 static void cxl_hybrid_mark_page_staged(size_t page_idx)
@@ -4186,6 +4234,7 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
 
     cxl_hybrid_clear_cleanup_snapshot();
     cxl_hybrid_reset_rdma_sidecar_stats();
+    cxl_hybrid_rdma_sidecar_global_destroy();
     cxl_state.align = align;
     cxl_state.remap_granule = cxl_choose_fault_region_granule(align,
                                                               total_ram);
@@ -4196,6 +4245,11 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
     cxl_state.source_remap_regions =
         DIV_ROUND_UP(total_ram, cxl_state.source_remap_granule);
     cxl_state.hybrid_enabled = migrate_cxl_hybrid();
+    if (migrate_cxl_rdma_sidecar()) {
+        cxl_hybrid_rdma_sidecar_global_init(
+            cxl_state.total_regions,
+            DIV_ROUND_UP(cxl_state.remap_granule, TARGET_PAGE_SIZE));
+    }
     cxl_state.phase = CXL_HYBRID_PHASE_DISABLED;
     if (cxl_state.hybrid_enabled) {
         cxl_state.phase = (migrate_cxl_clean_remap_enable() ||
@@ -4366,6 +4420,7 @@ static void cxl_remap_state_cleanup(void)
     g_free(cxl_state.remapped_bmap);
     g_free(cxl_state.remapped_pages_bmap);
     g_free(cxl_state.published_page_state);
+    cxl_hybrid_rdma_sidecar_global_destroy();
     cxl_hybrid_prefault_reset();
     memset(&cxl_state, 0, sizeof(cxl_state));
     cxl_state.fd = -1;

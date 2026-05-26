@@ -1176,6 +1176,24 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertNotIn("#include \"hw/core/qdev-prop-internal.h\"",
                          options_text)
 
+    def test_rdma_sidecar_qapi_parameter_is_hybrid_gated(self):
+        qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
+        options_text = (REPO_ROOT / "migration" / "options.c").read_text()
+
+        self.assertIn("'x-cxl-rdma-sidecar'", qapi_text)
+        self.assertIn("'*x-cxl-rdma-sidecar': {", qapi_text)
+        self.assertIn("DEFINE_PROP_BOOL(\"x-cxl-rdma-sidecar\"", options_text)
+        self.assertIn("parameters.x_cxl_rdma_sidecar", options_text)
+        self.assertIn("bool migrate_cxl_rdma_sidecar(void)", options_text)
+        self.assertIn("return migrate_cxl_hybrid() &&",
+                      options_text)
+        self.assertIn("x-cxl-rdma-sidecar requires x-cxl-hybrid",
+                      options_text)
+
+        cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
+        self.assertIn("if (migrate_cxl_rdma_sidecar()) {", cxl_text)
+        self.assertIn("cxl_hybrid_rdma_sidecar_global_init(", cxl_text)
+
     def test_fault_resolve_mode_cli_passes_override_to_run_matrix(self):
         calls = []
 

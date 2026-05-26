@@ -327,11 +327,13 @@ static bool cxl_hybrid_rdma_sidecar_region_index_valid(
     const CXLHybridRDMASidecarState *state,
     uint64_t region_index)
 {
-    return state && state->ready_bmap && state->invalidated_bmap &&
-           state->republished_bmap && region_index < state->total_regions;
+    return state && state->owned_bmap && state->ready_bmap &&
+           state->invalidated_bmap && state->republished_bmap &&
+           state->committed_bmap && region_index < state->total_regions;
 }
 
 static CXLHybridRDMASidecarStats cxl_hybrid_rdma_sidecar_stats;
+static CXLHybridRDMASidecarState cxl_hybrid_rdma_sidecar_state;
 
 void cxl_hybrid_rdma_sidecar_state_init_for_test(
     CXLHybridRDMASidecarState *state,
@@ -346,9 +348,11 @@ void cxl_hybrid_rdma_sidecar_state_init_for_test(
     state->total_regions = total_regions;
     state->pages_per_region = pages_per_region;
     if (total_regions) {
+        state->owned_bmap = bitmap_new(total_regions);
         state->ready_bmap = bitmap_new(total_regions);
         state->invalidated_bmap = bitmap_new(total_regions);
         state->republished_bmap = bitmap_new(total_regions);
+        state->committed_bmap = bitmap_new(total_regions);
     }
 }
 
@@ -360,16 +364,56 @@ void cxl_hybrid_rdma_sidecar_state_destroy_for_test(
     }
 
     g_free(state->ready_bmap);
+    g_free(state->owned_bmap);
     g_free(state->invalidated_bmap);
     g_free(state->republished_bmap);
+    g_free(state->committed_bmap);
     memset(state, 0, sizeof(*state));
+}
+
+bool cxl_hybrid_rdma_sidecar_region_is_rdma_owned(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->owned_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_try_own_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        test_bit(region_index, state->invalidated_bmap) ||
+        test_bit(region_index, state->committed_bmap)) {
+        return false;
+    }
+
+    return !test_and_set_bit(region_index, state->owned_bmap);
+}
+
+void cxl_hybrid_rdma_sidecar_drop_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return;
+    }
+
+    clear_bit(region_index, state->owned_bmap);
+    clear_bit(region_index, state->ready_bmap);
 }
 
 bool cxl_hybrid_rdma_sidecar_mark_ready(
     CXLHybridRDMASidecarState *state,
     uint64_t region_index)
 {
-    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        !test_bit(region_index, state->owned_bmap) ||
+        test_bit(region_index, state->invalidated_bmap)) {
         return false;
     }
 
@@ -397,7 +441,48 @@ bool cxl_hybrid_rdma_sidecar_invalidate_ready(
 
     state->stats.rdma_invalidated_regions++;
     state->stats.rdma_ready_pages_lost += state->pages_per_region;
+    clear_bit(region_index, state->ready_bmap);
+    clear_bit(region_index, state->owned_bmap);
     return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_region_ready_current(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->ready_bmap) &&
+           !test_bit(region_index, state->invalidated_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_commit_ready_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_ready_current(state, region_index)) {
+        return false;
+    }
+
+    if (test_and_set_bit(region_index, state->committed_bmap)) {
+        return false;
+    }
+
+    clear_bit(region_index, state->owned_bmap);
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_region_committed(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->committed_bmap);
 }
 
 bool cxl_hybrid_rdma_sidecar_note_cxl_republish(
@@ -485,6 +570,76 @@ void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats)
     stats->cxl_republish_pages_due_to_rdma_invalidate =
         qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
                      cxl_republish_pages_due_to_rdma_invalidate);
+}
+
+void cxl_hybrid_rdma_sidecar_global_init(uint64_t total_regions,
+                                         uint64_t pages_per_region)
+{
+    cxl_hybrid_rdma_sidecar_state_init_for_test(&cxl_hybrid_rdma_sidecar_state,
+                                                total_regions,
+                                                pages_per_region);
+}
+
+void cxl_hybrid_rdma_sidecar_global_destroy(void)
+{
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(
+        &cxl_hybrid_rdma_sidecar_state);
+}
+
+bool cxl_hybrid_region_is_rdma_owned(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_region_is_rdma_owned(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_try_own_rdma(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_try_own_region(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+void cxl_hybrid_region_drop_rdma(uint64_t region_index)
+{
+    cxl_hybrid_rdma_sidecar_drop_region(&cxl_hybrid_rdma_sidecar_state,
+                                        region_index);
+}
+
+void cxl_hybrid_mark_region_rdma_ready(uint64_t region_index)
+{
+    uint64_t pages;
+
+    if (!cxl_hybrid_rdma_sidecar_mark_ready(&cxl_hybrid_rdma_sidecar_state,
+                                            region_index)) {
+        return;
+    }
+
+    pages = cxl_hybrid_rdma_sidecar_state.pages_per_region;
+    cxl_hybrid_account_rdma_ready(region_index, pages);
+}
+
+void cxl_hybrid_invalidate_region_rdma_ready(uint64_t region_index)
+{
+    uint64_t pages;
+
+    if (!cxl_hybrid_rdma_sidecar_invalidate_ready(
+            &cxl_hybrid_rdma_sidecar_state, region_index)) {
+        return;
+    }
+
+    pages = cxl_hybrid_rdma_sidecar_state.pages_per_region;
+    cxl_hybrid_account_rdma_invalidate(region_index, pages);
+}
+
+bool cxl_hybrid_region_commit_rdma_ready(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_commit_ready_region(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_rdma_brake_fallback_enabled(bool rdma_sidecar_enabled,
+                                            bool brake_enabled)
+{
+    return rdma_sidecar_enabled && brake_enabled;
 }
 
 void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,

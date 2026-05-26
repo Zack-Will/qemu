@@ -89,6 +89,7 @@
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_BATCH_PAGES 0
 #define DEFAULT_MIGRATE_X_CXL_DST_CACHE_SIZE 0
 #define DEFAULT_MIGRATE_X_CXL_SHARED_BACKING false
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR false
 #define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
     CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP
 
@@ -260,6 +261,9 @@ const Property migration_properties[] = {
     DEFINE_PROP_BOOL("x-cxl-shared-backing", MigrationState,
                       parameters.x_cxl_shared_backing,
                       DEFAULT_MIGRATE_X_CXL_SHARED_BACKING),
+    DEFINE_PROP_BOOL("x-cxl-rdma-sidecar", MigrationState,
+                      parameters.x_cxl_rdma_sidecar,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR),
     DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE("x-cxl-fault-resolve-mode",
                       MigrationState,
                       parameters.x_cxl_fault_resolve_mode,
@@ -1125,6 +1129,13 @@ bool migrate_cxl_shared_bitmap(void)
     return migrate_cxl_shared_backing();
 }
 
+bool migrate_cxl_rdma_sidecar(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return migrate_cxl_hybrid() && s->parameters.x_cxl_rdma_sidecar;
+}
+
 CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1366,6 +1377,7 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_prefetch_batch_pages,
         &p->has_x_cxl_dst_cache_size,
         &p->has_x_cxl_shared_backing,
+        &p->has_x_cxl_rdma_sidecar,
         &p->has_x_cxl_fault_resolve_mode,
         &p->has_cpr_exec_command,
     };
@@ -1408,6 +1420,8 @@ void migrate_params_init(MigrationParameters *params)
         DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_THROTTLE_US;
     params->x_cxl_clean_remap_prefault_mode =
         DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_PREFAULT_MODE;
+    params->x_cxl_rdma_sidecar =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR;
     params->x_cxl_fault_resolve_mode =
         DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
     migrate_mark_all_params_present(params);
@@ -1618,6 +1632,11 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->x_cxl_rdma_sidecar && !migrate_cxl_hybrid()) {
+        error_setg(errp, "x-cxl-rdma-sidecar requires x-cxl-hybrid");
+        return false;
+    }
+
     return true;
 }
 
@@ -1813,6 +1832,9 @@ static void migrate_params_test_apply(MigrationParameters *params,
     }
     if (params->has_x_cxl_shared_backing) {
         dest->x_cxl_shared_backing = params->x_cxl_shared_backing;
+    }
+    if (params->has_x_cxl_rdma_sidecar) {
+        dest->x_cxl_rdma_sidecar = params->x_cxl_rdma_sidecar;
     }
     if (params->has_x_cxl_fault_resolve_mode) {
         dest->x_cxl_fault_resolve_mode = params->x_cxl_fault_resolve_mode;
@@ -2014,6 +2036,9 @@ static void migrate_params_apply(MigrationParameters *params)
     }
     if (params->has_x_cxl_shared_backing) {
         s->parameters.x_cxl_shared_backing = params->x_cxl_shared_backing;
+    }
+    if (params->has_x_cxl_rdma_sidecar) {
+        s->parameters.x_cxl_rdma_sidecar = params->x_cxl_rdma_sidecar;
     }
     if (params->has_x_cxl_fault_resolve_mode) {
         s->parameters.x_cxl_fault_resolve_mode =
