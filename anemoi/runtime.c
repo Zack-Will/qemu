@@ -258,13 +258,14 @@ static int anemoi_runtime_create_core(AnemoiRuntime *runtime, Error **errp)
         .guest_pages = runtime->guest_pages,
     };
 
-    runtime->cache = anemoi_cache_new(&cache_cfg, errp);
-    if (!runtime->cache) {
+    runtime->rmap = anemoi_rmap_new(runtime->guest_pages, true, errp);
+    if (!runtime->rmap) {
         return -1;
     }
 
-    runtime->rmap = anemoi_rmap_new(runtime->guest_pages, true, errp);
-    if (!runtime->rmap) {
+    cache_cfg.rmap = runtime->rmap;
+    runtime->cache = anemoi_cache_new(&cache_cfg, errp);
+    if (!runtime->cache) {
         return -1;
     }
 

@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "anemoi/cache.h"
+#include "anemoi/rmap.h"
 #include "qemu/madvise.h"
 #include "qemu/thread.h"
 
@@ -30,11 +31,34 @@ struct AnemoiCache {
     uint32_t nr_regions;
     bool uffd_wp_enabled;
     AnemoiBackend *backend;
+    AnemoiRMap *rmap;
     AnemoiCacheSet *sets;
     int uffd_fd;
     uint64_t clock;
     AnemoiCacheStats stats;
 };
+
+static void anemoi_cache_update_rmap_dirty(AnemoiCache *cache,
+                                           uint64_t gfn, bool dirty)
+{
+    if (!cache->rmap) {
+        return;
+    }
+    if (dirty) {
+        anemoi_rmap_clear(cache->rmap, gfn);
+    } else {
+        anemoi_rmap_set(cache->rmap, gfn);
+    }
+}
+
+static void anemoi_cache_set_line_dirty(AnemoiCache *cache,
+                                        AnemoiCacheLine *line, bool dirty)
+{
+    if (line->dirty != dirty) {
+        line->dirty = dirty;
+    }
+    anemoi_cache_update_rmap_dirty(cache, line->gfn, dirty);
+}
 
 static uint64_t anemoi_cache_next_clock(AnemoiCache *cache)
 {
@@ -113,7 +137,7 @@ static int anemoi_cache_writeback_line(AnemoiCache *cache,
         return -1;
     }
     cache->stats.dirty_writebacks++;
-    line->dirty = false;
+    anemoi_cache_set_line_dirty(cache, line, false);
     return 0;
 }
 
@@ -334,6 +358,7 @@ AnemoiCache *anemoi_cache_new(const AnemoiCacheConfig *cfg, Error **errp)
     cache->local_cache_pages = cfg->local_cache_pages;
     cache->num_sets = num_sets;
     cache->backend = cfg->backend;
+    cache->rmap = cfg->rmap;
     cache->uffd_fd = -1;
 
     if (anemoi_cache_copy_regions(cache, cfg, errp) != 0) {
@@ -416,7 +441,9 @@ int anemoi_cache_install_page(AnemoiCache *cache, uint64_t gfn, void *hva_4k,
     way = anemoi_cache_lookup_way(set, gfn);
     if (way >= 0) {
         line = &set->ways[way];
-        line->dirty |= is_write;
+        if (is_write) {
+            anemoi_cache_set_line_dirty(cache, line, true);
+        }
         line->hva = hva_4k;
         anemoi_cache_bump_lruk(cache, line);
         cache->stats.hits++;
@@ -459,33 +486,32 @@ int anemoi_cache_install_page(AnemoiCache *cache, uint64_t gfn, void *hva_4k,
         cache->stats.evictions++;
     }
 
+    /* Once the old HVA is discarded, never leave stale-valid metadata behind. */
+    memset(line, 0, sizeof(*line));
+
     landing = g_malloc(ANEMOI_PAGE_SIZE);
     if (anemoi_backend_fetch(cache->backend, cache->vmid, gfn, landing,
                              errp) != 0) {
-        line->pinned = false;
         cache->stats.install_errors++;
         qemu_mutex_unlock(&set->lock);
         return -1;
     }
     if (anemoi_cache_copy_to_hva(cache, hva_4k, landing, errp) != 0) {
-        line->pinned = false;
         cache->stats.install_errors++;
         qemu_mutex_unlock(&set->lock);
         return -1;
     }
     if (!is_write &&
         anemoi_cache_protect_hva(cache, hva_4k, errp) != 0) {
-        line->pinned = false;
         cache->stats.install_errors++;
         qemu_mutex_unlock(&set->lock);
         return -1;
     }
 
-    memset(line, 0, sizeof(*line));
     line->gfn = gfn;
     line->valid = true;
-    line->dirty = is_write;
     line->hva = hva_4k;
+    anemoi_cache_set_line_dirty(cache, line, is_write);
     anemoi_cache_bump_lruk(cache, line);
     qemu_mutex_unlock(&set->lock);
     return 0;
@@ -524,8 +550,10 @@ int anemoi_cache_mark_dirty(AnemoiCache *cache, uint64_t gfn, bool dirty,
     qemu_mutex_lock(&set->lock);
     way = anemoi_cache_lookup_way(set, gfn);
     if (way >= 0) {
-        set->ways[way].dirty = dirty;
+        anemoi_cache_set_line_dirty(cache, &set->ways[way], dirty);
         anemoi_cache_bump_lruk(cache, &set->ways[way]);
+    } else {
+        anemoi_cache_update_rmap_dirty(cache, gfn, dirty);
     }
     qemu_mutex_unlock(&set->lock);
     return 0;

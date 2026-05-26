@@ -10,6 +10,7 @@
 #include "qapi/error.h"
 
 typedef struct AnemoiCache AnemoiCache;
+typedef struct AnemoiRMap AnemoiRMap;
 
 typedef struct AnemoiCacheRegion {
     uintptr_t hva_base;
@@ -26,6 +27,7 @@ typedef struct AnemoiCacheConfig {
     const AnemoiCacheRegion *regions;
     uint32_t nr_regions;
     AnemoiBackend *backend;
+    AnemoiRMap *rmap;
 } AnemoiCacheConfig;
 
 typedef struct AnemoiCacheStats {

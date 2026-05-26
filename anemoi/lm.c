@@ -50,7 +50,6 @@ int anemoi_lm_mark_dirty_range(AnemoiLM *lm, uint64_t start_gfn,
         return -1;
     }
 
-    anemoi_rmap_clear_range(lm->rmap, start_gfn, nr_pages);
     for (uint64_t gfn = start_gfn; gfn < start_gfn + nr_pages; gfn++) {
         if (anemoi_cache_mark_dirty(lm->cache, gfn, true, errp) != 0) {
             return -1;
