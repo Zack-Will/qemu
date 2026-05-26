@@ -61,6 +61,7 @@ uint64_t anemoi_cache_guest_pages(const AnemoiCache *cache);
 uint64_t anemoi_cache_local_pages(const AnemoiCache *cache);
 const AnemoiCacheStats *anemoi_cache_stats(const AnemoiCache *cache);
 void anemoi_cache_attach_uffd(AnemoiCache *cache, int uffd_fd);
+int anemoi_cache_reset_rmap_clean(AnemoiCache *cache, Error **errp);
 
 int anemoi_cache_install_page(AnemoiCache *cache, uint64_t gfn, void *hva_4k,
                               bool is_write, Error **errp);

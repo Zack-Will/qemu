@@ -41,14 +41,10 @@ struct AnemoiCache {
 static void anemoi_cache_update_rmap_dirty(AnemoiCache *cache,
                                            uint64_t gfn, bool dirty)
 {
-    if (!cache->rmap) {
+    if (!dirty || !cache->rmap) {
         return;
     }
-    if (dirty) {
-        anemoi_rmap_clear(cache->rmap, gfn);
-    } else {
-        anemoi_rmap_set(cache->rmap, gfn);
-    }
+    anemoi_rmap_clear(cache->rmap, gfn);
 }
 
 static void anemoi_cache_set_line_dirty(AnemoiCache *cache,
@@ -417,6 +413,21 @@ void anemoi_cache_attach_uffd(AnemoiCache *cache, int uffd_fd)
         cache->uffd_fd = uffd_fd;
         cache->uffd_wp_enabled = uffd_fd >= 0;
     }
+}
+
+int anemoi_cache_reset_rmap_clean(AnemoiCache *cache, Error **errp)
+{
+    if (!cache) {
+        error_setg(errp, "AnemoiCache is not initialized");
+        return -1;
+    }
+    if (!cache->rmap) {
+        error_setg(errp, "AnemoiCache has no rmap to reset");
+        return -1;
+    }
+
+    anemoi_rmap_fill(cache->rmap);
+    return 0;
 }
 
 int anemoi_cache_install_page(AnemoiCache *cache, uint64_t gfn, void *hva_4k,
