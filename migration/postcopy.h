@@ -10,6 +10,7 @@
 #define QEMU_MIGRATION_POSTCOPY_H
 
 #include "migration/migration.h"
+#include "migration/cxl.h"
 
 typedef enum MigrationPostcopyCXLRAMStreamWriteAction {
     MIGRATION_POSTCOPY_CXL_RAM_STREAM_ALLOW,
@@ -44,5 +45,9 @@ migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
                                                bool page_visible);
 MigrationPostcopyIncomingListenPlan
 migration_postcopy_incoming_listen_plan(PostcopyState old_state);
+bool migration_postcopy_cxl_should_drain_source_remaps(
+    bool hybrid_mode,
+    CXLHybridPhase phase,
+    bool clean_remap_enabled);
 
 #endif /* QEMU_MIGRATION_POSTCOPY_H */

@@ -328,8 +328,9 @@ static bool cxl_hybrid_rdma_sidecar_region_index_valid(
     uint64_t region_index)
 {
     return state && state->owned_bmap && state->ready_bmap &&
-           state->invalidated_bmap && state->republished_bmap &&
-           state->committed_bmap && region_index < state->total_regions;
+           state->cxl_owned_bmap && state->invalidated_bmap &&
+           state->republished_bmap && state->committed_bmap &&
+           region_index < state->total_regions;
 }
 
 static CXLHybridRDMASidecarStats cxl_hybrid_rdma_sidecar_stats;
@@ -349,6 +350,7 @@ void cxl_hybrid_rdma_sidecar_state_init_for_test(
     state->pages_per_region = pages_per_region;
     if (total_regions) {
         state->owned_bmap = bitmap_new(total_regions);
+        state->cxl_owned_bmap = bitmap_new(total_regions);
         state->ready_bmap = bitmap_new(total_regions);
         state->invalidated_bmap = bitmap_new(total_regions);
         state->republished_bmap = bitmap_new(total_regions);
@@ -365,6 +367,7 @@ void cxl_hybrid_rdma_sidecar_state_destroy_for_test(
 
     g_free(state->ready_bmap);
     g_free(state->owned_bmap);
+    g_free(state->cxl_owned_bmap);
     g_free(state->invalidated_bmap);
     g_free(state->republished_bmap);
     g_free(state->committed_bmap);
@@ -388,11 +391,53 @@ bool cxl_hybrid_rdma_sidecar_try_own_region(
 {
     if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
         test_bit(region_index, state->invalidated_bmap) ||
+        test_bit(region_index, state->cxl_owned_bmap) ||
         test_bit(region_index, state->committed_bmap)) {
         return false;
     }
 
     return !test_and_set_bit(region_index, state->owned_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_try_own_cxl_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        test_bit(region_index, state->owned_bmap) ||
+        test_bit(region_index, state->committed_bmap)) {
+        return false;
+    }
+
+    if (test_bit(region_index, state->cxl_owned_bmap)) {
+        return true;
+    }
+
+    set_bit(region_index, state->cxl_owned_bmap);
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_region_is_cxl_owned(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->cxl_owned_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return !test_bit(region_index, state->owned_bmap) &&
+           !test_bit(region_index, state->committed_bmap);
 }
 
 void cxl_hybrid_rdma_sidecar_drop_region(
@@ -443,6 +488,7 @@ bool cxl_hybrid_rdma_sidecar_invalidate_ready(
     state->stats.rdma_ready_pages_lost += state->pages_per_region;
     clear_bit(region_index, state->ready_bmap);
     clear_bit(region_index, state->owned_bmap);
+    set_bit(region_index, state->cxl_owned_bmap);
     return true;
 }
 
@@ -502,6 +548,41 @@ bool cxl_hybrid_rdma_sidecar_note_cxl_republish(
     state->stats.cxl_republish_pages_due_to_rdma_invalidate +=
         state->pages_per_region;
     return true;
+}
+
+uint64_t cxl_hybrid_rdma_sidecar_invalidate_dirty_ready_regions(
+    CXLHybridRDMASidecarState *state,
+    const unsigned long *dirty_bmap,
+    uint64_t dirty_pages)
+{
+    uint64_t invalidated = 0;
+    unsigned long region_index;
+
+    if (!state || !dirty_bmap || !state->ready_bmap ||
+        !state->pages_per_region || !dirty_pages) {
+        return 0;
+    }
+
+    region_index = find_first_bit(state->ready_bmap, state->total_regions);
+    while (region_index < state->total_regions) {
+        uint64_t first_page = (uint64_t)region_index * state->pages_per_region;
+        uint64_t npages;
+
+        if (first_page >= dirty_pages) {
+            break;
+        }
+
+        npages = MIN(state->pages_per_region, dirty_pages - first_page);
+        if (bitmap_count_one_with_offset(dirty_bmap, first_page, npages) &&
+            cxl_hybrid_rdma_sidecar_invalidate_ready(state, region_index)) {
+            invalidated++;
+        }
+
+        region_index = find_next_bit(state->ready_bmap, state->total_regions,
+                                     region_index + 1);
+    }
+
+    return invalidated;
 }
 
 void cxl_hybrid_rdma_sidecar_get_stats(
@@ -598,6 +679,32 @@ bool cxl_hybrid_region_try_own_rdma(uint64_t region_index)
         &cxl_hybrid_rdma_sidecar_state, region_index);
 }
 
+bool cxl_hybrid_region_try_own_cxl(uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_state.total_regions) {
+        return true;
+    }
+
+    return cxl_hybrid_rdma_sidecar_try_own_cxl_region(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_is_cxl_owned(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_region_is_cxl_owned(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_cxl_bulk_allowed(uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_state.total_regions) {
+        return true;
+    }
+
+    return cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
 void cxl_hybrid_region_drop_rdma(uint64_t region_index)
 {
     cxl_hybrid_rdma_sidecar_drop_region(&cxl_hybrid_rdma_sidecar_state,
@@ -634,6 +741,24 @@ bool cxl_hybrid_region_commit_rdma_ready(uint64_t region_index)
 {
     return cxl_hybrid_rdma_sidecar_commit_ready_region(
         &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_note_cxl_republish(uint64_t region_index)
+{
+    if (cxl_hybrid_rdma_sidecar_note_cxl_republish(
+            &cxl_hybrid_rdma_sidecar_state, region_index)) {
+        return true;
+    }
+
+    if (cxl_hybrid_rdma_sidecar_region_index_valid(
+            &cxl_hybrid_rdma_sidecar_state, region_index) &&
+        !test_bit(region_index,
+                  cxl_hybrid_rdma_sidecar_state.invalidated_bmap)) {
+        return cxl_hybrid_rdma_sidecar_try_own_cxl_region(
+            &cxl_hybrid_rdma_sidecar_state, region_index);
+    }
+
+    return false;
 }
 
 bool cxl_hybrid_rdma_brake_fallback_enabled(bool rdma_sidecar_enabled,

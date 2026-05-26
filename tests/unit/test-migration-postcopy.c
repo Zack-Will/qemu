@@ -125,6 +125,22 @@ static void test_incoming_listen_rejects_wrong_state(void)
     g_assert_false(plan.valid);
 }
 
+static void test_no_brake_switch_does_not_drain_source_remaps(void)
+{
+    g_assert_false(migration_postcopy_cxl_should_drain_source_remaps(
+                       true, CXL_HYBRID_PHASE_PRECOPY_BULK, false));
+    g_assert_false(migration_postcopy_cxl_should_drain_source_remaps(
+                       true, CXL_HYBRID_PHASE_PRECOPY_BULK, true));
+}
+
+static void test_brake_switch_still_drains_source_remaps(void)
+{
+    g_assert_true(migration_postcopy_cxl_should_drain_source_remaps(
+                      true, CXL_HYBRID_PHASE_PRECOPY_BRAKE, false));
+    g_assert_true(migration_postcopy_cxl_should_drain_source_remaps(
+                      true, CXL_HYBRID_PHASE_PRECOPY_BRAKE, true));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -160,5 +176,9 @@ int main(int argc, char **argv)
                     test_incoming_listen_discard_skips_prepare);
     g_test_add_func("/migration/postcopy/incoming-listen-rejects-wrong-state",
                     test_incoming_listen_rejects_wrong_state);
+    g_test_add_func("/migration/postcopy/no-brake-switch-does-not-drain-source-remaps",
+                    test_no_brake_switch_does_not_drain_source_remaps);
+    g_test_add_func("/migration/postcopy/brake-switch-drains-source-remaps",
+                    test_brake_switch_still_drains_source_remaps);
     return g_test_run();
 }

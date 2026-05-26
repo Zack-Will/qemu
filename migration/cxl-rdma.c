@@ -54,6 +54,43 @@ bool cxl_rdma_sidecar_submit_shadow_region(uint64_t region_index)
     return true;
 }
 
+bool cxl_rdma_sidecar_submit_region(uint64_t region_index,
+                                    const void *src,
+                                    void *dst)
+{
+    if (!src || !dst) {
+        return false;
+    }
+
+    if (!cxl_rdma_sidecar_submit_shadow_region(region_index)) {
+        return false;
+    }
+
+    memcpy(dst, src, cxl_rdma_sidecar.bytes_per_region);
+    return true;
+}
+
+bool cxl_rdma_sidecar_complete_owned_region(uint64_t region_index,
+                                            const void *src,
+                                            void *dst)
+{
+    if (!cxl_rdma_sidecar.initialized || !src || !dst ||
+        region_index >= cxl_rdma_sidecar.total_regions ||
+        !cxl_hybrid_region_is_rdma_owned(region_index)) {
+        return false;
+    }
+
+    qatomic_inc(&cxl_rdma_sidecar.stats.rdma_bulk_regions);
+    qatomic_add(&cxl_rdma_sidecar.stats.rdma_bulk_bytes,
+                cxl_rdma_sidecar.bytes_per_region);
+    trace_cxl_hybrid_rdma_bulk_region(region_index,
+                                      cxl_rdma_sidecar.bytes_per_region);
+
+    memcpy(dst, src, cxl_rdma_sidecar.bytes_per_region);
+    cxl_hybrid_mark_region_rdma_ready(region_index);
+    return true;
+}
+
 void cxl_rdma_sidecar_get_stats(CXLHybridRDMASidecarBulkStats *stats)
 {
     if (!stats) {

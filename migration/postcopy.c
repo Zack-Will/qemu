@@ -73,3 +73,12 @@ migration_postcopy_incoming_listen_plan(PostcopyState old_state)
 
     return plan;
 }
+
+bool migration_postcopy_cxl_should_drain_source_remaps(
+    bool hybrid_mode,
+    CXLHybridPhase phase,
+    bool clean_remap_enabled)
+{
+    return hybrid_mode &&
+           phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE;
+}

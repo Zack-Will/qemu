@@ -18,6 +18,12 @@ void cxl_rdma_sidecar_init(uint64_t total_regions,
                            uint64_t bytes_per_region,
                            uint64_t pages_per_region);
 void cxl_rdma_sidecar_destroy(void);
+bool cxl_rdma_sidecar_submit_region(uint64_t region_index,
+                                    const void *src,
+                                    void *dst);
+bool cxl_rdma_sidecar_complete_owned_region(uint64_t region_index,
+                                            const void *src,
+                                            void *dst);
 bool cxl_rdma_sidecar_submit_shadow_region(uint64_t region_index);
 void cxl_rdma_sidecar_get_stats(CXLHybridRDMASidecarBulkStats *stats);
 

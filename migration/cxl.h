@@ -189,6 +189,7 @@ typedef struct CXLHybridRDMASidecarStats {
 
 typedef struct CXLHybridRDMASidecarState {
     unsigned long *owned_bmap;
+    unsigned long *cxl_owned_bmap;
     unsigned long *ready_bmap;
     unsigned long *invalidated_bmap;
     unsigned long *republished_bmap;
@@ -354,6 +355,15 @@ bool cxl_hybrid_rdma_sidecar_region_is_rdma_owned(
 bool cxl_hybrid_rdma_sidecar_try_own_region(
     CXLHybridRDMASidecarState *state,
     uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_try_own_cxl_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_region_is_cxl_owned(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
 void cxl_hybrid_rdma_sidecar_drop_region(
     CXLHybridRDMASidecarState *state,
     uint64_t region_index);
@@ -375,6 +385,10 @@ bool cxl_hybrid_rdma_sidecar_region_committed(
 bool cxl_hybrid_rdma_sidecar_note_cxl_republish(
     CXLHybridRDMASidecarState *state,
     uint64_t region_index);
+uint64_t cxl_hybrid_rdma_sidecar_invalidate_dirty_ready_regions(
+    CXLHybridRDMASidecarState *state,
+    const unsigned long *dirty_bmap,
+    uint64_t dirty_pages);
 void cxl_hybrid_rdma_sidecar_get_stats(
     const CXLHybridRDMASidecarState *state,
     CXLHybridRDMASidecarStats *stats);
@@ -392,12 +406,28 @@ void cxl_hybrid_account_rdma_cxl_republish(uint64_t region_index,
 void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats);
 bool cxl_hybrid_region_is_rdma_owned(uint64_t region_index);
 bool cxl_hybrid_region_try_own_rdma(uint64_t region_index);
+bool cxl_hybrid_region_try_own_cxl(uint64_t region_index);
+bool cxl_hybrid_region_is_cxl_owned(uint64_t region_index);
+bool cxl_hybrid_region_cxl_bulk_allowed(uint64_t region_index);
 void cxl_hybrid_region_drop_rdma(uint64_t region_index);
 void cxl_hybrid_mark_region_rdma_ready(uint64_t region_index);
 void cxl_hybrid_invalidate_region_rdma_ready(uint64_t region_index);
 bool cxl_hybrid_region_commit_rdma_ready(uint64_t region_index);
+bool cxl_hybrid_region_note_cxl_republish(uint64_t region_index);
 bool cxl_hybrid_commit_rdma_ready_region(uint64_t region_index,
                                          uint32_t generation);
+bool cxl_hybrid_region_can_use_rdma_bulk(RAMBlock *block,
+                                         ram_addr_t block_offset);
+bool cxl_hybrid_region_try_own_rdma_bulk(RAMBlock *block,
+                                         ram_addr_t block_offset);
+bool cxl_hybrid_complete_rdma_bulk_region(RAMBlock *block,
+                                          ram_addr_t block_offset);
+bool cxl_hybrid_page_in_rdma_owned_region(RAMBlock *block,
+                                          ram_addr_t block_offset);
+void cxl_hybrid_invalidate_rdma_ready_region_for_page(RAMBlock *block,
+                                                      ram_addr_t block_offset);
+void cxl_hybrid_sync_rdma_dirty_for_postcopy(void);
+void cxl_hybrid_commit_rdma_ready_regions_for_postcopy(void);
 bool cxl_hybrid_rdma_brake_fallback_enabled(bool rdma_sidecar_enabled,
                                             bool brake_enabled);
 

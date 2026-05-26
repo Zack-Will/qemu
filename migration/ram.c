@@ -1653,6 +1653,13 @@ static void ram_cxl_hybrid_end_region_write(bool started)
     }
 }
 
+static bool ram_cxl_hybrid_rdma_owned_page(RAMBlock *block,
+                                           ram_addr_t offset)
+{
+    return cxl_use_mapped_ram_backing() &&
+           cxl_hybrid_page_in_rdma_owned_region(block, offset);
+}
+
 int ram_cxl_hybrid_walk_unsent(MigrationState *s,
                                int (*cb)(MigrationState *s,
                                          RAMBlock *block,
@@ -1729,6 +1736,10 @@ static int save_zero_page(RAMState *rs, PageSearchStatus *pss,
         bool cxl_region_write_started = false;
         RAMCXLHybridRegionWriteStatus cxl_region_write_status;
 
+        if (ram_cxl_hybrid_rdma_owned_page(pss->block, offset)) {
+            set_bit_atomic(offset >> TARGET_PAGE_BITS, pss->block->file_bmap);
+            return 1;
+        }
         ram_cxl_hybrid_pause_for_fault_pressure(&pss->cxl_publish_span, file);
         cxl_region_write_status = ram_cxl_hybrid_begin_region_write(
             pss->block, offset, &cxl_region_write_started);
@@ -1830,6 +1841,10 @@ static int save_normal_page(PageSearchStatus *pss, RAMBlock *block,
         bool cxl_region_write_started = false;
         RAMCXLHybridRegionWriteStatus cxl_region_write_status;
 
+        if (ram_cxl_hybrid_rdma_owned_page(block, offset)) {
+            set_bit_atomic(offset >> TARGET_PAGE_BITS, block->file_bmap);
+            return 1;
+        }
         ram_cxl_hybrid_pause_for_fault_pressure(&pss->cxl_publish_span, file);
         cxl_region_write_status = ram_cxl_hybrid_begin_region_write(
             block, offset, &cxl_region_write_started);
@@ -2832,6 +2847,8 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     size_t pagesize_bits =
         qemu_ram_pagesize(pss->block) >> TARGET_PAGE_BITS;
     unsigned long start_page = pss->page;
+    unsigned long rdma_start_page = ULONG_MAX;
+    unsigned long rdma_end_page = 0;
     int res;
     uint64_t op_start_ns = 0;
 
@@ -2842,6 +2859,27 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
 
     /* Update host page boundary information */
     pss_host_page_prepare(pss);
+
+    if (cxl_use_mapped_ram_backing()) {
+        ram_addr_t region_len = cxl_hybrid_fault_region_granule();
+        ram_addr_t offset = ((ram_addr_t)pss->page) << TARGET_PAGE_BITS;
+        ram_addr_t region_offset;
+
+        if (region_len &&
+            cxl_hybrid_region_can_use_rdma_bulk(pss->block, offset)) {
+            region_offset = QEMU_ALIGN_DOWN(offset, region_len);
+            if (region_offset + region_len <= pss->block->used_length &&
+                cxl_hybrid_region_try_own_rdma_bulk(pss->block,
+                                                    region_offset)) {
+                rdma_start_page = region_offset >> TARGET_PAGE_BITS;
+                rdma_end_page = rdma_start_page +
+                                (region_len >> TARGET_PAGE_BITS);
+                pss->page = rdma_start_page;
+                pss->host_page_start = rdma_start_page;
+                pss->host_page_end = rdma_end_page;
+            }
+        }
+    }
 
     do {
         if (rs->iter_profile_scan_enabled) {
@@ -2855,6 +2893,9 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
 
         /* Check the pages is dirty and if it is send it */
         if (page_dirty) {
+            cxl_hybrid_invalidate_rdma_ready_region_for_page(
+                pss->block,
+                ((ram_addr_t)pss->page) << TARGET_PAGE_BITS);
             /*
              * Properly yield the lock only in postcopy preempt mode
              * because both migration thread and rp-return thread can
@@ -2896,6 +2937,11 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
 
         pss_find_next_dirty(pss);
     } while (pss_within_range(pss));
+
+    if (rdma_start_page != ULONG_MAX) {
+        cxl_hybrid_complete_rdma_bulk_region(
+            pss->block, (ram_addr_t)rdma_start_page << TARGET_PAGE_BITS);
+    }
 
     pss_host_page_finish(pss);
 
@@ -3974,6 +4020,10 @@ static void ram_save_file_bmap(QEMUFile *f)
 
 void ramblock_set_file_bmap_atomic(RAMBlock *block, ram_addr_t offset, bool set)
 {
+    if (set && ram_cxl_hybrid_rdma_owned_page(block, offset)) {
+        return;
+    }
+
     if (set) {
         set_bit_atomic(offset >> TARGET_PAGE_BITS, block->file_bmap);
     } else {

@@ -2951,9 +2951,13 @@ static int postcopy_start(MigrationState *ms, Error **errp)
      */
     if (migrate_postcopy_ram()) {
         ram_postcopy_send_discard_bitmap(ms);
+        if (migrate_cxl_hybrid()) {
+            cxl_hybrid_sync_rdma_dirty_for_postcopy();
+        }
     }
 
     if (migrate_cxl_hybrid()) {
+        cxl_hybrid_commit_rdma_ready_regions_for_postcopy();
         ret = cxl_hybrid_publish_staged_pages_for_postcopy(errp);
         if (ret) {
             error_prepend(errp,
@@ -3839,8 +3843,9 @@ static MigIterateState migration_iteration_run(MigrationState *s)
     if (complete_ready &&
         !migration_cxl_hybrid_should_defer_precopy_completion(complete_ready)) {
         if (!in_postcopy) {
-            if (migrate_cxl_hybrid() &&
-                cxl_hybrid_phase() == CXL_HYBRID_PHASE_PRECOPY_BRAKE) {
+            if (migration_postcopy_cxl_should_drain_source_remaps(
+                    migrate_cxl_hybrid(), cxl_hybrid_phase(),
+                    cxl_hybrid_clean_remap_enabled())) {
                 migration_trace_precopy_timeline(s, "drain-remaps-begin",
                                                  pending_size, must_precopy,
                                                  can_postcopy);
@@ -3888,8 +3893,10 @@ static MigIterateState migration_iteration_run(MigrationState *s)
         migration_trace_precopy_timeline(s, "iterate-end", pending_size,
                                          must_precopy, can_postcopy);
     }
-    if (!in_postcopy && migrate_cxl_hybrid() &&
-        cxl_hybrid_phase() == CXL_HYBRID_PHASE_PRECOPY_BRAKE) {
+    if (!in_postcopy &&
+        migration_postcopy_cxl_should_drain_source_remaps(
+            migrate_cxl_hybrid(), cxl_hybrid_phase(),
+            cxl_hybrid_clean_remap_enabled())) {
         migration_trace_precopy_timeline(s, "drain-remaps-begin",
                                          pending_size, must_precopy,
                                          can_postcopy);
