@@ -43,9 +43,15 @@ Use a dedicated sidecar RDMA endpoint for `hybrid_parallel_rdma_cxl`.
 
 The main migration channel remains the existing CXL hybrid channel, usually
 `unix:<migration-sock>` in the experiment script. The sidecar opens a separate
-RDMA CM/verbs connection using the same host/port style as native QEMU RDMA.
-The experiment script can reuse `--rdma-host`, `--rdma-port`, and
-`--rdma-pin-all` for this sidecar when the mode is `hybrid_parallel_rdma_cxl`.
+RDMA CM/verbs connection using the same address model as native QEMU RDMA:
+`rdma:<host>:<port>` parsed into the existing `MigrationAddress` / `rdma`
+`InetSocketAddress` representation. It also reuses the existing
+`rdma-pin-all` capability for pinning behavior.
+
+The sidecar must not consume the main migration URI. Native RDMA uses the main
+URI to make RDMA the RAM migration transport. Hybrid RDMA+CXL needs the same
+RDMA address semantics for a secondary connection while the main URI remains
+CXL hybrid.
 
 Destination setup:
 
@@ -155,8 +161,8 @@ CXL state remains authoritative for destination consumption:
 ## Error Handling
 
 Sidecar enablement is explicit. If `x-cxl-rdma-sidecar=true` and QEMU is built
-without RDMA support, migration parameter validation fails before migration
-starts.
+without RDMA support, or if the sidecar address is missing or not an RDMA
+address, migration parameter validation fails before migration starts.
 
 If the sidecar listener, connect, memory registration, or QP setup fails,
 `hybrid_parallel_rdma_cxl` fails explicitly. It must not silently fall back to
@@ -208,7 +214,8 @@ transport failure, and commit. Reports should compare:
 ## Experiment Script
 
 For `hybrid_parallel_rdma_cxl`, the script keeps the main migration URI as
-`unix:<mig-sock>` and passes sidecar RDMA parameters through migration params.
+`unix:<mig-sock>` and passes a native RDMA-style sidecar address through
+migration params.
 
 Use the same user-facing options as native RDMA where possible:
 
@@ -216,12 +223,25 @@ Use the same user-facing options as native RDMA where possible:
 - `--rdma-port`
 - `--rdma-pin-all`
 
-The script sets these QEMU parameters for the sidecar mode:
+The script builds the same address shape that native RDMA would derive from
+`rdma:<host>:<port>`, but stores it in a sidecar-only parameter instead of using
+it as the main migration URI. The preferred QMP shape is:
+
+```json
+{
+  "transport": "rdma",
+  "rdma": {
+    "host": "<--rdma-host>",
+    "port": "<--rdma-port plus run offset>"
+  }
+}
+```
+
+The script sets these QEMU controls for the sidecar mode:
 
 - `x-cxl-rdma-sidecar=true`
-- `x-cxl-rdma-sidecar-host=<--rdma-host>`
-- `x-cxl-rdma-sidecar-port=<--rdma-port plus run offset>`
-- `x-cxl-rdma-sidecar-pin-all=<--rdma-pin-all>`
+- `x-cxl-rdma-sidecar-address=<native RDMA-style MigrationAddress>`
+- `rdma-pin-all=<--rdma-pin-all>` using the existing migration capability
 - `x-cxl-rdma-sidecar-max-inflight-regions=1` unless overridden
 - `x-cxl-rdma-sidecar-max-cover-percent=25` unless overridden
 
@@ -233,8 +253,10 @@ URI. Hybrid RDMA+CXL does not.
 Unit tests:
 
 - enabling sidecar without `CONFIG_RDMA` fails validation;
-- sidecar parameter validation accepts host, port, pin-all, in-flight, and cover
-  budget values;
+- sidecar parameter validation accepts a native RDMA-style address and rejects
+  missing or non-RDMA addresses;
+- `rdma-pin-all` uses the existing migration capability for both native RDMA and
+  the sidecar connection;
 - region selector accepts pending dirty bulk regions and skips visible,
   migrated, remapped, non-pending, in-flight, ready, invalidated, and
   over-budget regions;
@@ -249,7 +271,8 @@ Unit tests:
 Script tests:
 
 - `hybrid_parallel_rdma_cxl` keeps the main migration URI as `unix:`;
-- sidecar mode passes RDMA host/port/pin-all as CXL sidecar parameters;
+- sidecar mode converts RDMA host/port into the native RDMA-style sidecar
+  address and uses the existing `rdma-pin-all` capability;
 - native RDMA precopy still uses `rdma:host:port`;
 - output includes the new sidecar counters;
 - summary/report fields distinguish CXL publish bytes from RDMA bytes.
