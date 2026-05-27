@@ -650,6 +650,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
             "hybrid_parallel_rdma_cxl",
             cxl_path="/tmp/cxl.img",
             shared_backing=True,
+            run_index=3,
         )
 
         self.assertEqual(params["cxl-path"], "/tmp/cxl.img")
@@ -657,6 +658,53 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertFalse(params["x-cxl-brake-enable"])
         self.assertEqual(params["x-cxl-prefetch-batch-pages"], 128)
         self.assertTrue(params["x-cxl-rdma-sidecar"])
+
+    def test_parallel_rdma_cxl_uses_unix_main_uri_and_sidecar_rdma_param(self):
+        args = self.mod.parse_args([
+            "--mode", "hybrid_parallel_rdma_cxl",
+            "--rdma-host", "192.0.2.10",
+            "--rdma-port", "7471",
+        ])
+
+        uri = self.mod.build_migration_uri(
+            "hybrid_parallel_rdma_cxl", Path("/tmp/run/mig.sock"),
+            rdma_host=args.rdma_host, rdma_port=args.rdma_port + 3)
+        self.assertTrue(uri.startswith("unix:"))
+
+        params = self.mod.build_migration_parameters(
+            args,
+            "hybrid_parallel_rdma_cxl",
+            cxl_path="/tmp/cxl.img",
+            shared_backing=True,
+            run_index=3,
+        )
+        self.assertTrue(params["x-cxl-rdma-sidecar"])
+        self.assertIn("x-cxl-rdma-sidecar-address", params)
+        self.assertEqual(params["x-cxl-rdma-sidecar-address"], {
+            "transport": "rdma",
+            "rdma": {"host": "192.0.2.10", "port": "7474"},
+        })
+        self.assertEqual(
+            params["x-cxl-rdma-sidecar-max-inflight-regions"], 1)
+        self.assertEqual(
+            params["x-cxl-rdma-sidecar-max-cover-percent"], 25)
+        self.assertEqual(params["x-cxl-rdma-sidecar-region-bytes"], 0)
+
+    def test_parallel_rdma_cxl_uses_existing_rdma_pin_all_capability(self):
+        calls = []
+
+        def fake_qmp_ok(_f, cmd, args=None):
+            calls.append((cmd, args))
+            return {}
+
+        self.mod.qmp_ok = fake_qmp_ok
+        self.mod.set_caps(
+            object(), "hybrid_parallel_rdma_cxl", rdma_pin_all=True)
+
+        _cmd, args = calls[0]
+        self.assertIn(
+            {"capability": "rdma-pin-all", "state": True},
+            args["capabilities"])
 
     def test_build_migration_parameters_normal_hybrid_does_not_enable_rdma_sidecar(self):
         args = argparse.Namespace(

@@ -1706,9 +1706,12 @@
 #     @x-cxl-prefetch-rate,
 #     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
 #     @x-cxl-dst-cache-size,
-#     @x-cxl-shared-backing, @x-cxl-rdma-sidecar, and
-#     @x-cxl-fault-resolve-mode are
-#     experimental.
+#     @x-cxl-shared-backing, @x-cxl-rdma-sidecar,
+#     @x-cxl-rdma-sidecar-address,
+#     @x-cxl-rdma-sidecar-max-inflight-regions,
+#     @x-cxl-rdma-sidecar-max-cover-percent,
+#     @x-cxl-rdma-sidecar-region-bytes, and
+#     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
 ##
@@ -1770,6 +1773,14 @@
            { 'name': 'x-cxl-shared-backing',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-rdma-sidecar',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-address',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-max-inflight-regions',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-max-cover-percent',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-region-bytes',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-fault-resolve-mode',
              'features': [ 'unstable' ] },
@@ -2031,6 +2042,24 @@
 #     sidecar.  The sidecar is valid only when @x-cxl-hybrid is
 #     enabled and remains off by default.  (Since 11.0)
 #
+# @x-cxl-rdma-sidecar-address: Secondary RDMA endpoint used by the
+#     experimental CXL hybrid RDMA sidecar.  This is not the main
+#     migration URI; the main migration stream continues to use the
+#     primary migration address.  The address transport must be @rdma
+#     when @x-cxl-rdma-sidecar is enabled.  (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-max-inflight-regions: Maximum number of CXL
+#     hybrid RDMA sidecar regions in flight at once.  Default is 1.
+#     (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-max-cover-percent: Maximum percentage of guest
+#     RAM the CXL hybrid RDMA sidecar may cover.  Default is 25.
+#     (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-region-bytes: CXL hybrid RDMA sidecar region
+#     size, in bytes.  Zero means implementation default.  Default is
+#     0.  (Since 11.0)
+#
 # @x-cxl-fault-resolve-mode: Experimental destination fault
 #     resolution policy for CXL hybrid postcopy.  (Since 11.0)
 #
@@ -2052,9 +2081,12 @@
 #     @x-cxl-prefetch-rate,
 #     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
 #     @x-cxl-dst-cache-size,
-#     @x-cxl-shared-backing, @x-cxl-rdma-sidecar, and
-#     @x-cxl-fault-resolve-mode are
-#     experimental.
+#     @x-cxl-shared-backing, @x-cxl-rdma-sidecar,
+#     @x-cxl-rdma-sidecar-address,
+#     @x-cxl-rdma-sidecar-max-inflight-regions,
+#     @x-cxl-rdma-sidecar-max-cover-percent,
+#     @x-cxl-rdma-sidecar-region-bytes, and
+#     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
 ##
@@ -2130,6 +2162,14 @@
                 'type': 'bool', 'features': [ 'unstable' ] },
             '*x-cxl-rdma-sidecar': {
                 'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-address': {
+                'type': 'MigrationAddress', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-max-inflight-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-max-cover-percent': {
+                'type': 'uint8', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-region-bytes': {
+                'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-fault-resolve-mode': {
                 'type': 'CXLHybridFaultResolveMode',
                 'features': [ 'unstable' ] },

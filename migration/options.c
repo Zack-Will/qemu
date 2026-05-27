@@ -90,6 +90,9 @@
 #define DEFAULT_MIGRATE_X_CXL_DST_CACHE_SIZE 0
 #define DEFAULT_MIGRATE_X_CXL_SHARED_BACKING false
 #define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR false
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_INFLIGHT_REGIONS 1
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_COVER_PERCENT 25
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_REGION_BYTES 0
 #define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
     CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP
 
@@ -264,6 +267,16 @@ const Property migration_properties[] = {
     DEFINE_PROP_BOOL("x-cxl-rdma-sidecar", MigrationState,
                       parameters.x_cxl_rdma_sidecar,
                       DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR),
+    DEFINE_PROP_UINT32("x-cxl-rdma-sidecar-max-inflight-regions",
+                      MigrationState,
+                      parameters.x_cxl_rdma_sidecar_max_inflight_regions,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_INFLIGHT_REGIONS),
+    DEFINE_PROP_UINT8("x-cxl-rdma-sidecar-max-cover-percent", MigrationState,
+                      parameters.x_cxl_rdma_sidecar_max_cover_percent,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_COVER_PERCENT),
+    DEFINE_PROP_SIZE("x-cxl-rdma-sidecar-region-bytes", MigrationState,
+                      parameters.x_cxl_rdma_sidecar_region_bytes,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_REGION_BYTES),
     DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE("x-cxl-fault-resolve-mode",
                       MigrationState,
                       parameters.x_cxl_fault_resolve_mode,
@@ -1136,6 +1149,34 @@ bool migrate_cxl_rdma_sidecar(void)
     return migrate_cxl_hybrid() && s->parameters.x_cxl_rdma_sidecar;
 }
 
+const MigrationAddress *migrate_cxl_rdma_sidecar_address(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_sidecar_address;
+}
+
+uint32_t migrate_cxl_rdma_sidecar_max_inflight_regions(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_sidecar_max_inflight_regions;
+}
+
+uint8_t migrate_cxl_rdma_sidecar_max_cover_percent(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_sidecar_max_cover_percent;
+}
+
+uint64_t migrate_cxl_rdma_sidecar_region_bytes(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_sidecar_region_bytes;
+}
+
 CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1318,6 +1359,7 @@ void migrate_tls_opts_free(MigrationParameters *params)
     qapi_free_StrOrNull(params->tls_creds);
     qapi_free_StrOrNull(params->tls_hostname);
     qapi_free_StrOrNull(params->tls_authz);
+    qapi_free_MigrationAddress(params->x_cxl_rdma_sidecar_address);
 }
 
 /* normalize QTYPE_QNULL to QTYPE_QSTRING "" */
@@ -1345,7 +1387,7 @@ static void tls_opt_to_str(StrOrNull *opt)
  */
 static void migrate_mark_all_params_present(MigrationParameters *p)
 {
-    int len, n_str_args = 4; /* tls-*, cxl-path */
+    int len, n_pointer_args = 5; /* tls-*, cxl-path, sidecar address */
     bool *has_fields[] = {
         &p->has_throttle_trigger_threshold, &p->has_cpu_throttle_initial,
         &p->has_cpu_throttle_increment, &p->has_cpu_throttle_tailslow,
@@ -1378,12 +1420,15 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_dst_cache_size,
         &p->has_x_cxl_shared_backing,
         &p->has_x_cxl_rdma_sidecar,
+        &p->has_x_cxl_rdma_sidecar_max_inflight_regions,
+        &p->has_x_cxl_rdma_sidecar_max_cover_percent,
+        &p->has_x_cxl_rdma_sidecar_region_bytes,
         &p->has_x_cxl_fault_resolve_mode,
         &p->has_cpr_exec_command,
     };
 
     len = ARRAY_SIZE(has_fields);
-    assert(len + n_str_args == MIGRATION_PARAMETER__MAX);
+    assert(len + n_pointer_args == MIGRATION_PARAMETER__MAX);
 
     for (int i = 0; i < len; i++) {
         *has_fields[i] = true;
@@ -1422,6 +1467,12 @@ void migrate_params_init(MigrationParameters *params)
         DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_PREFAULT_MODE;
     params->x_cxl_rdma_sidecar =
         DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR;
+    params->x_cxl_rdma_sidecar_max_inflight_regions =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_INFLIGHT_REGIONS;
+    params->x_cxl_rdma_sidecar_max_cover_percent =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_COVER_PERCENT;
+    params->x_cxl_rdma_sidecar_region_bytes =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_REGION_BYTES;
     params->x_cxl_fault_resolve_mode =
         DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
     migrate_mark_all_params_present(params);
@@ -1632,9 +1683,33 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
-    if (params->x_cxl_rdma_sidecar && !migrate_cxl_hybrid()) {
-        error_setg(errp, "x-cxl-rdma-sidecar requires x-cxl-hybrid");
+    if (params->x_cxl_rdma_sidecar) {
+#ifndef CONFIG_RDMA
+        error_setg(errp,
+                   "x-cxl-rdma-sidecar requires QEMU to be built with RDMA support");
         return false;
+#endif
+        if (!migrate_cxl_hybrid()) {
+            error_setg(errp, "x-cxl-rdma-sidecar requires x-cxl-hybrid");
+            return false;
+        }
+        if (!params->x_cxl_rdma_sidecar_address ||
+            params->x_cxl_rdma_sidecar_address->transport !=
+                MIGRATION_ADDRESS_TYPE_RDMA) {
+            error_setg(errp,
+                       "x-cxl-rdma-sidecar requires an RDMA sidecar address");
+            return false;
+        }
+        if (params->x_cxl_rdma_sidecar_max_inflight_regions < 1) {
+            error_setg(errp,
+                       "x-cxl-rdma-sidecar-max-inflight-regions must be at least 1");
+            return false;
+        }
+        if (params->x_cxl_rdma_sidecar_max_cover_percent > 100) {
+            error_setg(errp,
+                       "x-cxl-rdma-sidecar-max-cover-percent must be between 0 and 100");
+            return false;
+        }
     }
 
     return true;
@@ -1835,6 +1910,30 @@ static void migrate_params_test_apply(MigrationParameters *params,
     }
     if (params->has_x_cxl_rdma_sidecar) {
         dest->x_cxl_rdma_sidecar = params->x_cxl_rdma_sidecar;
+    }
+    if (params->x_cxl_rdma_sidecar_address) {
+        dest->x_cxl_rdma_sidecar_address =
+            QAPI_CLONE(MigrationAddress,
+                       params->x_cxl_rdma_sidecar_address);
+    } else if (migrate_get_current()->parameters.x_cxl_rdma_sidecar_address) {
+        dest->x_cxl_rdma_sidecar_address =
+            QAPI_CLONE(MigrationAddress,
+                       migrate_get_current()->parameters.
+                       x_cxl_rdma_sidecar_address);
+    } else {
+        dest->x_cxl_rdma_sidecar_address = NULL;
+    }
+    if (params->has_x_cxl_rdma_sidecar_max_inflight_regions) {
+        dest->x_cxl_rdma_sidecar_max_inflight_regions =
+            params->x_cxl_rdma_sidecar_max_inflight_regions;
+    }
+    if (params->has_x_cxl_rdma_sidecar_max_cover_percent) {
+        dest->x_cxl_rdma_sidecar_max_cover_percent =
+            params->x_cxl_rdma_sidecar_max_cover_percent;
+    }
+    if (params->has_x_cxl_rdma_sidecar_region_bytes) {
+        dest->x_cxl_rdma_sidecar_region_bytes =
+            params->x_cxl_rdma_sidecar_region_bytes;
     }
     if (params->has_x_cxl_fault_resolve_mode) {
         dest->x_cxl_fault_resolve_mode = params->x_cxl_fault_resolve_mode;
@@ -2039,6 +2138,25 @@ static void migrate_params_apply(MigrationParameters *params)
     }
     if (params->has_x_cxl_rdma_sidecar) {
         s->parameters.x_cxl_rdma_sidecar = params->x_cxl_rdma_sidecar;
+    }
+    if (params->x_cxl_rdma_sidecar_address) {
+        qapi_free_MigrationAddress(
+            s->parameters.x_cxl_rdma_sidecar_address);
+        s->parameters.x_cxl_rdma_sidecar_address =
+            QAPI_CLONE(MigrationAddress,
+                       params->x_cxl_rdma_sidecar_address);
+    }
+    if (params->has_x_cxl_rdma_sidecar_max_inflight_regions) {
+        s->parameters.x_cxl_rdma_sidecar_max_inflight_regions =
+            params->x_cxl_rdma_sidecar_max_inflight_regions;
+    }
+    if (params->has_x_cxl_rdma_sidecar_max_cover_percent) {
+        s->parameters.x_cxl_rdma_sidecar_max_cover_percent =
+            params->x_cxl_rdma_sidecar_max_cover_percent;
+    }
+    if (params->has_x_cxl_rdma_sidecar_region_bytes) {
+        s->parameters.x_cxl_rdma_sidecar_region_bytes =
+            params->x_cxl_rdma_sidecar_region_bytes;
     }
     if (params->has_x_cxl_fault_resolve_mode) {
         s->parameters.x_cxl_fault_resolve_mode =

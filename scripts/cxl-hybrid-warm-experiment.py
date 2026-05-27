@@ -483,6 +483,16 @@ def build_migration_uri(mode: str, mig_sock: Path, rdma_host=DEFAULT_RDMA_HOST,
     return f"unix:{mig_sock}"
 
 
+def build_rdma_sidecar_address(args, run_index: int) -> dict[str, object]:
+    rdma_port = getattr(args, "rdma_port", DEFAULT_RDMA_PORT)
+    rdma_host = getattr(args, "rdma_host", DEFAULT_RDMA_HOST)
+    port = str(int(rdma_port) + run_index)
+    return {
+        "transport": "rdma",
+        "rdma": {"host": rdma_host, "port": port},
+    }
+
+
 def request_native_postcopy_start(src_qmp):
     deadline = time.time() + POSTCOPY_START_RETRY_TIMEOUT_SECS
     last_error = None
@@ -633,14 +643,16 @@ def set_caps(f, mode: str, rdma_pin_all=False):
              "state": hybrid_mode},
             {"capability": "multifd", "state": mode_uses_multifd(mode)},
             {"capability": "rdma-pin-all",
-             "state": bool(rdma_pin_all) if mode_uses_rdma(mode) else False},
+             "state": bool(rdma_pin_all) if (
+                 mode_uses_rdma(mode) or mode_uses_cxl_rdma_sidecar(mode)
+             ) else False},
         ]
     })
 
 
 def build_migration_parameters(args, mode: str, cxl_path=None,
                                shared_backing: bool = True,
-                               thresholds=None):
+                               thresholds=None, run_index: int = 0):
     pressure = getattr(args, "pressure", "light")
     if isinstance(pressure, str):
         pressure = next(
@@ -709,6 +721,18 @@ def build_migration_parameters(args, mode: str, cxl_path=None,
         })
         if mode_uses_cxl_rdma_sidecar(mode):
             params["x-cxl-rdma-sidecar"] = True
+            params["x-cxl-rdma-sidecar-address"] = (
+                build_rdma_sidecar_address(args, run_index)
+            )
+            params["x-cxl-rdma-sidecar-max-inflight-regions"] = getattr(
+                args, "x_cxl_rdma_sidecar_max_inflight_regions", 1
+            )
+            params["x-cxl-rdma-sidecar-max-cover-percent"] = getattr(
+                args, "x_cxl_rdma_sidecar_max_cover_percent", 25
+            )
+            params["x-cxl-rdma-sidecar-region-bytes"] = getattr(
+                args, "x_cxl_rdma_sidecar_region_bytes", 0
+            )
         if remap_coverage is not None:
             params["x-cxl-switch-remap-coverage"] = remap_coverage
         if backing_rate is not None:
@@ -744,7 +768,13 @@ def set_params(f, cxl_path: str, mode: str, pressure: str,
                clean_remap_enable=False,
                clean_remap_copy_budget=None,
                clean_remap_throttle_us=None,
-               clean_remap_prefault_mode=None):
+               clean_remap_prefault_mode=None,
+               rdma_host=DEFAULT_RDMA_HOST,
+               rdma_port=DEFAULT_RDMA_PORT,
+               run_index: int = 0,
+               rdma_sidecar_max_inflight_regions=1,
+               rdma_sidecar_max_cover_percent=25,
+               rdma_sidecar_region_bytes=0):
     args = argparse.Namespace(
         pressure=pressure,
         threshold_profile="balanced",
@@ -764,12 +794,21 @@ def set_params(f, cxl_path: str, mode: str, pressure: str,
         x_cxl_clean_remap_copy_budget=clean_remap_copy_budget,
         x_cxl_clean_remap_throttle_us=clean_remap_throttle_us,
         x_cxl_clean_remap_prefault_mode=clean_remap_prefault_mode,
+        rdma_host=rdma_host,
+        rdma_port=rdma_port,
+        x_cxl_rdma_sidecar_max_inflight_regions=(
+            rdma_sidecar_max_inflight_regions
+        ),
+        x_cxl_rdma_sidecar_max_cover_percent=(
+            rdma_sidecar_max_cover_percent
+        ),
+        x_cxl_rdma_sidecar_region_bytes=rdma_sidecar_region_bytes,
         max_bandwidth=max_bandwidth,
         max_postcopy_bandwidth=max_postcopy_bandwidth,
     )
     params = build_migration_parameters(
         args, mode, cxl_path=cxl_path, shared_backing=shared_backing,
-        thresholds=thresholds,
+        thresholds=thresholds, run_index=run_index,
     )
     qmp_ok(f, "migrate-set-parameters", params)
 
@@ -2929,6 +2968,9 @@ def run_case(base: Path, mode: str, pressure: str,
              rdma_host=DEFAULT_RDMA_HOST,
              rdma_port=DEFAULT_RDMA_PORT,
              rdma_pin_all=False,
+             rdma_sidecar_max_inflight_regions=1,
+             rdma_sidecar_max_cover_percent=25,
+             rdma_sidecar_region_bytes=0,
              accel="tcg",
              qemu_perf=False,
              in_memory_guest_latency=False,
@@ -3130,6 +3172,16 @@ def run_case(base: Path, mode: str, pressure: str,
                    clean_remap_copy_budget=clean_remap_copy_budget,
                    clean_remap_throttle_us=clean_remap_throttle_us,
                    clean_remap_prefault_mode=clean_remap_prefault_mode,
+                   rdma_host=rdma_host,
+                   rdma_port=rdma_port,
+                   run_index=run_index - 1,
+                   rdma_sidecar_max_inflight_regions=(
+                       rdma_sidecar_max_inflight_regions
+                   ),
+                   rdma_sidecar_max_cover_percent=(
+                       rdma_sidecar_max_cover_percent
+                   ),
+                   rdma_sidecar_region_bytes=rdma_sidecar_region_bytes,
                    max_postcopy_bandwidth=max_postcopy_bandwidth)
         set_params(dst_qmp, cxl_backing_path, mode, pressure,
                    shared_backing=True, thresholds=profile,
@@ -3146,6 +3198,16 @@ def run_case(base: Path, mode: str, pressure: str,
                    clean_remap_copy_budget=clean_remap_copy_budget,
                    clean_remap_throttle_us=clean_remap_throttle_us,
                    clean_remap_prefault_mode=clean_remap_prefault_mode,
+                   rdma_host=rdma_host,
+                   rdma_port=rdma_port,
+                   run_index=run_index - 1,
+                   rdma_sidecar_max_inflight_regions=(
+                       rdma_sidecar_max_inflight_regions
+                   ),
+                   rdma_sidecar_max_cover_percent=(
+                       rdma_sidecar_max_cover_percent
+                   ),
+                   rdma_sidecar_region_bytes=rdma_sidecar_region_bytes,
                    max_postcopy_bandwidth=max_postcopy_bandwidth)
 
         qmp_ok(dst_qmp, "migrate-incoming", {"uri": migration_uri})
@@ -4227,6 +4289,9 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                         rdma_host=DEFAULT_RDMA_HOST,
                         rdma_port=DEFAULT_RDMA_PORT,
                         rdma_pin_all=False,
+                        rdma_sidecar_max_inflight_regions=1,
+                        rdma_sidecar_max_cover_percent=25,
+                        rdma_sidecar_region_bytes=0,
                         accel="tcg",
                         qemu_perf=False,
                         in_memory_guest_latency=False,
@@ -4292,6 +4357,20 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                     kwargs["rdma_host"] = rdma_host
                     kwargs["rdma_port"] = rdma_port + run_index - 1
                     kwargs["rdma_pin_all"] = rdma_pin_all
+                elif mode_uses_cxl_rdma_sidecar(mode):
+                    kwargs["rdma_host"] = rdma_host
+                    kwargs["rdma_port"] = rdma_port
+                    kwargs["rdma_pin_all"] = rdma_pin_all
+                if mode_uses_cxl_rdma_sidecar(mode):
+                    kwargs["rdma_sidecar_max_inflight_regions"] = (
+                        rdma_sidecar_max_inflight_regions
+                    )
+                    kwargs["rdma_sidecar_max_cover_percent"] = (
+                        rdma_sidecar_max_cover_percent
+                    )
+                    kwargs["rdma_sidecar_region_bytes"] = (
+                        rdma_sidecar_region_bytes
+                    )
                 if threshold_profile is None and repeat == 1:
                     try:
                         result = run_case(pressure_dir, mode, pressure, **kwargs)
@@ -4397,6 +4476,12 @@ def parse_args(argv=None):
     parser.add_argument("--rdma-host", default=DEFAULT_RDMA_HOST)
     parser.add_argument("--rdma-port", type=int, default=DEFAULT_RDMA_PORT)
     parser.add_argument("--rdma-pin-all", action="store_true")
+    parser.add_argument("--x-cxl-rdma-sidecar-max-inflight-regions",
+                        type=int, default=1)
+    parser.add_argument("--x-cxl-rdma-sidecar-max-cover-percent",
+                        type=int, default=25)
+    parser.add_argument("--x-cxl-rdma-sidecar-region-bytes",
+                        type=int, default=0)
     parser.add_argument("--accel", choices=("tcg", "kvm"), default="tcg",
                         help="QEMU accelerator for source and destination VMs")
     parser.add_argument("--qemu-perf", action="store_true",
@@ -4487,6 +4572,12 @@ def main():
                                      rdma_host=args.rdma_host,
                                      rdma_port=args.rdma_port,
                                      rdma_pin_all=args.rdma_pin_all,
+                                     rdma_sidecar_max_inflight_regions=
+                                     args.x_cxl_rdma_sidecar_max_inflight_regions,
+                                     rdma_sidecar_max_cover_percent=
+                                     args.x_cxl_rdma_sidecar_max_cover_percent,
+                                     rdma_sidecar_region_bytes=
+                                     args.x_cxl_rdma_sidecar_region_bytes,
                                      accel=args.accel,
                                      qemu_perf=args.qemu_perf,
                                      in_memory_guest_latency=
