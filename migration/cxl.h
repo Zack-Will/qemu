@@ -217,6 +217,18 @@ typedef struct CXLHybridRDMASidecarState {
     CXLHybridRDMASidecarStats stats;
 } CXLHybridRDMASidecarState;
 
+typedef struct CXLHybridRDMABulkClaim {
+    RAMBlock *block;
+    ram_addr_t block_offset;
+    uint64_t global_offset;
+    uint64_t cxl_offset;
+    uint64_t region_index;
+    uint64_t bytes;
+    uint64_t pages;
+    void *src;
+    void *dst;
+} CXLHybridRDMABulkClaim;
+
 void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta);
 int cxl_hybrid_metadata_encoded_len(const CXLHybridMetadata *meta,
                                     size_t *len,
@@ -385,6 +397,15 @@ bool cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(
 bool cxl_hybrid_rdma_sidecar_try_start_region(
     CXLHybridRDMASidecarState *state,
     uint64_t region_index);
+void cxl_hybrid_rdma_sidecar_configure_budget_for_test(
+    CXLHybridRDMASidecarState *state,
+    uint64_t max_inflight_regions,
+    uint64_t max_cover_percent);
+bool cxl_hybrid_rdma_sidecar_pick_pending_region_for_test(
+    CXLHybridRDMASidecarState *state,
+    const unsigned long *dirty_bmap,
+    uint64_t total_pages,
+    uint64_t *region_out);
 bool cxl_hybrid_rdma_sidecar_complete_region(
     CXLHybridRDMASidecarState *state,
     uint64_t region_index);
@@ -468,6 +489,11 @@ bool cxl_hybrid_commit_rdma_ready_region(uint64_t region_index,
                                          uint32_t generation);
 bool cxl_hybrid_region_can_use_rdma_bulk(RAMBlock *block,
                                          ram_addr_t block_offset);
+bool cxl_hybrid_rdma_bulk_claim_init(CXLHybridRDMABulkClaim *claim,
+                                     RAMBlock *block,
+                                     ram_addr_t block_offset);
+bool cxl_hybrid_rdma_try_claim_bulk_region(CXLHybridRDMABulkClaim *claim);
+void cxl_hybrid_rdma_drop_bulk_claim(const CXLHybridRDMABulkClaim *claim);
 bool cxl_hybrid_region_try_own_rdma_bulk(RAMBlock *block,
                                          ram_addr_t block_offset);
 bool cxl_hybrid_complete_rdma_bulk_region(RAMBlock *block,

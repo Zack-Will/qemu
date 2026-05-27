@@ -403,6 +403,7 @@ bool cxl_hybrid_rdma_sidecar_try_start_region(
     if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
         test_bit(region_index, state->ready_bmap) ||
         test_bit(region_index, state->inflight_bmap) ||
+        test_bit(region_index, state->cxl_published_bmap) ||
         test_bit(region_index, state->committed_bmap) ||
         test_bit(region_index, state->invalidated_bmap) ||
         test_bit(region_index, state->stale_bmap)) {
@@ -419,6 +420,65 @@ bool cxl_hybrid_rdma_sidecar_try_start_region(
     set_bit(region_index, state->inflight_bmap);
     state->accepted_regions++;
     return true;
+}
+
+void cxl_hybrid_rdma_sidecar_configure_budget_for_test(
+    CXLHybridRDMASidecarState *state,
+    uint64_t max_inflight_regions,
+    uint64_t max_cover_percent)
+{
+    uint64_t cover_regions;
+
+    if (!state) {
+        return;
+    }
+
+    state->max_accepted_regions = max_inflight_regions;
+    if (max_cover_percent && state->total_regions) {
+        cover_regions = DIV_ROUND_UP(state->total_regions * max_cover_percent,
+                                     100);
+        if (state->max_accepted_regions) {
+            state->max_accepted_regions = MIN(state->max_accepted_regions,
+                                              cover_regions);
+        } else {
+            state->max_accepted_regions = cover_regions;
+        }
+    }
+}
+
+bool cxl_hybrid_rdma_sidecar_pick_pending_region_for_test(
+    CXLHybridRDMASidecarState *state,
+    const unsigned long *dirty_bmap,
+    uint64_t total_pages,
+    uint64_t *region_out)
+{
+    uint64_t region;
+
+    if (!state || !dirty_bmap || !region_out || !state->pages_per_region) {
+        cxl_hybrid_account_rdma_sidecar_no_candidate();
+        return false;
+    }
+
+    for (region = 0; region < state->total_regions; region++) {
+        uint64_t first = region * state->pages_per_region;
+        uint64_t npages;
+
+        if (first >= total_pages) {
+            break;
+        }
+
+        npages = MIN(state->pages_per_region, total_pages - first);
+        if (!bitmap_count_one_with_offset(dirty_bmap, first, npages)) {
+            continue;
+        }
+        if (cxl_hybrid_rdma_sidecar_try_start_region(state, region)) {
+            *region_out = region;
+            return true;
+        }
+    }
+
+    cxl_hybrid_account_rdma_sidecar_no_candidate();
+    return false;
 }
 
 bool cxl_hybrid_rdma_sidecar_try_own_region(

@@ -489,6 +489,63 @@ static void test_rdma_sidecar_inflight_does_not_block_cxl(void)
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
 }
 
+static void test_rdma_sidecar_selector_accepts_dirty_bulk_region(void)
+{
+    CXLHybridRDMASidecarState state = { 0 };
+    unsigned long *dirty = bitmap_new(8 * 512);
+    uint64_t region = UINT64_MAX;
+
+    cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 8, 512);
+    bitmap_set(dirty, 2 * 512, 512);
+
+    g_assert_true(cxl_hybrid_rdma_sidecar_pick_pending_region_for_test(
+        &state, dirty, 8 * 512, &region));
+    g_assert_cmpuint(region, ==, 2);
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_inflight(&state, 2));
+
+    g_free(dirty);
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
+}
+
+static void test_rdma_sidecar_selector_skips_clean_visible_region(void)
+{
+    CXLHybridRDMASidecarState state = { 0 };
+    unsigned long *dirty = bitmap_new(8 * 512);
+    uint64_t region = UINT64_MAX;
+
+    cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 8, 512);
+    bitmap_set(dirty, 0, 512);
+    bitmap_set(dirty, 1 * 512, 512);
+    g_assert_true(cxl_hybrid_rdma_sidecar_note_cxl_publish(&state, 0));
+
+    g_assert_true(cxl_hybrid_rdma_sidecar_pick_pending_region_for_test(
+        &state, dirty, 8 * 512, &region));
+    g_assert_cmpuint(region, ==, 1);
+    g_assert_false(cxl_hybrid_rdma_sidecar_region_inflight(&state, 0));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_inflight(&state, 1));
+
+    g_free(dirty);
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
+}
+
+static void test_rdma_sidecar_selector_skips_budgeted_regions(void)
+{
+    CXLHybridRDMASidecarState state = { 0 };
+    unsigned long *dirty = bitmap_new(8 * 512);
+    uint64_t region = UINT64_MAX;
+
+    cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 8, 512);
+    cxl_hybrid_rdma_sidecar_configure_budget_for_test(&state, 8, 12);
+    bitmap_set(dirty, 1 * 512, 512);
+    g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, 0));
+
+    g_assert_false(cxl_hybrid_rdma_sidecar_pick_pending_region_for_test(
+        &state, dirty, 8 * 512, &region));
+
+    g_free(dirty);
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
+}
+
 static void test_rdma_sidecar_dirty_invalidation_clears_ready(void)
 {
     CXLHybridRDMASidecarState state = { 0 };
@@ -792,6 +849,12 @@ int main(int argc, char **argv)
                     test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish);
     g_test_add_func("/cxl/region/rdma-sidecar-inflight-does-not-block-cxl",
                     test_rdma_sidecar_inflight_does_not_block_cxl);
+    g_test_add_func("/cxl/region/rdma-sidecar-selector-accepts-dirty-bulk-region",
+                    test_rdma_sidecar_selector_accepts_dirty_bulk_region);
+    g_test_add_func("/cxl/region/rdma-sidecar-selector-skips-clean-visible-region",
+                    test_rdma_sidecar_selector_skips_clean_visible_region);
+    g_test_add_func("/cxl/region/rdma-sidecar-selector-skips-budgeted-regions",
+                    test_rdma_sidecar_selector_skips_budgeted_regions);
     g_test_add_func("/cxl/region/rdma-sidecar-dirty-invalidation-clears-ready",
                     test_rdma_sidecar_dirty_invalidation_clears_ready);
     g_test_add_func("/cxl/region/rdma-sidecar-commit-current-ready",

@@ -475,6 +475,9 @@ typedef struct RAMState RAMState;
 static RAMState *ram_state;
 static QEMUFile *mapped_ram_save_file(QEMUFile *file);
 static QEMUFile *mapped_ram_load_file(QEMUFile *file);
+static inline bool migration_bitmap_clear_dirty(RAMState *rs,
+                                                RAMBlock *rb,
+                                                unsigned long page);
 
 static NotifierWithReturnList precopy_notifier_list;
 
@@ -511,6 +514,81 @@ uint64_t ram_bytes_remaining(void)
 {
     return ram_state ? (ram_state->migration_dirty_pages * TARGET_PAGE_SIZE) :
                        0;
+}
+
+bool cxl_hybrid_rdma_try_claim_bulk_region(CXLHybridRDMABulkClaim *claim)
+{
+    RAMBlock *block;
+    ram_addr_t region_len = cxl_hybrid_fault_region_granule();
+
+    if (!claim || !ram_state || !region_len ||
+        !QEMU_IS_ALIGNED(region_len, TARGET_PAGE_SIZE)) {
+        return false;
+    }
+
+    qemu_mutex_lock(&ram_state->bitmap_mutex);
+    RCU_READ_LOCK_GUARD();
+
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
+        ram_addr_t offset;
+
+        if (!block->bmap) {
+            continue;
+        }
+
+        for (offset = 0; offset + region_len <= block->used_length;
+             offset += region_len) {
+            CXLHybridRDMABulkClaim candidate;
+            unsigned long first_page = offset >> TARGET_PAGE_BITS;
+            unsigned long npages = region_len >> TARGET_PAGE_BITS;
+            unsigned long dirty_pages;
+
+            dirty_pages = bitmap_count_one_with_offset(block->bmap,
+                                                       first_page, npages);
+            if (!dirty_pages ||
+                !cxl_hybrid_rdma_bulk_claim_init(&candidate, block, offset)) {
+                continue;
+            }
+            if (!cxl_hybrid_region_try_own_rdma(candidate.region_index)) {
+                continue;
+            }
+
+            for (unsigned long page = 0; page < npages; page++) {
+                migration_bitmap_clear_dirty(ram_state, block,
+                                             first_page + page);
+            }
+            *claim = candidate;
+            qemu_mutex_unlock(&ram_state->bitmap_mutex);
+            return true;
+        }
+    }
+
+    qemu_mutex_unlock(&ram_state->bitmap_mutex);
+    return false;
+}
+
+void cxl_hybrid_rdma_drop_bulk_claim(const CXLHybridRDMABulkClaim *claim)
+{
+    RAMBlock *block;
+    unsigned long first_page;
+
+    if (!claim) {
+        return;
+    }
+
+    block = claim->block;
+    if (ram_state && block && block->bmap && claim->pages) {
+        qemu_mutex_lock(&ram_state->bitmap_mutex);
+        first_page = claim->block_offset >> TARGET_PAGE_BITS;
+        /* Failed RDMA posts fall back to CXL by making the whole claim dirty. */
+        for (uint64_t page = 0; page < claim->pages; page++) {
+            ram_state->migration_dirty_pages += !test_and_set_bit(
+                first_page + page, block->bmap);
+        }
+        qemu_mutex_unlock(&ram_state->bitmap_mutex);
+    }
+
+    cxl_hybrid_region_drop_rdma(claim->region_index);
 }
 
 void ram_transferred_add(uint64_t bytes)
@@ -2847,8 +2925,6 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     size_t pagesize_bits =
         qemu_ram_pagesize(pss->block) >> TARGET_PAGE_BITS;
     unsigned long start_page = pss->page;
-    unsigned long rdma_start_page = ULONG_MAX;
-    unsigned long rdma_end_page = 0;
     int res;
     uint64_t op_start_ns = 0;
 
@@ -2859,27 +2935,6 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
 
     /* Update host page boundary information */
     pss_host_page_prepare(pss);
-
-    if (cxl_use_mapped_ram_backing()) {
-        ram_addr_t region_len = cxl_hybrid_fault_region_granule();
-        ram_addr_t offset = ((ram_addr_t)pss->page) << TARGET_PAGE_BITS;
-        ram_addr_t region_offset;
-
-        if (region_len &&
-            cxl_hybrid_region_can_use_rdma_bulk(pss->block, offset)) {
-            region_offset = QEMU_ALIGN_DOWN(offset, region_len);
-            if (region_offset + region_len <= pss->block->used_length &&
-                cxl_hybrid_region_try_own_rdma_bulk(pss->block,
-                                                    region_offset)) {
-                rdma_start_page = region_offset >> TARGET_PAGE_BITS;
-                rdma_end_page = rdma_start_page +
-                                (region_len >> TARGET_PAGE_BITS);
-                pss->page = rdma_start_page;
-                pss->host_page_start = rdma_start_page;
-                pss->host_page_end = rdma_end_page;
-            }
-        }
-    }
 
     do {
         if (rs->iter_profile_scan_enabled) {
@@ -2937,11 +2992,6 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
 
         pss_find_next_dirty(pss);
     } while (pss_within_range(pss));
-
-    if (rdma_start_page != ULONG_MAX) {
-        cxl_hybrid_complete_rdma_bulk_region(
-            pss->block, (ram_addr_t)rdma_start_page << TARGET_PAGE_BITS);
-    }
 
     pss_host_page_finish(pss);
 

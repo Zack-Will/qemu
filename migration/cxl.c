@@ -2560,6 +2560,35 @@ bool cxl_hybrid_region_can_use_rdma_bulk(RAMBlock *block,
            cxl_hybrid_rdma_bulk_region_complete(block, block_offset);
 }
 
+bool cxl_hybrid_rdma_bulk_claim_init(CXLHybridRDMABulkClaim *claim,
+                                     RAMBlock *block,
+                                     ram_addr_t block_offset)
+{
+    size_t region_idx;
+    uint64_t cxl_offset;
+
+    if (!claim ||
+        !cxl_hybrid_region_can_use_rdma_bulk(block, block_offset) ||
+        !cxl_hybrid_region_index_from_block_offset(block, block_offset,
+                                                  &region_idx)) {
+        return false;
+    }
+
+    cxl_offset = block->pages_offset + block_offset;
+    *claim = (CXLHybridRDMABulkClaim) {
+        .block = block,
+        .block_offset = block_offset,
+        .global_offset = (uint64_t)region_idx * cxl_state.remap_granule,
+        .cxl_offset = cxl_offset,
+        .region_index = region_idx,
+        .bytes = cxl_state.remap_granule,
+        .pages = cxl_state.remap_granule >> TARGET_PAGE_BITS,
+        .src = block->host + block_offset,
+        .dst = (uint8_t *)cxl_state.mmap_base + cxl_offset,
+    };
+    return true;
+}
+
 bool cxl_hybrid_region_try_own_rdma_bulk(RAMBlock *block,
                                          ram_addr_t block_offset)
 {
