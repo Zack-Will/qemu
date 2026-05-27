@@ -448,6 +448,10 @@
 #
 # @ramblocks: Number of QEMU RAMBlocks registered with Anemoi.
 #
+# @fault-service-quiesced: true after the Anemoi userfaultfd thread
+#     has drained pending faults and stopped accepting new ones for
+#     switchover.
+#
 # @fault-service-failed: true if the userfaultfd thread reported an
 #     error.
 #
@@ -480,6 +484,7 @@
             'guest-pages': 'uint64',
             'local-cache-pages': 'uint64',
             'ramblocks': 'uint64',
+            'fault-service-quiesced': 'bool',
             'fault-service-failed': 'bool',
             'cache-hits': 'uint64',
             'cache-misses': 'uint64',

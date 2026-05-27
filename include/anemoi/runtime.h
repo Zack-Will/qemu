@@ -41,6 +41,7 @@ typedef struct AnemoiRuntimeStats {
     uint64_t guest_pages;
     uint64_t local_cache_pages;
     uint64_t nr_ramblocks;
+    bool fault_service_quiesced;
     bool fault_service_failed;
     AnemoiCacheStats cache;
     AnemoiBackendStats backend;

@@ -14,7 +14,10 @@ struct AnemoiFaultService {
     int uffd_fd;
     int stop_fd;
     int stopping;
+    int quiescing;
+    int quiesced;
     int failed;
+    int thread_running;
     QemuThread thread;
     AnemoiFaultRange *ranges;
     uint32_t nr_ranges;
@@ -117,6 +120,40 @@ static void anemoi_fault_service_drain_stop_fd(AnemoiFaultService *service)
     }
 }
 
+static void anemoi_fault_service_drain_uffd(AnemoiFaultService *service)
+{
+    struct uffd_msg msgs[16];
+    int nr;
+
+    do {
+        nr = uffd_read_events(service->uffd_fd, msgs, G_N_ELEMENTS(msgs));
+        if (nr < 0) {
+            qatomic_set(&service->failed, 1);
+            return;
+        }
+        for (int i = 0; i < nr; i++) {
+            anemoi_fault_service_handle_msg(service, &msgs[i]);
+        }
+    } while (nr == G_N_ELEMENTS(msgs));
+}
+
+static int anemoi_fault_service_notify(AnemoiFaultService *service,
+                                       const char *action, Error **errp)
+{
+    uint64_t one = 1;
+
+    if (service->stop_fd < 0) {
+        error_setg(errp, "Anemoi userfaultfd service has no control fd");
+        return -1;
+    }
+    if (write(service->stop_fd, &one, sizeof(one)) < 0 && errno != EAGAIN) {
+        error_setg_errno(errp, errno, "failed to %s Anemoi userfaultfd thread",
+                         action);
+        return -1;
+    }
+    return 0;
+}
+
 static void *anemoi_fault_service_thread(void *opaque)
 {
     AnemoiFaultService *service = opaque;
@@ -142,21 +179,14 @@ static void *anemoi_fault_service_thread(void *opaque)
             break;
         }
         if (pollfds[0].revents & POLLIN) {
-            struct uffd_msg msgs[16];
-            int nr;
-
-            do {
-                nr = uffd_read_events(service->uffd_fd, msgs,
-                                      G_N_ELEMENTS(msgs));
-                if (nr < 0) {
-                    qatomic_set(&service->failed, 1);
-                    break;
-                }
-                for (int i = 0; i < nr; i++) {
-                    anemoi_fault_service_handle_msg(service, &msgs[i]);
-                }
-            } while (nr == G_N_ELEMENTS(msgs));
+            anemoi_fault_service_drain_uffd(service);
         }
+    }
+
+    if (qatomic_read(&service->quiescing) &&
+        !qatomic_read(&service->stopping)) {
+        anemoi_fault_service_drain_uffd(service);
+        qatomic_set(&service->quiesced, 1);
     }
     return NULL;
 }
@@ -205,6 +235,7 @@ AnemoiFaultService *anemoi_fault_service_start(
     qemu_thread_create(&service->thread, "anemoi-uffd",
                        anemoi_fault_service_thread, service,
                        QEMU_THREAD_JOINABLE);
+    qatomic_set(&service->thread_running, 1);
     return service;
 
 fail_unregister:
@@ -221,21 +252,54 @@ fail:
     return NULL;
 }
 
+int anemoi_fault_service_quiesce(AnemoiFaultService *service, Error **errp)
+{
+    if (!service) {
+        error_setg(errp, "Anemoi userfaultfd service is not active");
+        return -1;
+    }
+    if (qatomic_read(&service->quiesced)) {
+        if (qatomic_read(&service->failed)) {
+            error_setg(errp, "Anemoi userfaultfd service failed while quiescing");
+            return -1;
+        }
+        return 0;
+    }
+    if (!qatomic_read(&service->thread_running)) {
+        error_setg(errp, "Anemoi userfaultfd service thread is not running");
+        return -1;
+    }
+
+    qatomic_set(&service->quiescing, 1);
+    if (anemoi_fault_service_notify(service, "quiesce", errp) != 0) {
+        return -1;
+    }
+
+    qemu_thread_join(&service->thread);
+    qatomic_set(&service->thread_running, 0);
+
+    if (qatomic_read(&service->failed)) {
+        error_setg(errp, "Anemoi userfaultfd service failed while quiescing");
+        return -1;
+    }
+    return 0;
+}
+
 void anemoi_fault_service_stop(AnemoiFaultService *service)
 {
-    uint64_t one = 1;
+    Error *local_err = NULL;
 
     if (!service) {
         return;
     }
     qatomic_set(&service->stopping, 1);
-    if (service->stop_fd >= 0) {
-        if (write(service->stop_fd, &one, sizeof(one)) < 0 && errno != EAGAIN) {
-            error_report("failed to stop Anemoi userfaultfd thread: %s",
-                         strerror(errno));
+    if (qatomic_read(&service->thread_running)) {
+        if (anemoi_fault_service_notify(service, "stop", &local_err) != 0) {
+            error_report_err(local_err);
         }
+        qemu_thread_join(&service->thread);
+        qatomic_set(&service->thread_running, 0);
     }
-    qemu_thread_join(&service->thread);
     anemoi_cache_attach_uffd(service->cache, -1);
     anemoi_fault_service_unregister_ranges(service);
 
@@ -252,6 +316,11 @@ void anemoi_fault_service_stop(AnemoiFaultService *service)
 int anemoi_fault_service_fd(const AnemoiFaultService *service)
 {
     return service ? service->uffd_fd : -1;
+}
+
+bool anemoi_fault_service_quiesced(const AnemoiFaultService *service)
+{
+    return service && qatomic_read(&service->quiesced);
 }
 
 bool anemoi_fault_service_failed(const AnemoiFaultService *service)
@@ -278,10 +347,23 @@ void anemoi_fault_service_stop(AnemoiFaultService *service)
     g_free(service);
 }
 
+int anemoi_fault_service_quiesce(AnemoiFaultService *service, Error **errp)
+{
+    (void)service;
+    error_setg(errp, "Anemoi userfaultfd service requires Linux");
+    return -1;
+}
+
 int anemoi_fault_service_fd(const AnemoiFaultService *service)
 {
     (void)service;
     return -1;
+}
+
+bool anemoi_fault_service_quiesced(const AnemoiFaultService *service)
+{
+    (void)service;
+    return false;
 }
 
 bool anemoi_fault_service_failed(const AnemoiFaultService *service)

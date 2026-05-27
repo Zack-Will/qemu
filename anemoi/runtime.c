@@ -399,6 +399,9 @@ int anemoi_runtime_prepare_switchover(AnemoiRuntime *runtime,
         error_setg(errp, "Anemoi runtime is not active");
         return -1;
     }
+    if (anemoi_fault_service_quiesce(runtime->fault_service, errp) != 0) {
+        return -1;
+    }
     return anemoi_lm_prepare_switchover(runtime->lm, branch, errp);
 }
 
@@ -418,6 +421,8 @@ void anemoi_runtime_get_stats(AnemoiRuntime *runtime,
     stats->guest_pages = runtime->guest_pages;
     stats->local_cache_pages = runtime->local_cache_pages;
     stats->nr_ramblocks = runtime->nr_blocks;
+    stats->fault_service_quiesced =
+        anemoi_fault_service_quiesced(runtime->fault_service);
     stats->fault_service_failed =
         anemoi_fault_service_failed(runtime->fault_service);
 

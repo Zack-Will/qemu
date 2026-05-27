@@ -225,6 +225,7 @@ XAnemoiInfo *qmp_query_anemoi(Error **errp)
     info->guest_pages = stats.guest_pages;
     info->local_cache_pages = stats.local_cache_pages;
     info->ramblocks = stats.nr_ramblocks;
+    info->fault_service_quiesced = stats.fault_service_quiesced;
     info->fault_service_failed = stats.fault_service_failed;
     info->cache_hits = stats.cache.hits;
     info->cache_misses = stats.cache.misses;
