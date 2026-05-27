@@ -1696,11 +1696,6 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
     }
 
     if (params->x_cxl_rdma_sidecar) {
-#ifndef CONFIG_RDMA
-        error_setg(errp,
-                   "x-cxl-rdma-sidecar requires QEMU to be built with RDMA support");
-        return false;
-#endif
         if (!migrate_cxl_hybrid()) {
             error_setg(errp, "x-cxl-rdma-sidecar requires x-cxl-hybrid");
             return false;
@@ -1712,6 +1707,11 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
                        "x-cxl-rdma-sidecar requires an RDMA sidecar address");
             return false;
         }
+#ifndef CONFIG_RDMA
+        error_setg(errp,
+                   "x-cxl-rdma-sidecar requires QEMU to be built with RDMA support");
+        return false;
+#endif
     }
 
     return true;

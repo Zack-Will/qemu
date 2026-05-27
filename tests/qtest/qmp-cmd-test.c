@@ -460,6 +460,19 @@ static void test_migrate_set_parameters_cxl_clean_remap(void)
     qtest_quit(qts);
 }
 
+static void qmp_expect_generic_error_desc_and_unref(QDict *resp,
+                                                   const char *desc)
+{
+    QDict *error;
+
+    g_assert_nonnull(resp);
+    error = qdict_get_qdict(resp, "error");
+    g_assert_nonnull(error);
+    g_assert_cmpstr(qdict_get_str(error, "class"), ==, "GenericError");
+    g_assert_cmpstr(qdict_get_str(error, "desc"), ==, desc);
+    qobject_unref(resp);
+}
+
 static void test_migrate_set_parameters_cxl_rdma_sidecar_budgets(void)
 {
     QTestState *qts;
@@ -493,13 +506,17 @@ static void test_migrate_set_parameters_cxl_rdma_sidecar_budgets(void)
                     "  'arguments': {"
                     "    'x-cxl-rdma-sidecar-max-inflight-regions': 0 } }");
     g_assert_nonnull(resp);
-    qmp_expect_error_and_unref(resp, "GenericError");
+    qmp_expect_generic_error_desc_and_unref(
+        resp,
+        "x-cxl-rdma-sidecar-max-inflight-regions must be at least 1");
 
     resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
                     "  'arguments': {"
                     "    'x-cxl-rdma-sidecar-max-cover-percent': 101 } }");
     g_assert_nonnull(resp);
-    qmp_expect_error_and_unref(resp, "GenericError");
+    qmp_expect_generic_error_desc_and_unref(
+        resp,
+        "x-cxl-rdma-sidecar-max-cover-percent must be between 0 and 100");
 
     qtest_quit(qts);
 }
@@ -511,11 +528,22 @@ static void test_migrate_set_parameters_cxl_rdma_sidecar_requires_address(void)
 
     qts = qtest_init(common_args);
 
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-capabilities',"
+                    "  'arguments': { 'capabilities': ["
+                    "    { 'capability': 'mapped-ram', 'state': true },"
+                    "    { 'capability': 'postcopy-ram', 'state': true },"
+                    "    { 'capability': 'x-cxl-hybrid', 'state': true }"
+                    "  ] } }");
+    g_assert_nonnull(resp);
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
+
     resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
                     "  'arguments': {"
                     "    'x-cxl-rdma-sidecar': true } }");
     g_assert_nonnull(resp);
-    qmp_expect_error_and_unref(resp, "GenericError");
+    qmp_expect_generic_error_desc_and_unref(
+        resp, "x-cxl-rdma-sidecar requires an RDMA sidecar address");
 
     qtest_quit(qts);
 }
