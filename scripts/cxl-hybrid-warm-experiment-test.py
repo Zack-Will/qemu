@@ -1480,6 +1480,20 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("if (migrate_cxl_rdma_sidecar()) {", cxl_text)
         self.assertIn("cxl_hybrid_rdma_sidecar_global_init(", cxl_text)
 
+    def test_rdma_sidecar_budget_validation_is_not_sidecar_gated(self):
+        options_text = (REPO_ROOT / "migration" / "options.c").read_text()
+        sidecar_gate = options_text.index("if (params->x_cxl_rdma_sidecar) {")
+        address_check = options_text.index(
+            "x-cxl-rdma-sidecar requires an RDMA sidecar address")
+        max_inflight_check = options_text.index(
+            "x-cxl-rdma-sidecar-max-inflight-regions must be at least 1")
+        cover_percent_check = options_text.index(
+            "x-cxl-rdma-sidecar-max-cover-percent must be between 0 and 100")
+
+        self.assertLess(max_inflight_check, sidecar_gate)
+        self.assertLess(cover_percent_check, sidecar_gate)
+        self.assertGreater(address_check, sidecar_gate)
+
     def test_fault_resolve_mode_cli_passes_override_to_run_matrix(self):
         calls = []
 

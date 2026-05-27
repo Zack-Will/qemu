@@ -1683,6 +1683,18 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->x_cxl_rdma_sidecar_max_inflight_regions < 1) {
+        error_setg(errp,
+                   "x-cxl-rdma-sidecar-max-inflight-regions must be at least 1");
+        return false;
+    }
+
+    if (params->x_cxl_rdma_sidecar_max_cover_percent > 100) {
+        error_setg(errp,
+                   "x-cxl-rdma-sidecar-max-cover-percent must be between 0 and 100");
+        return false;
+    }
+
     if (params->x_cxl_rdma_sidecar) {
 #ifndef CONFIG_RDMA
         error_setg(errp,
@@ -1698,16 +1710,6 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
                 MIGRATION_ADDRESS_TYPE_RDMA) {
             error_setg(errp,
                        "x-cxl-rdma-sidecar requires an RDMA sidecar address");
-            return false;
-        }
-        if (params->x_cxl_rdma_sidecar_max_inflight_regions < 1) {
-            error_setg(errp,
-                       "x-cxl-rdma-sidecar-max-inflight-regions must be at least 1");
-            return false;
-        }
-        if (params->x_cxl_rdma_sidecar_max_cover_percent > 100) {
-            error_setg(errp,
-                       "x-cxl-rdma-sidecar-max-cover-percent must be between 0 and 100");
             return false;
         }
     }
