@@ -82,6 +82,13 @@ RDMA_REGION_TRACE_RE = re.compile(
 RDMA_BULK_TRACE_RE = re.compile(
     r"\bregion=(?P<region>\d+)\b.*\bbytes=(?P<bytes>\d+)\b"
 )
+RDMA_SIDECAR_BYTES_TRACE_RE = re.compile(
+    r"\bregion=(?P<region>\d+)\b.*\bbytes=(?P<bytes>\d+)\b"
+)
+RDMA_SIDECAR_STALE_TRACE_RE = re.compile(
+    r"\bregion=(?P<region>\d+)\b.*\bbytes=(?P<bytes>\d+)\b"
+    r".*\bcxl_race_lost=(?P<cxl_race_lost>[01])\b"
+)
 PUBLISH_SPAN_TRACE_RE = re.compile(
     r"\blen=0x(?P<len>[0-9a-fA-F]+)\b"
     r"(?:.*\bkind=(?P<kind>\d+)\b)?"
@@ -178,6 +185,22 @@ MIGRATION_MODES = (
     "redirect_precopy",
 )
 DEFAULT_MIGRATION_MODE_CSV = "hybrid_postcopy_auto,redirect_precopy"
+RDMA_SIDECAR_METRICS = [
+    "rdma_sidecar_connect_time_ns",
+    "rdma_sidecar_registered_bytes",
+    "rdma_sidecar_posted_regions",
+    "rdma_sidecar_posted_bytes",
+    "rdma_sidecar_completed_regions",
+    "rdma_sidecar_completed_bytes",
+    "rdma_sidecar_stale_regions",
+    "rdma_sidecar_cxl_race_lost_regions",
+    "rdma_sidecar_failed_regions",
+    "rdma_sidecar_no_candidate_events",
+    "rdma_sidecar_budget_skip_events",
+    "rdma_sidecar_max_inflight_regions",
+    "rdma_sidecar_max_cover_percent",
+    "rdma_sidecar_failed",
+]
 THRESHOLD_PROFILES = {
     "conservative": {
         "name": "conservative",
@@ -967,6 +990,7 @@ def trace_count_template():
         "dst_region_remap": 0,
         "rdma_bulk_regions": 0,
         "rdma_bulk_bytes": 0,
+        **{key: 0 for key in RDMA_SIDECAR_METRICS},
         "rdma_ready_regions": 0,
         "rdma_ready_pages": 0,
         "rdma_invalidated_regions": 0,
@@ -1004,6 +1028,8 @@ def parse_trace_log(trace_file: Path):
     counts = {
         **trace_count_template(),
     }
+    rdma_sidecar_schedules = []
+    rdma_sidecar_posts = set()
     for line in out:
         if "cxl_hybrid_phase_transition " in line and " new=4 " in line:
             counts["phase_postcopy_warm"] += 1
@@ -1101,6 +1127,33 @@ def parse_trace_log(trace_file: Path):
             if match:
                 counts["rdma_bulk_regions"] += 1
                 counts["rdma_bulk_bytes"] += int(match.group("bytes"))
+        elif "cxl_rdma_sidecar_post " in line:
+            match = RDMA_SIDECAR_BYTES_TRACE_RE.search(line)
+            if match:
+                region = int(match.group("region"))
+                bytes_ = int(match.group("bytes"))
+                rdma_sidecar_posts.add((region, bytes_))
+                counts["rdma_sidecar_posted_regions"] += 1
+                counts["rdma_sidecar_posted_bytes"] += bytes_
+        elif "cxl_rdma_sidecar_schedule " in line:
+            match = RDMA_SIDECAR_BYTES_TRACE_RE.search(line)
+            if match:
+                rdma_sidecar_schedules.append((
+                    int(match.group("region")),
+                    int(match.group("bytes")),
+                ))
+        elif "cxl_rdma_sidecar_complete " in line:
+            match = RDMA_SIDECAR_BYTES_TRACE_RE.search(line)
+            if match:
+                counts["rdma_sidecar_completed_regions"] += 1
+                counts["rdma_sidecar_completed_bytes"] += int(
+                    match.group("bytes"))
+        elif "cxl_rdma_sidecar_stale " in line:
+            match = RDMA_SIDECAR_STALE_TRACE_RE.search(line)
+            if match:
+                counts["rdma_sidecar_stale_regions"] += 1
+                if int(match.group("cxl_race_lost")):
+                    counts["rdma_sidecar_cxl_race_lost_regions"] += 1
         elif "cxl_hybrid_rdma_ready " in line:
             match = RDMA_REGION_TRACE_RE.search(line)
             if match:
@@ -1173,6 +1226,11 @@ def parse_trace_log(trace_file: Path):
             counts["get_queued_page_not_dirty"] += 1
         elif "get_queued_page " in line:
             counts["get_queued_page"] += 1
+    for region, bytes_ in rdma_sidecar_schedules:
+        if (region, bytes_) in rdma_sidecar_posts:
+            continue
+        counts["rdma_sidecar_posted_regions"] += 1
+        counts["rdma_sidecar_posted_bytes"] += bytes_
     counts["rdma_invalidate_publish_amplification"] = (
         counts["cxl_republish_pages_due_to_rdma_invalidate"] /
         max(counts["rdma_ready_pages_lost"], 1)
@@ -2095,6 +2153,7 @@ def extract_summary(samples):
     region_publish_time_ns = 0
     rdma_bulk_regions = 0
     rdma_bulk_bytes = 0
+    rdma_sidecar_metrics = {key: 0 for key in RDMA_SIDECAR_METRICS}
     rdma_ready_regions = 0
     rdma_ready_pages = 0
     rdma_invalidated_regions = 0
@@ -2274,6 +2333,12 @@ def extract_summary(samples):
             rdma_bulk_bytes,
             src_xcxl.get("rdma-bulk-bytes", 0),
             dst_xcxl.get("rdma-bulk-bytes", 0))
+        for key in RDMA_SIDECAR_METRICS:
+            qmp_key = key.replace("_", "-")
+            rdma_sidecar_metrics[key] = max(
+                rdma_sidecar_metrics[key],
+                src_xcxl.get(qmp_key, 0),
+                dst_xcxl.get(qmp_key, 0))
         rdma_ready_regions = max(
             rdma_ready_regions,
             src_xcxl.get("rdma-ready-regions", 0),
@@ -2513,6 +2578,7 @@ def extract_summary(samples):
         "region_publish_time_ns": region_publish_time_ns,
         "rdma_bulk_regions": rdma_bulk_regions,
         "rdma_bulk_bytes": rdma_bulk_bytes,
+        **rdma_sidecar_metrics,
         "rdma_ready_regions": rdma_ready_regions,
         "rdma_ready_pages": rdma_ready_pages,
         "rdma_invalidated_regions": rdma_invalidated_regions,
@@ -3508,6 +3574,10 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
         cxl_republish_pages_due_to_rdma_invalidate /
         max(rdma_ready_pages_lost, 1)
     )
+    rdma_sidecar_metrics = {
+        key: max(summary.get(key, 0), trace.get(key, 0))
+        for key in RDMA_SIDECAR_METRICS
+    }
 
     return {
         "pressure": pressure,
@@ -3605,6 +3675,7 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
         "rdma_bulk_bytes":
             max(summary.get("rdma_bulk_bytes", 0),
                 trace.get("rdma_bulk_bytes", 0)),
+        **rdma_sidecar_metrics,
         "rdma_ready_regions":
             max(summary.get("rdma_ready_regions", 0),
                 trace.get("rdma_ready_regions", 0)),
@@ -4154,6 +4225,7 @@ def summarize_grouped_runs(pressure, mode, threshold_profile, run_results, rows)
         "region_publish_mean_ns",
         "rdma_bulk_regions",
         "rdma_bulk_bytes",
+        *RDMA_SIDECAR_METRICS,
         "rdma_ready_regions",
         "rdma_ready_pages",
         "rdma_invalidated_regions",

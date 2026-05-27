@@ -179,6 +179,20 @@ typedef struct CXLHybridDstRegionState {
 } CXLHybridDstRegionState;
 
 typedef struct CXLHybridRDMASidecarStats {
+    uint64_t rdma_sidecar_connect_time_ns;
+    uint64_t rdma_sidecar_registered_bytes;
+    uint64_t rdma_sidecar_posted_regions;
+    uint64_t rdma_sidecar_posted_bytes;
+    uint64_t rdma_sidecar_completed_regions;
+    uint64_t rdma_sidecar_completed_bytes;
+    uint64_t rdma_sidecar_stale_regions;
+    uint64_t rdma_sidecar_cxl_race_lost_regions;
+    uint64_t rdma_sidecar_failed_regions;
+    uint64_t rdma_sidecar_no_candidate_events;
+    uint64_t rdma_sidecar_budget_skip_events;
+    uint32_t rdma_sidecar_max_inflight_regions;
+    uint8_t rdma_sidecar_max_cover_percent;
+    bool rdma_sidecar_failed;
     uint64_t rdma_ready_regions;
     uint64_t rdma_ready_pages;
     uint64_t rdma_invalidated_regions;
@@ -404,6 +418,20 @@ void cxl_hybrid_account_rdma_invalidate(uint64_t region_index,
 void cxl_hybrid_account_rdma_cxl_republish(uint64_t region_index,
                                            uint64_t pages);
 void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats);
+void cxl_hybrid_account_rdma_sidecar_connect(uint64_t time_ns);
+void cxl_hybrid_account_rdma_sidecar_registered(uint64_t bytes);
+void cxl_hybrid_account_rdma_sidecar_posted(uint64_t region_index,
+                                            uint64_t bytes);
+void cxl_hybrid_account_rdma_sidecar_completed(uint64_t region_index,
+                                               uint64_t bytes);
+void cxl_hybrid_account_rdma_sidecar_stale(uint64_t region_index,
+                                           uint64_t bytes,
+                                           bool cxl_race_lost);
+void cxl_hybrid_account_rdma_sidecar_failed(uint64_t region_index);
+void cxl_hybrid_account_rdma_sidecar_no_candidate(void);
+void cxl_hybrid_account_rdma_sidecar_budget_skip(void);
+void cxl_hybrid_set_rdma_sidecar_budget_stats(uint32_t max_inflight,
+                                              uint8_t max_cover_percent);
 bool cxl_hybrid_region_is_rdma_owned(uint64_t region_index);
 bool cxl_hybrid_region_try_own_rdma(uint64_t region_index);
 bool cxl_hybrid_region_try_own_cxl(uint64_t region_index);

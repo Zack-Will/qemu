@@ -631,12 +631,129 @@ void cxl_hybrid_account_rdma_cxl_republish(uint64_t region_index,
     trace_cxl_hybrid_rdma_cxl_republish(region_index, pages);
 }
 
+void cxl_hybrid_account_rdma_sidecar_connect(uint64_t time_ns)
+{
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_connect_time_ns, time_ns);
+    trace_cxl_rdma_sidecar_connect_complete(time_ns);
+}
+
+void cxl_hybrid_account_rdma_sidecar_registered(uint64_t bytes)
+{
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_registered_bytes, bytes);
+    trace_cxl_rdma_sidecar_register(bytes);
+}
+
+void cxl_hybrid_account_rdma_sidecar_posted(uint64_t region_index,
+                                            uint64_t bytes)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_posted_regions);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_posted_bytes, bytes);
+    trace_cxl_rdma_sidecar_schedule(region_index, bytes);
+}
+
+void cxl_hybrid_account_rdma_sidecar_completed(uint64_t region_index,
+                                               uint64_t bytes)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_completed_regions);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_completed_bytes, bytes);
+    trace_cxl_rdma_sidecar_complete(region_index, bytes);
+}
+
+void cxl_hybrid_account_rdma_sidecar_stale(uint64_t region_index,
+                                           uint64_t bytes,
+                                           bool cxl_race_lost)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_stale_regions);
+    if (cxl_race_lost) {
+        qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                    rdma_sidecar_cxl_race_lost_regions);
+    }
+    trace_cxl_rdma_sidecar_stale(region_index, bytes, cxl_race_lost);
+}
+
+void cxl_hybrid_account_rdma_sidecar_failed(uint64_t region_index)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed_regions);
+    qatomic_set(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed, true);
+    trace_cxl_rdma_sidecar_failed(region_index);
+}
+
+void cxl_hybrid_account_rdma_sidecar_no_candidate(void)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_no_candidate_events);
+    trace_cxl_rdma_sidecar_no_candidate();
+}
+
+void cxl_hybrid_account_rdma_sidecar_budget_skip(void)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_budget_skip_events);
+    trace_cxl_rdma_sidecar_budget_skip();
+}
+
+void cxl_hybrid_set_rdma_sidecar_budget_stats(uint32_t max_inflight,
+                                              uint8_t max_cover_percent)
+{
+    qatomic_set(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_max_inflight_regions, max_inflight);
+    qatomic_set(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_max_cover_percent, max_cover_percent);
+}
+
 void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats)
 {
     if (!stats) {
         return;
     }
 
+    stats->rdma_sidecar_connect_time_ns =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_connect_time_ns);
+    stats->rdma_sidecar_registered_bytes =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_registered_bytes);
+    stats->rdma_sidecar_posted_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_posted_regions);
+    stats->rdma_sidecar_posted_bytes =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_posted_bytes);
+    stats->rdma_sidecar_completed_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_completed_regions);
+    stats->rdma_sidecar_completed_bytes =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_completed_bytes);
+    stats->rdma_sidecar_stale_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_stale_regions);
+    stats->rdma_sidecar_cxl_race_lost_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_cxl_race_lost_regions);
+    stats->rdma_sidecar_failed_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_failed_regions);
+    stats->rdma_sidecar_no_candidate_events =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_no_candidate_events);
+    stats->rdma_sidecar_budget_skip_events =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_budget_skip_events);
+    stats->rdma_sidecar_max_inflight_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_max_inflight_regions);
+    stats->rdma_sidecar_max_cover_percent =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_max_cover_percent);
+    stats->rdma_sidecar_failed =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed);
     stats->rdma_ready_regions =
         qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_regions);
     stats->rdma_ready_pages =

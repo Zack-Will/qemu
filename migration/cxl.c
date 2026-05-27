@@ -2180,6 +2180,34 @@ void cxl_populate_migration_info(MigrationInfo *info)
         rdma_bulk_stats.rdma_bulk_regions;
     info->x_cxl->rdma_bulk_bytes =
         rdma_bulk_stats.rdma_bulk_bytes;
+    info->x_cxl->rdma_sidecar_connect_time_ns =
+        rdma_stats.rdma_sidecar_connect_time_ns;
+    info->x_cxl->rdma_sidecar_registered_bytes =
+        rdma_stats.rdma_sidecar_registered_bytes;
+    info->x_cxl->rdma_sidecar_posted_regions =
+        rdma_stats.rdma_sidecar_posted_regions;
+    info->x_cxl->rdma_sidecar_posted_bytes =
+        rdma_stats.rdma_sidecar_posted_bytes;
+    info->x_cxl->rdma_sidecar_completed_regions =
+        rdma_stats.rdma_sidecar_completed_regions;
+    info->x_cxl->rdma_sidecar_completed_bytes =
+        rdma_stats.rdma_sidecar_completed_bytes;
+    info->x_cxl->rdma_sidecar_stale_regions =
+        rdma_stats.rdma_sidecar_stale_regions;
+    info->x_cxl->rdma_sidecar_cxl_race_lost_regions =
+        rdma_stats.rdma_sidecar_cxl_race_lost_regions;
+    info->x_cxl->rdma_sidecar_failed_regions =
+        rdma_stats.rdma_sidecar_failed_regions;
+    info->x_cxl->rdma_sidecar_no_candidate_events =
+        rdma_stats.rdma_sidecar_no_candidate_events;
+    info->x_cxl->rdma_sidecar_budget_skip_events =
+        rdma_stats.rdma_sidecar_budget_skip_events;
+    info->x_cxl->rdma_sidecar_max_inflight_regions =
+        rdma_stats.rdma_sidecar_max_inflight_regions;
+    info->x_cxl->rdma_sidecar_max_cover_percent =
+        rdma_stats.rdma_sidecar_max_cover_percent;
+    info->x_cxl->rdma_sidecar_failed =
+        rdma_stats.rdma_sidecar_failed;
     info->x_cxl->rdma_ready_regions =
         rdma_stats.rdma_ready_regions;
     info->x_cxl->rdma_ready_pages =
@@ -4449,6 +4477,9 @@ static void cxl_remap_state_init(int fd, uint64_t align, int64_t dev_size)
         cxl_hybrid_rdma_sidecar_global_init(
             cxl_state.total_regions,
             DIV_ROUND_UP(cxl_state.remap_granule, TARGET_PAGE_SIZE));
+        cxl_hybrid_set_rdma_sidecar_budget_stats(
+            migrate_cxl_rdma_sidecar_max_inflight_regions(),
+            migrate_cxl_rdma_sidecar_max_cover_percent());
         cxl_rdma_sidecar_init(
             cxl_state.total_regions, cxl_state.remap_granule,
             DIV_ROUND_UP(cxl_state.remap_granule, TARGET_PAGE_SIZE));

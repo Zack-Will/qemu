@@ -666,6 +666,48 @@
 #
 # @rdma-bulk-bytes: bytes covered by @rdma-bulk-regions.  (Since 11.0)
 #
+# @rdma-sidecar-connect-time-ns: cumulative nanoseconds spent
+#     establishing the RDMA sidecar connection.  (Since 11.0)
+#
+# @rdma-sidecar-registered-bytes: bytes registered for RDMA sidecar
+#     transport.  (Since 11.0)
+#
+# @rdma-sidecar-posted-regions: number of RDMA sidecar region
+#     transfers posted.  (Since 11.0)
+#
+# @rdma-sidecar-posted-bytes: bytes covered by RDMA sidecar posted
+#     transfers.  (Since 11.0)
+#
+# @rdma-sidecar-completed-regions: number of RDMA sidecar region
+#     transfers completed while still useful.  (Since 11.0)
+#
+# @rdma-sidecar-completed-bytes: bytes covered by completed RDMA
+#     sidecar transfers.  (Since 11.0)
+#
+# @rdma-sidecar-stale-regions: number of RDMA sidecar completions
+#     that became stale before use.  (Since 11.0)
+#
+# @rdma-sidecar-cxl-race-lost-regions: number of stale RDMA sidecar
+#     completions where CXL won the region race.  (Since 11.0)
+#
+# @rdma-sidecar-failed-regions: number of RDMA sidecar region
+#     failures.  (Since 11.0)
+#
+# @rdma-sidecar-no-candidate-events: number of scans that found no
+#     RDMA sidecar candidate.  (Since 11.0)
+#
+# @rdma-sidecar-budget-skip-events: number of RDMA sidecar skips due
+#     to configured budget.  (Since 11.0)
+#
+# @rdma-sidecar-max-inflight-regions: configured maximum RDMA sidecar
+#     inflight regions.  (Since 11.0)
+#
+# @rdma-sidecar-max-cover-percent: configured maximum RDMA sidecar
+#     guest coverage percentage.  (Since 11.0)
+#
+# @rdma-sidecar-failed: whether any RDMA sidecar region failed.
+#     (Since 11.0)
+#
 # @rdma-ready-regions: number of whole fault regions copied by the
 #     hybrid RDMA sidecar and still considered source-current when
 #     marked ready.  (Since 11.0)
@@ -812,6 +854,19 @@
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
 #     @rdma-bulk-regions, @rdma-bulk-bytes,
+#     @rdma-sidecar-connect-time-ns,
+#     @rdma-sidecar-registered-bytes,
+#     @rdma-sidecar-posted-regions,
+#     @rdma-sidecar-posted-bytes,
+#     @rdma-sidecar-completed-regions,
+#     @rdma-sidecar-completed-bytes,
+#     @rdma-sidecar-stale-regions,
+#     @rdma-sidecar-cxl-race-lost-regions,
+#     @rdma-sidecar-failed-regions,
+#     @rdma-sidecar-no-candidate-events,
+#     @rdma-sidecar-budget-skip-events,
+#     @rdma-sidecar-max-inflight-regions,
+#     @rdma-sidecar-max-cover-percent, @rdma-sidecar-failed,
 #     @rdma-ready-regions, @rdma-ready-pages,
 #     @rdma-invalidated-regions, @rdma-ready-pages-lost,
 #     @cxl-republish-regions-due-to-rdma-invalidate,
@@ -990,6 +1045,34 @@
                                    'features': [ 'unstable' ] },
             'rdma-bulk-bytes': { 'type': 'uint64',
                                  'features': [ 'unstable' ] },
+            'rdma-sidecar-connect-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-registered-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-posted-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-posted-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-completed-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-stale-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-cxl-race-lost-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-failed-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-no-candidate-events': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-budget-skip-events': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-max-inflight-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-max-cover-percent': {
+                'type': 'uint8', 'features': [ 'unstable' ] },
+            'rdma-sidecar-failed': { 'type': 'bool',
+                                     'features': [ 'unstable' ] },
             'rdma-ready-regions': { 'type': 'uint64',
                                     'features': [ 'unstable' ] },
             'rdma-ready-pages': { 'type': 'uint64',

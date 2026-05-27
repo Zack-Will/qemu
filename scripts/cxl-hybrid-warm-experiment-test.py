@@ -25,6 +25,21 @@ class WarmExperimentScriptTest(unittest.TestCase):
     def setUp(self):
         self.mod = load_module()
 
+    def test_rdma_sidecar_posted_accounting_emits_schedule_trace(self):
+        source = (REPO_ROOT / "migration" / "cxl-region.c").read_text()
+
+        fn_start = source.index(
+            "void cxl_hybrid_account_rdma_sidecar_posted(")
+        fn_end = source.index(
+            "void cxl_hybrid_account_rdma_sidecar_completed(")
+        fn_body = source[fn_start:fn_end]
+
+        self.assertIn(
+            "trace_cxl_rdma_sidecar_schedule(region_index, bytes);",
+            fn_body,
+        )
+        self.assertNotIn("trace_cxl_rdma_sidecar_post(", fn_body)
+
     def test_cxl_source_visibility_producers_drive_shared_bitmap(self):
         source = (REPO_ROOT / "migration" / "cxl.c").read_text()
 
@@ -1776,6 +1791,50 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(summary["rdma_ready_regions"], 3)
         self.assertEqual(summary["rdma_ready_pages"], 1536)
 
+    def test_rdma_sidecar_failed_is_exported_from_qapi_summary(self):
+        summary = self.mod.extract_summary([
+            {
+                "x-cxl": {
+                    "rdma-sidecar-failed": False,
+                },
+                "dst-query-migrate": {
+                    "x-cxl": {
+                        "rdma-sidecar-failed": True,
+                    }
+                },
+            }
+        ])
+        default_summary = self.mod.extract_summary([{}])
+
+        self.assertEqual(summary["rdma_sidecar_failed"], True)
+        self.assertEqual(default_summary["rdma_sidecar_failed"], 0)
+
+        row = self.mod.summarize_single_result(
+            "remap_xlarge_random_rw",
+            "hybrid_parallel_rdma_cxl",
+            self.mod.resolve_threshold_profile("balanced"),
+            1,
+            {
+                "summary": summary,
+                "trace": {"combined": self.mod.trace_count_template()},
+                "latency": {},
+            },
+        )
+        default_row = self.mod.summarize_single_result(
+            "remap_xlarge_random_rw",
+            "hybrid_parallel_rdma_cxl",
+            self.mod.resolve_threshold_profile("balanced"),
+            2,
+            {
+                "summary": default_summary,
+                "trace": {"combined": self.mod.trace_count_template()},
+                "latency": {},
+            },
+        )
+
+        self.assertEqual(row["rdma_sidecar_failed"], True)
+        self.assertEqual(default_row["rdma_sidecar_failed"], 0)
+
     def test_rdma_bulk_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             trace = Path(tmpdir) / "trace.log"
@@ -1788,6 +1847,81 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertEqual(counts["rdma_bulk_regions"], 1)
         self.assertEqual(counts["rdma_bulk_bytes"], 2 * 1024 * 1024)
+
+    def test_rdma_sidecar_trace_events_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace = Path(tmpdir) / "trace.log"
+            trace.write_text(
+                "\n".join([
+                    "cxl_rdma_sidecar_post region=2 local=0x1000 "
+                    "remote=0x2000 bytes=2097152",
+                    "cxl_rdma_sidecar_complete region=2 bytes=2097152",
+                    "cxl_rdma_sidecar_stale region=3 bytes=1048576 "
+                    "cxl_race_lost=1",
+                ]) + "\n",
+                encoding="ascii",
+            )
+
+            counts = self.mod.parse_trace_log(trace)
+
+        self.assertEqual(counts["rdma_sidecar_posted_regions"], 1)
+        self.assertEqual(counts["rdma_sidecar_posted_bytes"], 2 * 1024 * 1024)
+        self.assertEqual(counts["rdma_sidecar_completed_regions"], 1)
+        self.assertEqual(
+            counts["rdma_sidecar_completed_bytes"], 2 * 1024 * 1024
+        )
+        self.assertEqual(counts["rdma_sidecar_stale_regions"], 1)
+        self.assertEqual(counts["rdma_sidecar_cxl_race_lost_regions"], 1)
+
+    def test_rdma_sidecar_schedule_trace_is_posted_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace = Path(tmpdir) / "trace.log"
+            trace.write_text(
+                "\n".join([
+                    "cxl_rdma_sidecar_schedule region=2 bytes=2097152",
+                    "cxl_rdma_sidecar_schedule region=3 bytes=1048576",
+                ]) + "\n",
+                encoding="ascii",
+            )
+
+            counts = self.mod.parse_trace_log(trace)
+
+        self.assertEqual(counts["rdma_sidecar_posted_regions"], 2)
+        self.assertEqual(counts["rdma_sidecar_posted_bytes"], 3 * 1024 * 1024)
+
+    def test_rdma_sidecar_post_trace_wins_over_schedule_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace = Path(tmpdir) / "trace.log"
+            trace.write_text(
+                "\n".join([
+                    "cxl_rdma_sidecar_schedule region=2 bytes=2097152",
+                    "cxl_rdma_sidecar_post region=2 local=0x1000 "
+                    "remote=0x2000 bytes=2097152",
+                ]) + "\n",
+                encoding="ascii",
+            )
+
+            counts = self.mod.parse_trace_log(trace)
+
+        self.assertEqual(counts["rdma_sidecar_posted_regions"], 1)
+        self.assertEqual(counts["rdma_sidecar_posted_bytes"], 2 * 1024 * 1024)
+
+    def test_rdma_sidecar_schedule_and_post_unique_transfers_both_count(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace = Path(tmpdir) / "trace.log"
+            trace.write_text(
+                "\n".join([
+                    "cxl_rdma_sidecar_schedule region=2 bytes=2097152",
+                    "cxl_rdma_sidecar_post region=3 local=0x1000 "
+                    "remote=0x2000 bytes=1048576",
+                ]) + "\n",
+                encoding="ascii",
+            )
+
+            counts = self.mod.parse_trace_log(trace)
+
+        self.assertEqual(counts["rdma_sidecar_posted_regions"], 2)
+        self.assertEqual(counts["rdma_sidecar_posted_bytes"], 3 * 1024 * 1024)
 
     def test_rdma_fallback_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
