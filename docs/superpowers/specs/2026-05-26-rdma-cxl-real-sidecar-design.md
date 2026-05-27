@@ -73,18 +73,29 @@ path and is not the desired model for this work.
 
 RDMA is opportunistic. It must not block or starve the CXL main stream.
 
-The sidecar owns a worker thread with a small in-flight window. When the worker
-has capacity, it selects one clean whole region that satisfies all of these
-conditions:
+The sidecar owns a worker thread with a small in-flight window. For this
+revision, RDMA only participates in the bulk phase. Bulk-phase RAM migration
+starts from pages that are dirty in the migration bitmap, so dirty state is the
+source of work, not a reason to skip a region.
+
+When the worker has capacity, it selects one pending whole region that satisfies
+all of these conditions:
 
 - region is inside the mapped CXL backing range;
 - region is not already CXL-visible;
 - region has not already been fully migrated by CXL;
 - region is not remapped;
-- region is not dirty in the current source dirty bitmap view;
+- region has pending migration work in the current bulk dirty bitmap view;
 - region is not already in RDMA in-flight, ready, committed, or invalidated
   state;
 - total accepted RDMA coverage remains within the configured sidecar budget.
+
+RDMA claim must be synchronized with the migration bitmap. Claiming a region
+captures the current source contents as the RDMA transfer snapshot and clears or
+records the corresponding pending bits for that region under the same locking
+discipline used by RAM bulk migration. Any guest write after that claim sets the
+region dirty again; completion then becomes stale or a later final dirty sync
+invalidates the ready region.
 
 Default policy:
 
@@ -107,7 +118,8 @@ Use region-level source-authoritative state:
 - `rdma_candidate`: selected by the scheduler.
 - `rdma_inflight`: RDMA write posted and not completed.
 - `rdma_ready`: RDMA write completed and still current.
-- `rdma_stale`: RDMA work completed after the region was dirtied or won by CXL.
+- `rdma_stale`: RDMA work completed after the claimed snapshot was dirtied
+  again or after CXL already published the region.
 - `rdma_committed`: switch-time final dirty sync kept the ready region current
   and CXL control visibility was published.
 - `rdma_invalidated`: a ready region became dirty before commit.
@@ -117,7 +129,7 @@ CXL state remains authoritative for destination consumption:
 - RDMA-ready does not make a page visible to the destination guest.
 - `cxl_hybrid_commit_rdma_ready_regions_for_postcopy()` or its successor commits
   only ready and still-current regions.
-- Dirty pages after RDMA completion invalidate the whole region in v1.
+- Dirty pages after RDMA claim or completion invalidate the whole region in v1.
 - Invalidated or stale RDMA regions fall back to normal CXL postcopy region
   publication.
 
@@ -127,13 +139,15 @@ CXL state remains authoritative for destination consumption:
    memory range.
 2. Source initializes CXL hybrid state and connects the RDMA sidecar endpoint.
 3. The normal CXL bulk path continues migrating pages and publishing CXL state.
-4. The RDMA worker opportunistically posts a whole-region RDMA write for a clean,
-   not-yet-migrated region.
-5. If RDMA completes first and the region is still clean, the source marks it
-   `rdma_ready`.
+4. The RDMA worker opportunistically claims a pending bulk region, captures that
+   source snapshot in the migration dirty state, and posts a whole-region RDMA
+   write.
+5. If RDMA completes before the claimed snapshot is dirtied again and before CXL
+   publishes the region, the source marks it `rdma_ready`.
 6. If CXL migrates or publishes the region first, the RDMA completion becomes
    stale and does not affect visibility.
-7. At postcopy switch, final dirty sync invalidates stale ready regions.
+7. At postcopy switch, final dirty sync invalidates ready regions dirtied after
+   RDMA claim or completion.
 8. Still-ready regions are committed into the CXL visibility contract.
 9. Destination faults for all non-visible regions continue to use CXL postcopy
    region publication.
@@ -221,8 +235,11 @@ Unit tests:
 - enabling sidecar without `CONFIG_RDMA` fails validation;
 - sidecar parameter validation accepts host, port, pin-all, in-flight, and cover
   budget values;
-- region selector skips visible, migrated, remapped, dirty, in-flight, ready,
-  invalidated, and over-budget regions;
+- region selector accepts pending dirty bulk regions and skips visible,
+  migrated, remapped, non-pending, in-flight, ready, invalidated, and
+  over-budget regions;
+- RDMA claim records or clears the selected region's current bulk dirty bitmap
+  state so later guest writes can be detected as new dirties;
 - CXL can publish a region while RDMA is in flight, and CXL wins the race;
 - RDMA completion after CXL publication is counted stale and not committed;
 - dirtying a ready RDMA region invalidates the whole region;
