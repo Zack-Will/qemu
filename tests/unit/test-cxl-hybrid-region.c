@@ -472,19 +472,19 @@ static void test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish(v
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
 }
 
-static void test_rdma_sidecar_region_ownership_is_exclusive(void)
+static void test_rdma_sidecar_inflight_does_not_block_cxl(void)
 {
     CXLHybridRDMASidecarState state = { 0 };
 
     cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 8, 512);
 
-    g_assert_false(cxl_hybrid_rdma_sidecar_region_is_rdma_owned(&state, 2));
-    g_assert_true(cxl_hybrid_rdma_sidecar_try_own_region(&state, 2));
-    g_assert_true(cxl_hybrid_rdma_sidecar_region_is_rdma_owned(&state, 2));
-    g_assert_false(cxl_hybrid_rdma_sidecar_try_own_region(&state, 2));
-    cxl_hybrid_rdma_sidecar_drop_region(&state, 2);
-    g_assert_false(cxl_hybrid_rdma_sidecar_region_is_rdma_owned(&state, 2));
-    g_assert_true(cxl_hybrid_rdma_sidecar_try_own_region(&state, 2));
+    g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, 3));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_inflight(&state, 3));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(&state, 3));
+    g_assert_true(cxl_hybrid_rdma_sidecar_note_cxl_publish(&state, 3));
+    g_assert_true(cxl_hybrid_rdma_sidecar_complete_region(&state, 3));
+    g_assert_false(cxl_hybrid_rdma_sidecar_region_ready_current(&state, 3));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_stale(&state, 3));
 
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
 }
@@ -605,22 +605,24 @@ static void test_rdma_sidecar_bulk_submit_marks_ready_without_commit(void)
     cxl_hybrid_reset_rdma_sidecar_stats_for_test();
 }
 
-static void test_rdma_sidecar_cxl_bulk_excludes_rdma_owned_region(void)
+static void test_rdma_sidecar_ready_commit_and_dirty_invalidate(void)
 {
     CXLHybridRDMASidecarState state = { 0 };
 
     cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 8, 512);
 
-    g_assert_true(cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(&state, 3));
-    g_assert_true(cxl_hybrid_rdma_sidecar_try_own_region(&state, 3));
-    g_assert_false(cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(&state, 3));
-    g_assert_false(cxl_hybrid_rdma_sidecar_try_own_cxl_region(&state, 3));
+    g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, 1));
+    g_assert_true(cxl_hybrid_rdma_sidecar_complete_region(&state, 1));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_ready_current(&state, 1));
+    g_assert_true(cxl_hybrid_rdma_sidecar_commit_ready_region(&state, 1));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_committed(&state, 1));
 
-    cxl_hybrid_rdma_sidecar_drop_region(&state, 3);
-    g_assert_true(cxl_hybrid_rdma_sidecar_try_own_cxl_region(&state, 3));
-    g_assert_true(cxl_hybrid_rdma_sidecar_region_is_cxl_owned(&state, 3));
-    g_assert_false(cxl_hybrid_rdma_sidecar_try_own_region(&state, 3));
-    g_assert_false(cxl_hybrid_rdma_sidecar_mark_ready(&state, 3));
+    g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, 2));
+    g_assert_true(cxl_hybrid_rdma_sidecar_complete_region(&state, 2));
+    g_assert_true(cxl_hybrid_rdma_sidecar_invalidate_ready(&state, 2));
+    g_assert_false(cxl_hybrid_rdma_sidecar_commit_ready_region(&state, 2));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_invalidated(&state, 2));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(&state, 2));
 
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
 }
@@ -677,6 +679,31 @@ static void test_rdma_sidecar_invalidated_region_republishes_once(void)
     g_assert_cmpuint(stats.cxl_republish_pages_due_to_rdma_invalidate, ==, 512);
 
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
+}
+
+static void test_rdma_sidecar_global_republish_is_idempotent(void)
+{
+    CXLHybridRDMASidecarStats stats = { 0 };
+
+    cxl_hybrid_reset_rdma_sidecar_stats_for_test();
+    cxl_hybrid_rdma_sidecar_global_init(4, 512);
+
+    g_assert_true(cxl_hybrid_region_try_own_rdma(2));
+    cxl_hybrid_mark_region_rdma_ready(2);
+    cxl_hybrid_invalidate_region_rdma_ready(2);
+
+    g_assert_true(cxl_hybrid_region_note_cxl_republish(2));
+    cxl_hybrid_get_rdma_sidecar_stats(&stats);
+    g_assert_cmpuint(stats.cxl_republish_regions_due_to_rdma_invalidate, ==, 1);
+    g_assert_cmpuint(stats.cxl_republish_pages_due_to_rdma_invalidate, ==, 512);
+
+    g_assert_false(cxl_hybrid_region_note_cxl_republish(2));
+    cxl_hybrid_get_rdma_sidecar_stats(&stats);
+    g_assert_cmpuint(stats.cxl_republish_regions_due_to_rdma_invalidate, ==, 1);
+    g_assert_cmpuint(stats.cxl_republish_pages_due_to_rdma_invalidate, ==, 512);
+
+    cxl_hybrid_rdma_sidecar_global_destroy();
+    cxl_hybrid_reset_rdma_sidecar_stats_for_test();
 }
 
 static void test_rdma_sidecar_switch_commits_only_final_clean_ready_regions(void)
@@ -763,8 +790,8 @@ int main(int argc, char **argv)
                     test_warm_page_eligible_excludes_already_visible_pages);
     g_test_add_func("/cxl/region/rdma-sidecar-accounting",
                     test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish);
-    g_test_add_func("/cxl/region/rdma-sidecar-region-ownership",
-                    test_rdma_sidecar_region_ownership_is_exclusive);
+    g_test_add_func("/cxl/region/rdma-sidecar-inflight-does-not-block-cxl",
+                    test_rdma_sidecar_inflight_does_not_block_cxl);
     g_test_add_func("/cxl/region/rdma-sidecar-dirty-invalidation-clears-ready",
                     test_rdma_sidecar_dirty_invalidation_clears_ready);
     g_test_add_func("/cxl/region/rdma-sidecar-commit-current-ready",
@@ -775,12 +802,14 @@ int main(int argc, char **argv)
                     test_rdma_sidecar_transport_stats_accounting);
     g_test_add_func("/cxl/region/rdma-sidecar-bulk-submit",
                     test_rdma_sidecar_bulk_submit_marks_ready_without_commit);
-    g_test_add_func("/cxl/region/rdma-sidecar-cxl-bulk-excludes-rdma-owned",
-                    test_rdma_sidecar_cxl_bulk_excludes_rdma_owned_region);
+    g_test_add_func("/cxl/region/rdma-sidecar-ready-commit-dirty-invalidate",
+                    test_rdma_sidecar_ready_commit_and_dirty_invalidate);
     g_test_add_func("/cxl/region/rdma-sidecar-dirty-sync-invalidates-ready",
                     test_rdma_sidecar_dirty_sync_invalidates_ready_regions);
     g_test_add_func("/cxl/region/rdma-sidecar-invalidated-region-republishes-once",
                     test_rdma_sidecar_invalidated_region_republishes_once);
+    g_test_add_func("/cxl/region/rdma-sidecar-global-republish-idempotent",
+                    test_rdma_sidecar_global_republish_is_idempotent);
     g_test_add_func("/cxl/region/rdma-sidecar-switch-commits-final-clean",
                     test_rdma_sidecar_switch_commits_only_final_clean_ready_regions);
     return g_test_run();

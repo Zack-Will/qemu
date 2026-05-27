@@ -202,14 +202,18 @@ typedef struct CXLHybridRDMASidecarStats {
 } CXLHybridRDMASidecarStats;
 
 typedef struct CXLHybridRDMASidecarState {
-    unsigned long *owned_bmap;
-    unsigned long *cxl_owned_bmap;
+    unsigned long *candidate_bmap;
+    unsigned long *inflight_bmap;
     unsigned long *ready_bmap;
+    unsigned long *stale_bmap;
+    unsigned long *cxl_published_bmap;
     unsigned long *invalidated_bmap;
     unsigned long *republished_bmap;
     unsigned long *committed_bmap;
     uint64_t total_regions;
     uint64_t pages_per_region;
+    uint64_t accepted_regions;
+    uint64_t max_accepted_regions;
     CXLHybridRDMASidecarStats stats;
 } CXLHybridRDMASidecarState;
 
@@ -378,6 +382,15 @@ bool cxl_hybrid_rdma_sidecar_region_is_cxl_owned(
 bool cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(
     const CXLHybridRDMASidecarState *state,
     uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_try_start_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_complete_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_region_inflight(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
 void cxl_hybrid_rdma_sidecar_drop_region(
     CXLHybridRDMASidecarState *state,
     uint64_t region_index);
@@ -395,6 +408,15 @@ bool cxl_hybrid_rdma_sidecar_commit_ready_region(
     uint64_t region_index);
 bool cxl_hybrid_rdma_sidecar_region_committed(
     const CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_region_invalidated(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_region_stale(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index);
+bool cxl_hybrid_rdma_sidecar_note_cxl_publish(
+    CXLHybridRDMASidecarState *state,
     uint64_t region_index);
 bool cxl_hybrid_rdma_sidecar_note_cxl_republish(
     CXLHybridRDMASidecarState *state,
