@@ -460,6 +460,66 @@ static void test_migrate_set_parameters_cxl_clean_remap(void)
     qtest_quit(qts);
 }
 
+static void test_migrate_set_parameters_cxl_rdma_sidecar_budgets(void)
+{
+    QTestState *qts;
+    QDict *resp;
+    QDict *ret;
+
+    qts = qtest_init(common_args);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': {"
+                    "    'x-cxl-rdma-sidecar-max-inflight-regions': 3,"
+                    "    'x-cxl-rdma-sidecar-max-cover-percent': 50,"
+                    "    'x-cxl-rdma-sidecar-region-bytes': 1048576 } }");
+    g_assert_nonnull(resp);
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'query-migrate-parameters' }");
+    g_assert_nonnull(resp);
+    ret = qdict_get_qdict(resp, "return");
+    g_assert_nonnull(ret);
+    g_assert_cmpint(qdict_get_int(
+                    ret, "x-cxl-rdma-sidecar-max-inflight-regions"), ==, 3);
+    g_assert_cmpint(qdict_get_int(
+                    ret, "x-cxl-rdma-sidecar-max-cover-percent"), ==, 50);
+    g_assert_cmpint(qdict_get_int(
+                    ret, "x-cxl-rdma-sidecar-region-bytes"), ==, 1048576);
+    qobject_unref(resp);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': {"
+                    "    'x-cxl-rdma-sidecar-max-inflight-regions': 0 } }");
+    g_assert_nonnull(resp);
+    qmp_expect_error_and_unref(resp, "GenericError");
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': {"
+                    "    'x-cxl-rdma-sidecar-max-cover-percent': 101 } }");
+    g_assert_nonnull(resp);
+    qmp_expect_error_and_unref(resp, "GenericError");
+
+    qtest_quit(qts);
+}
+
+static void test_migrate_set_parameters_cxl_rdma_sidecar_requires_address(void)
+{
+    QTestState *qts;
+    QDict *resp;
+
+    qts = qtest_init(common_args);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': {"
+                    "    'x-cxl-rdma-sidecar': true } }");
+    g_assert_nonnull(resp);
+    qmp_expect_error_and_unref(resp, "GenericError");
+
+    qtest_quit(qts);
+}
+
 static void assert_schema_object_has_member(SchemaInfo *type,
                                             const char *member_name)
 {
@@ -582,6 +642,10 @@ int main(int argc, char *argv[])
                    test_migrate_set_parameters_cxl_backing_rate);
     qtest_add_func("qmp/migrate-set-parameters/cxl-clean-remap",
                    test_migrate_set_parameters_cxl_clean_remap);
+    qtest_add_func("qmp/migrate-set-parameters/cxl-rdma-sidecar-budgets",
+                   test_migrate_set_parameters_cxl_rdma_sidecar_budgets);
+    qtest_add_func("qmp/migrate-set-parameters/cxl-rdma-sidecar-address-required",
+                   test_migrate_set_parameters_cxl_rdma_sidecar_requires_address);
     qtest_add_func("qmp/query-migrate/cxl-schema-loop-stats",
                    test_query_migrate_cxl_schema_loop_stats);
     qtest_add_func("qmp/query-migrate/stop-to-start-schema",

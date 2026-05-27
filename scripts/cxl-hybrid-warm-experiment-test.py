@@ -1494,6 +1494,41 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertLess(cover_percent_check, sidecar_gate)
         self.assertGreater(address_check, sidecar_gate)
 
+    def test_hmp_migrate_set_parameter_handles_rdma_sidecar_params(self):
+        hmp_text = (
+            REPO_ROOT / "migration" / "migration-hmp-cmds.c"
+        ).read_text()
+
+        self.assertIn(
+            "MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_ADDRESS", hmp_text)
+        self.assertIn(
+            "MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_MAX_INFLIGHT_REGIONS",
+            hmp_text)
+        self.assertIn("p->has_x_cxl_rdma_sidecar_max_inflight_regions = true",
+                      hmp_text)
+        self.assertIn("visit_type_uint32(", hmp_text)
+        self.assertIn("&p->x_cxl_rdma_sidecar_max_inflight_regions, &err",
+                      hmp_text)
+        self.assertIn(
+            "MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_MAX_COVER_PERCENT",
+            hmp_text)
+        self.assertIn("p->has_x_cxl_rdma_sidecar_max_cover_percent = true",
+                      hmp_text)
+        self.assertIn("visit_type_uint8(", hmp_text)
+        self.assertIn("&p->x_cxl_rdma_sidecar_max_cover_percent, &err",
+                      hmp_text)
+        self.assertIn(
+            "MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_REGION_BYTES",
+            hmp_text)
+        self.assertIn("p->has_x_cxl_rdma_sidecar_region_bytes = true",
+                      hmp_text)
+        self.assertIn("visit_type_size(v, param,"
+                      " &p->x_cxl_rdma_sidecar_region_bytes, &err)",
+                      hmp_text)
+        self.assertIn(
+            "The x-cxl-rdma-sidecar-address parameter can only", hmp_text)
+        self.assertIn("be set through QMP", hmp_text)
+
     def test_fault_resolve_mode_cli_passes_override_to_run_matrix(self):
         calls = []
 

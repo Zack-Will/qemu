@@ -735,6 +735,10 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         error_setg(&err, "The block-bitmap-mapping parameter can only be set "
                    "through QMP");
         break;
+    case MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_ADDRESS:
+        error_setg(&err, "The x-cxl-rdma-sidecar-address parameter can only "
+                   "be set through QMP");
+        break;
     case MIGRATION_PARAMETER_X_VCPU_DIRTY_LIMIT_PERIOD:
         p->has_x_vcpu_dirty_limit_period = true;
         visit_type_size(v, param, &p->x_vcpu_dirty_limit_period, &err);
@@ -760,6 +764,20 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         p->has_x_cxl_clean_remap_prefault_mode = true;
         visit_type_CXLCleanRemapPrefaultMode(
             v, param, &p->x_cxl_clean_remap_prefault_mode, &err);
+        break;
+    case MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_MAX_INFLIGHT_REGIONS:
+        p->has_x_cxl_rdma_sidecar_max_inflight_regions = true;
+        visit_type_uint32(
+            v, param, &p->x_cxl_rdma_sidecar_max_inflight_regions, &err);
+        break;
+    case MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_MAX_COVER_PERCENT:
+        p->has_x_cxl_rdma_sidecar_max_cover_percent = true;
+        visit_type_uint8(
+            v, param, &p->x_cxl_rdma_sidecar_max_cover_percent, &err);
+        break;
+    case MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_REGION_BYTES:
+        p->has_x_cxl_rdma_sidecar_region_bytes = true;
+        visit_type_size(v, param, &p->x_cxl_rdma_sidecar_region_bytes, &err);
         break;
     case MIGRATION_PARAMETER_CPR_EXEC_COMMAND: {
         /*
