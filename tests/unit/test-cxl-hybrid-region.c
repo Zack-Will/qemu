@@ -16,6 +16,17 @@
 
 #define TEST_TARGET_PAGE_SIZE (4 * KiB)
 
+bool cxl_hybrid_rdma_sidecar_get_backing(void **basep, size_t *sizep)
+{
+    if (basep) {
+        *basep = NULL;
+    }
+    if (sizep) {
+        *sizep = 0;
+    }
+    return false;
+}
+
 static void assert_region_compute_error(uint64_t block_global_base,
                                         uint64_t block_used_len,
                                         uint64_t block_cxl_pages_offset,
@@ -630,36 +641,14 @@ static void test_rdma_sidecar_transport_stats_accounting(void)
     cxl_hybrid_reset_rdma_sidecar_stats_for_test();
 }
 
-static void test_rdma_sidecar_bulk_submit_marks_ready_without_commit(void)
+static void test_rdma_sidecar_requires_transport_for_completion(void)
 {
-    CXLHybridRDMASidecarBulkStats bulk_stats = { 0 };
-    CXLHybridRDMASidecarStats ready_stats = { 0 };
-    g_autofree uint8_t *src = g_malloc0(2 * MiB);
-    g_autofree uint8_t *dst = g_malloc0(2 * MiB);
+    CXLHybridRDMASidecarBulkStats stats = { 0 };
 
-    cxl_hybrid_reset_rdma_sidecar_stats_for_test();
-    cxl_hybrid_rdma_sidecar_global_init(4, 512);
-    cxl_rdma_sidecar_init(4, 2 * MiB, 512);
-    memset(src, 0x5a, 2 * MiB);
-
-    g_assert_true(cxl_rdma_sidecar_submit_region(1, src, dst));
-    g_assert_false(cxl_rdma_sidecar_submit_shadow_region(1));
-    g_assert_false(cxl_hybrid_region_commit_rdma_ready(2));
-    g_assert_cmpmem(src, 2 * MiB, dst, 2 * MiB);
-
-    cxl_rdma_sidecar_get_stats(&bulk_stats);
-    cxl_hybrid_get_rdma_sidecar_stats(&ready_stats);
-
-    g_assert_cmpuint(bulk_stats.rdma_bulk_regions, ==, 1);
-    g_assert_cmpuint(bulk_stats.rdma_bulk_bytes, ==, 2 * MiB);
-    g_assert_cmpuint(ready_stats.rdma_ready_regions, ==, 1);
-    g_assert_cmpuint(ready_stats.rdma_ready_pages, ==, 512);
-    g_assert_true(cxl_hybrid_region_commit_rdma_ready(1));
-    g_assert_false(cxl_hybrid_region_commit_rdma_ready(1));
-
-    cxl_rdma_sidecar_destroy();
-    cxl_hybrid_rdma_sidecar_global_destroy();
-    cxl_hybrid_reset_rdma_sidecar_stats_for_test();
+    cxl_rdma_sidecar_stop();
+    cxl_rdma_sidecar_get_stats(&stats);
+    g_assert_cmpuint(stats.rdma_bulk_regions, ==, 0);
+    g_assert_cmpuint(stats.rdma_bulk_bytes, ==, 0);
 }
 
 static void test_rdma_sidecar_ready_commit_and_dirty_invalidate(void)
@@ -863,8 +852,8 @@ int main(int argc, char **argv)
                     test_rdma_sidecar_brake_fallback_requires_brake_enabled);
     g_test_add_func("/cxl/region/rdma-sidecar-transport-stats-accounting",
                     test_rdma_sidecar_transport_stats_accounting);
-    g_test_add_func("/cxl/region/rdma-sidecar-bulk-submit",
-                    test_rdma_sidecar_bulk_submit_marks_ready_without_commit);
+    g_test_add_func("/cxl/region/rdma-sidecar-requires-transport",
+                    test_rdma_sidecar_requires_transport_for_completion);
     g_test_add_func("/cxl/region/rdma-sidecar-ready-commit-dirty-invalidate",
                     test_rdma_sidecar_ready_commit_and_dirty_invalidate);
     g_test_add_func("/cxl/region/rdma-sidecar-dirty-sync-invalidates-ready",

@@ -4051,10 +4051,15 @@ libio = static_library('io', io_ss.sources() + genh,
 io = declare_dependency(objects: libio.extract_all_objects(recursive: false),
                         dependencies: [io_ss.dependencies(), crypto, qom])
 
+migration_deps = []
+if rdma.found()
+  migration_deps += rdma
+endif
 libmigration = static_library('migration', sources: migration_files + genh,
+                              dependencies: migration_deps,
                               build_by_default: false)
 migration = declare_dependency(objects: libmigration.extract_all_objects(recursive: false),
-                               dependencies: [qom, io])
+                               dependencies: [qom, io] + migration_deps)
 system_ss.add(migration)
 
 block_ss = block_ss.apply({})
