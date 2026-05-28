@@ -494,9 +494,9 @@ bool cxl_hybrid_rdma_bulk_claim_init(CXLHybridRDMABulkClaim *claim,
                                      ram_addr_t block_offset);
 bool cxl_hybrid_rdma_try_claim_bulk_region(CXLHybridRDMABulkClaim *claim);
 void cxl_hybrid_rdma_drop_bulk_claim(const CXLHybridRDMABulkClaim *claim);
-bool cxl_hybrid_page_in_rdma_owned_region(RAMBlock *block,
-                                          ram_addr_t block_offset);
 bool cxl_hybrid_rdma_sidecar_get_backing(void **basep, size_t *sizep);
+bool cxl_hybrid_start_rdma_sidecar(bool incoming, bool wait_for_setup,
+                                   Error **errp);
 void cxl_hybrid_invalidate_rdma_ready_region_for_page(RAMBlock *block,
                                                       ram_addr_t block_offset);
 void cxl_hybrid_sync_rdma_dirty_for_postcopy(void);

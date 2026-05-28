@@ -4212,6 +4212,11 @@ static void *migration_thread(void *opaque)
          * early.
          */
         qemu_savevm_send_postcopy_advise(s->to_dst_file);
+        if (migrate_cxl_rdma_sidecar() &&
+            !cxl_hybrid_start_rdma_sidecar(false, false, &local_err)) {
+            migrate_error_propagate(s, local_err);
+            goto out;
+        }
     }
 
     if (migrate_auto_converge()) {

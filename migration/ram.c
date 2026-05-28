@@ -1731,13 +1731,6 @@ static void ram_cxl_hybrid_end_region_write(bool started)
     }
 }
 
-static bool ram_cxl_hybrid_rdma_owned_page(RAMBlock *block,
-                                           ram_addr_t offset)
-{
-    return cxl_use_mapped_ram_backing() &&
-           cxl_hybrid_page_in_rdma_owned_region(block, offset);
-}
-
 int ram_cxl_hybrid_walk_unsent(MigrationState *s,
                                int (*cb)(MigrationState *s,
                                          RAMBlock *block,
@@ -1814,10 +1807,6 @@ static int save_zero_page(RAMState *rs, PageSearchStatus *pss,
         bool cxl_region_write_started = false;
         RAMCXLHybridRegionWriteStatus cxl_region_write_status;
 
-        if (ram_cxl_hybrid_rdma_owned_page(pss->block, offset)) {
-            set_bit_atomic(offset >> TARGET_PAGE_BITS, pss->block->file_bmap);
-            return 1;
-        }
         ram_cxl_hybrid_pause_for_fault_pressure(&pss->cxl_publish_span, file);
         cxl_region_write_status = ram_cxl_hybrid_begin_region_write(
             pss->block, offset, &cxl_region_write_started);
@@ -1919,10 +1908,6 @@ static int save_normal_page(PageSearchStatus *pss, RAMBlock *block,
         bool cxl_region_write_started = false;
         RAMCXLHybridRegionWriteStatus cxl_region_write_status;
 
-        if (ram_cxl_hybrid_rdma_owned_page(block, offset)) {
-            set_bit_atomic(offset >> TARGET_PAGE_BITS, block->file_bmap);
-            return 1;
-        }
         ram_cxl_hybrid_pause_for_fault_pressure(&pss->cxl_publish_span, file);
         cxl_region_write_status = ram_cxl_hybrid_begin_region_write(
             block, offset, &cxl_region_write_started);
@@ -4070,10 +4055,6 @@ static void ram_save_file_bmap(QEMUFile *f)
 
 void ramblock_set_file_bmap_atomic(RAMBlock *block, ram_addr_t offset, bool set)
 {
-    if (set && ram_cxl_hybrid_rdma_owned_page(block, offset)) {
-        return;
-    }
-
     if (set) {
         set_bit_atomic(offset >> TARGET_PAGE_BITS, block->file_bmap);
     } else {

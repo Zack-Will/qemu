@@ -557,6 +557,20 @@ static void test_rdma_sidecar_selector_skips_budgeted_regions(void)
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
 }
 
+static void test_rdma_sidecar_budget_limits_accepted_regions(void)
+{
+    CXLHybridRDMASidecarState state = { 0 };
+
+    cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 8, 512);
+    cxl_hybrid_rdma_sidecar_configure_budget_for_test(&state, 8, 25);
+
+    g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, 0));
+    g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, 1));
+    g_assert_false(cxl_hybrid_rdma_sidecar_try_start_region(&state, 2));
+
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
+}
+
 static void test_rdma_sidecar_dirty_invalidation_clears_ready(void)
 {
     CXLHybridRDMASidecarState state = { 0 };
@@ -844,6 +858,8 @@ int main(int argc, char **argv)
                     test_rdma_sidecar_selector_skips_clean_visible_region);
     g_test_add_func("/cxl/region/rdma-sidecar-selector-skips-budgeted-regions",
                     test_rdma_sidecar_selector_skips_budgeted_regions);
+    g_test_add_func("/cxl/region/rdma-sidecar-budget-limits-accepted-regions",
+                    test_rdma_sidecar_budget_limits_accepted_regions);
     g_test_add_func("/cxl/region/rdma-sidecar-dirty-invalidation-clears-ready",
                     test_rdma_sidecar_dirty_invalidation_clears_ready);
     g_test_add_func("/cxl/region/rdma-sidecar-commit-current-ready",

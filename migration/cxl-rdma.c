@@ -12,7 +12,6 @@
 #include "qemu/sockets.h"
 #include "qemu/thread.h"
 #include "qapi/error.h"
-#include "migration.h"
 #include "cxl.h"
 #include "cxl-rdma.h"
 #include "system/ramblock.h"
@@ -88,10 +87,46 @@ typedef struct CXLRDMASidecarContext {
     uint64_t remote_base;
     uint64_t remote_len;
     uint32_t remote_rkey;
+    CXLHybridRDMASidecarOps ops;
     CXLHybridRDMASidecarBulkStats stats;
 } CXLRDMASidecarContext;
 
 static CXLRDMASidecarContext *cxl_rdma_sidecar;
+
+static bool cxl_rdma_sidecar_stopped(CXLRDMASidecarContext *ctx)
+{
+    bool stopped;
+
+    qemu_mutex_lock(&ctx->lock);
+    stopped = ctx->stop;
+    qemu_mutex_unlock(&ctx->lock);
+    return stopped;
+}
+
+static void cxl_rdma_sidecar_mark_failed(CXLRDMASidecarContext *ctx,
+                                         Error *err)
+{
+    qemu_mutex_lock(&ctx->lock);
+    if (!ctx->stop) {
+        ctx->failed = true;
+    }
+    ctx->setup_done = true;
+    qemu_cond_broadcast(&ctx->cond);
+    qemu_mutex_unlock(&ctx->lock);
+
+    if (!ctx->failed) {
+        error_free(err);
+        return;
+    }
+
+    cxl_hybrid_account_rdma_sidecar_failed(UINT64_MAX);
+    if (err) {
+        if (ctx->ops.propagate_error) {
+            ctx->ops.propagate_error(error_copy(err), ctx->ops.opaque);
+        }
+        error_report_err(err);
+    }
+}
 
 static bool cxl_rdma_sidecar_geometry_shift(uint64_t bytes, uint32_t *shiftp)
 {
@@ -667,9 +702,14 @@ static int cxl_rdma_sidecar_register_source_pin_all(
     if (ctx->source_mrs) {
         return 0;
     }
+    if (!ctx->ops.foreach_ramblock) {
+        error_setg(errp,
+                   "RDMA sidecar pin-all requires a RAMBlock iterator");
+        return -1;
+    }
 
-    ret = foreach_not_ignored_block(cxl_rdma_sidecar_register_one_ramblock,
-                                    ctx);
+    ret = ctx->ops.foreach_ramblock(cxl_rdma_sidecar_register_one_ramblock,
+                                    ctx, ctx->ops.opaque);
     if (ret) {
         error_setg(errp, "RDMA sidecar failed to register source RAMBlocks");
         return -1;
@@ -802,6 +842,90 @@ static int G_GNUC_UNUSED cxl_rdma_sidecar_poll_completion(
     return 1;
 }
 
+static void cxl_rdma_sidecar_backoff(CXLRDMASidecarContext *ctx, int ms)
+{
+    qemu_mutex_lock(&ctx->lock);
+    if (!ctx->stop) {
+        qemu_cond_timedwait(&ctx->cond, &ctx->lock, ms);
+    }
+    qemu_mutex_unlock(&ctx->lock);
+}
+
+static int cxl_rdma_sidecar_wait_one_completion(
+    CXLRDMASidecarContext *ctx,
+    uint64_t region_index,
+    Error **errp)
+{
+    int ret;
+
+    for (;;) {
+        if (cxl_rdma_sidecar_stopped(ctx)) {
+            error_setg(errp,
+                       "RDMA sidecar stopped while waiting for write %" PRIu64,
+                       region_index);
+            return -1;
+        }
+
+        ret = cxl_rdma_sidecar_poll_completion(ctx, errp);
+        if (ret < 0) {
+            return -1;
+        }
+        if (ret > 0) {
+            return 0;
+        }
+        cxl_rdma_sidecar_backoff(ctx, 1);
+    }
+}
+
+static void cxl_rdma_sidecar_source_loop(CXLRDMASidecarContext *ctx)
+{
+    while (!cxl_rdma_sidecar_stopped(ctx)) {
+        CXLHybridRDMABulkClaim claim = { 0 };
+        Error *local_err = NULL;
+        bool running = !ctx->ops.migration_running ||
+                       ctx->ops.migration_running(ctx->ops.opaque);
+        bool postcopy = ctx->ops.migration_postcopy &&
+                        ctx->ops.migration_postcopy(ctx->ops.opaque);
+        bool failed = ctx->ops.migration_failed &&
+                      ctx->ops.migration_failed(ctx->ops.opaque);
+
+        if (!running || postcopy || failed) {
+            if (!running || failed) {
+                return;
+            }
+            cxl_rdma_sidecar_backoff(ctx, 1);
+            continue;
+        }
+
+        if (!ctx->ops.claim_bulk_region ||
+            !ctx->ops.claim_bulk_region(&claim, ctx->ops.opaque)) {
+            cxl_hybrid_account_rdma_sidecar_no_candidate();
+            cxl_rdma_sidecar_backoff(ctx, 1);
+            continue;
+        }
+
+        trace_cxl_rdma_sidecar_schedule(claim.region_index, claim.bytes);
+        if (cxl_rdma_sidecar_post_write(ctx, &claim, &local_err) < 0) {
+            if (ctx->ops.drop_bulk_claim) {
+                ctx->ops.drop_bulk_claim(&claim, ctx->ops.opaque);
+            }
+            cxl_hybrid_account_rdma_sidecar_failed(claim.region_index);
+            cxl_rdma_sidecar_mark_failed(ctx, local_err);
+            return;
+        }
+
+        if (cxl_rdma_sidecar_wait_one_completion(ctx, claim.region_index,
+                                                 &local_err) < 0) {
+            if (ctx->ops.drop_bulk_claim) {
+                ctx->ops.drop_bulk_claim(&claim, ctx->ops.opaque);
+            }
+            cxl_hybrid_account_rdma_sidecar_failed(claim.region_index);
+            cxl_rdma_sidecar_mark_failed(ctx, local_err);
+            return;
+        }
+    }
+}
+
 static void cxl_rdma_sidecar_cleanup(CXLRDMASidecarContext *ctx)
 {
     if (!ctx) {
@@ -905,32 +1029,27 @@ static void *cxl_rdma_sidecar_thread(void *opaque)
     cxl_hybrid_account_rdma_sidecar_connect(
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - start_ns);
 
-    qemu_mutex_lock(&ctx->lock);
-    while (!ctx->stop) {
-        qemu_cond_timedwait(&ctx->cond, &ctx->lock, 100);
+    if (!ctx->incoming) {
+        cxl_rdma_sidecar_source_loop(ctx);
+    } else {
+        qemu_mutex_lock(&ctx->lock);
+        while (!ctx->stop) {
+            qemu_cond_timedwait(&ctx->cond, &ctx->lock, 100);
+        }
+        qemu_mutex_unlock(&ctx->lock);
     }
-    qemu_mutex_unlock(&ctx->lock);
     return NULL;
 
 fail:
-    qemu_mutex_lock(&ctx->lock);
-    if (!ctx->stop) {
-        ctx->failed = true;
-    }
-    ctx->setup_done = true;
-    qemu_cond_broadcast(&ctx->cond);
-    qemu_mutex_unlock(&ctx->lock);
-    if (ctx->failed) {
-        error_report_err(local_err);
-    } else {
-        error_free(local_err);
-    }
+    cxl_rdma_sidecar_mark_failed(ctx, local_err);
     cxl_rdma_sidecar_cleanup(ctx);
     return NULL;
 }
 
-int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,
-                           Error **errp)
+static int cxl_rdma_sidecar_start_internal(
+    const CXLHybridRDMASidecarConfig *cfg,
+    bool wait_for_setup,
+    Error **errp)
 {
     CXLRDMASidecarContext *ctx;
 
@@ -960,6 +1079,9 @@ int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,
     ctx->max_inflight_regions = cfg->max_inflight_regions;
     ctx->max_cover_percent = cfg->max_cover_percent;
     ctx->pin_all = cfg->pin_all;
+    if (cfg->ops) {
+        ctx->ops = *cfg->ops;
+    }
 
     if (cxl_rdma_sidecar_parse_addr(ctx, cfg->addr, errp)) {
         qemu_cond_destroy(&ctx->cond);
@@ -973,6 +1095,10 @@ int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,
     qemu_thread_create(&ctx->thread, "cxl-rdma-sidecar",
                        cxl_rdma_sidecar_thread, ctx, QEMU_THREAD_JOINABLE);
     ctx->thread_created = true;
+    if (!wait_for_setup) {
+        return 0;
+    }
+
     qemu_mutex_lock(&ctx->lock);
     while (!ctx->setup_done) {
         qemu_cond_wait(&ctx->cond, &ctx->lock);
@@ -985,6 +1111,18 @@ int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,
     }
     qemu_mutex_unlock(&ctx->lock);
     return 0;
+}
+
+int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,
+                           Error **errp)
+{
+    return cxl_rdma_sidecar_start_internal(cfg, true, errp);
+}
+
+bool cxl_rdma_sidecar_start_async(const CXLHybridRDMASidecarConfig *cfg,
+                                  Error **errp)
+{
+    return cxl_rdma_sidecar_start_internal(cfg, false, errp) == 0;
 }
 
 void cxl_rdma_sidecar_stop(void)
@@ -1053,6 +1191,12 @@ int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,
     error_setg(errp,
                "x-cxl-rdma-sidecar requires QEMU to be built with RDMA support");
     return -1;
+}
+
+bool cxl_rdma_sidecar_start_async(const CXLHybridRDMASidecarConfig *cfg,
+                                  Error **errp)
+{
+    return cxl_rdma_sidecar_start(cfg, errp) == 0;
 }
 
 void cxl_rdma_sidecar_stop(void)
