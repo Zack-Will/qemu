@@ -721,6 +721,61 @@ class WarmExperimentScriptTest(unittest.TestCase):
             {"capability": "rdma-pin-all", "state": True},
             args["capabilities"])
 
+    def test_parallel_rdma_cxl_summary_exposes_sidecar_endpoint_and_paths(self):
+        row = self.mod.summarize_single_result(
+            "remap_xlarge_random_rw",
+            "hybrid_parallel_rdma_cxl",
+            self.mod.resolve_threshold_profile("balanced"),
+            4,
+            {
+                "migration_uri": "unix:/tmp/run/mig.sock",
+                "rdma_sidecar_endpoint": "rdma:192.0.2.10:7474",
+                "summary": {
+                    "region_publish_pages": 256,
+                    "region_publish_time_ns": 9000,
+                    "rdma_sidecar_max_inflight_regions": 1,
+                    "rdma_sidecar_max_cover_percent": 25,
+                    "rdma_sidecar_posted_bytes": 2 * 1024 * 1024,
+                    "rdma_sidecar_completed_bytes": 2 * 1024 * 1024,
+                    "rdma_sidecar_stale_regions": 1,
+                    "rdma_sidecar_cxl_race_lost_regions": 1,
+                    "cxl_republish_regions_due_to_rdma_invalidate": 1,
+                    "cxl_republish_pages_due_to_rdma_invalidate": 512,
+                },
+                "trace": {
+                    "combined": {
+                        **self.mod.trace_count_template(),
+                        "region_publish_pages": 128,
+                        "region_publish_time_ns": 7000,
+                    },
+                },
+                "latency": {
+                    "total_time_ms": 47,
+                    "precopy_time_ms": 30,
+                    "postcopy_time_ms": 17,
+                },
+                "guest_latency": {
+                    "total_stall_during_migration_ms": 6.5,
+                },
+                "final_status": "completed",
+            },
+        )
+
+        self.assertEqual(row["main_migration_uri"], "unix:/tmp/run/mig.sock")
+        self.assertEqual(row["rdma_sidecar_endpoint"], "rdma:192.0.2.10:7474")
+        self.assertEqual(row["rdma_sidecar_max_inflight_regions"], 1)
+        self.assertEqual(row["rdma_sidecar_max_cover_percent"], 25)
+        self.assertEqual(row["rdma_sidecar_posted_bytes"], 2 * 1024 * 1024)
+        self.assertEqual(row["rdma_sidecar_completed_bytes"], 2 * 1024 * 1024)
+        self.assertEqual(row["rdma_sidecar_stale_regions"], 1)
+        self.assertEqual(row["rdma_sidecar_cxl_race_lost_regions"], 1)
+        self.assertEqual(row["cxl_publish_pages"], 256)
+        self.assertEqual(row["cxl_publish_time_ns"], 9000)
+        self.assertEqual(row["guest_stall_ms"], 6.5)
+        self.assertEqual(row["total_time_ms"], 47)
+        self.assertEqual(row["precopy_time_ms"], 30)
+        self.assertEqual(row["postcopy_time_ms"], 17)
+
     def test_build_migration_parameters_normal_hybrid_does_not_enable_rdma_sidecar(self):
         args = argparse.Namespace(
             pressure="heavy",
@@ -1922,6 +1977,17 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertEqual(counts["rdma_sidecar_posted_regions"], 2)
         self.assertEqual(counts["rdma_sidecar_posted_bytes"], 3 * 1024 * 1024)
+
+    def test_warm_experiment_enables_real_rdma_sidecar_trace_events(self):
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+        for event in (
+            '"cxl_rdma_sidecar_schedule"',
+            '"cxl_rdma_sidecar_post"',
+            '"cxl_rdma_sidecar_complete"',
+            '"cxl_rdma_sidecar_stale"',
+        ):
+            self.assertIn(event, source)
 
     def test_rdma_fallback_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4657,6 +4723,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(
             breakdown["control_src_request_postcopy_to_postcopy_start_ms"], 0.1
         )
+        self.assertEqual(breakdown["precopy_time_ms"], 0.5)
+        self.assertEqual(breakdown["postcopy_time_ms"], 4.0)
         self.assertEqual(
             breakdown["control_src_completion_enter_to_completed_ms"], 0.8
         )

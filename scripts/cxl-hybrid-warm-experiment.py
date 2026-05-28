@@ -516,6 +516,17 @@ def build_rdma_sidecar_address(args, run_index: int) -> dict[str, object]:
     }
 
 
+def format_rdma_sidecar_endpoint(addr):
+    if not addr or addr.get("transport") != "rdma":
+        return None
+    rdma = addr.get("rdma") or {}
+    host = rdma.get("host")
+    port = rdma.get("port")
+    if host is None or port is None:
+        return None
+    return f"rdma:{host}:{port}"
+
+
 def request_native_postcopy_start(src_qmp):
     deadline = time.time() + POSTCOPY_START_RETRY_TIMEOUT_SECS
     last_error = None
@@ -1939,6 +1950,10 @@ def summarize_handoff_breakdown(src_trace_file: Path, dst_trace_file: Path,
             elapsed_ms(src_enter_brake_ns, src_request_postcopy_ns),
         "control_src_request_postcopy_to_postcopy_start_ms":
             elapsed_ms(src_request_postcopy_ns, src_start_ns),
+        "precopy_time_ms":
+            elapsed_ms(src_estimate_ns, src_start_ns),
+        "postcopy_time_ms":
+            elapsed_ms(src_start_ns, src_completed_ns),
         "control_src_start_to_dst_vm_started_ms":
             elapsed_ms(src_start_ns, dst_vm_started_ns),
         "control_src_start_to_dst_ack_ms":
@@ -3099,6 +3114,10 @@ def run_case(base: Path, mode: str, pressure: str,
             "cxl_hybrid_publish_wait_complete",
             "cxl_hybrid_region_publish_complete",
             "cxl_hybrid_rdma_bulk_region",
+            "cxl_rdma_sidecar_schedule",
+            "cxl_rdma_sidecar_post",
+            "cxl_rdma_sidecar_complete",
+            "cxl_rdma_sidecar_stale",
             "cxl_hybrid_rdma_ready",
             "cxl_hybrid_rdma_invalidate",
             "cxl_hybrid_rdma_cxl_republish",
@@ -3162,6 +3181,15 @@ def run_case(base: Path, mode: str, pressure: str,
         dst_vm_args.extend(build_heartbeat_args("dst_hb", dst_heartbeat_sock))
     migration_uri = build_migration_uri(
         mode, mig_sock, rdma_host=rdma_host, rdma_port=rdma_port
+    )
+    rdma_sidecar_address = None
+    if mode_uses_cxl_rdma_sidecar(mode):
+        rdma_sidecar_address = build_rdma_sidecar_address(
+            argparse.Namespace(rdma_host=rdma_host, rdma_port=rdma_port),
+            run_index - 1,
+        )
+    rdma_sidecar_endpoint = format_rdma_sidecar_endpoint(
+        rdma_sidecar_address
     )
 
     src_env = build_qemu_env(
@@ -3438,6 +3466,8 @@ def run_case(base: Path, mode: str, pressure: str,
         write_json(case_dir / "result.json", {
             "mode": mode,
             "pressure": pressure,
+            "migration_uri": migration_uri,
+            "rdma_sidecar_endpoint": rdma_sidecar_endpoint,
             "final_status": last.get("status"),
             "final_x_cxl": last.get("x-cxl"),
             "src_status": src_status,
@@ -3447,6 +3477,10 @@ def run_case(base: Path, mode: str, pressure: str,
                 "setup_time_ms": last.get("setup-time"),
                 "downtime_ms": last.get("downtime"),
                 "stop_to_start_time_ms": last.get("stop-to-start-time"),
+                "precopy_time_ms": handoff_breakdown.get(
+                    "precopy_time_ms"),
+                "postcopy_time_ms": handoff_breakdown.get(
+                    "postcopy_time_ms"),
                 "observed_migration_window_ms": observed_window_ms,
                 "qemu_total_time_window_ms": qemu_total_time_window_ms,
                 "qmp_poll_tail_ms": qmp_poll_tail_ms,
@@ -3462,6 +3496,8 @@ def run_case(base: Path, mode: str, pressure: str,
         return {
             "mode": mode,
             "pressure": pressure,
+            "migration_uri": migration_uri,
+            "rdma_sidecar_endpoint": rdma_sidecar_endpoint,
             "final_status": last.get("status"),
             "final_x_cxl": last.get("x-cxl"),
             "src_status": src_status,
@@ -3471,6 +3507,10 @@ def run_case(base: Path, mode: str, pressure: str,
                 "setup_time_ms": last.get("setup-time"),
                 "downtime_ms": last.get("downtime"),
                 "stop_to_start_time_ms": last.get("stop-to-start-time"),
+                "precopy_time_ms": handoff_breakdown.get(
+                    "precopy_time_ms"),
+                "postcopy_time_ms": handoff_breakdown.get(
+                    "postcopy_time_ms"),
                 "observed_migration_window_ms": observed_window_ms,
                 "qemu_total_time_window_ms": qemu_total_time_window_ms,
                 "qmp_poll_tail_ms": qmp_poll_tail_ms,
@@ -3578,10 +3618,20 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
         key: max(summary.get(key, 0), trace.get(key, 0))
         for key in RDMA_SIDECAR_METRICS
     }
+    cxl_publish_pages = max(
+        summary.get("region_publish_pages", 0),
+        trace.get("region_publish_pages", 0),
+    )
+    cxl_publish_time_ns = max(
+        summary.get("region_publish_time_ns", 0),
+        trace.get("region_publish_time_ns", 0),
+    )
 
     return {
         "pressure": pressure,
         "mode": mode,
+        "main_migration_uri": (result or {}).get("migration_uri"),
+        "rdma_sidecar_endpoint": (result or {}).get("rdma_sidecar_endpoint"),
         "threshold_profile": profile["name"],
         "run_index": run_index,
         "failed": (result or {}).get("failed", False),
@@ -3667,6 +3717,8 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
             summary.get("region_publish_pages", 0),
         "region_publish_time_ns":
             summary.get("region_publish_time_ns", 0),
+        "cxl_publish_pages": cxl_publish_pages,
+        "cxl_publish_time_ns": cxl_publish_time_ns,
         "region_publish_mean_ns":
             mean_ns("region_publish_time_ns", "region_publish_requests"),
         "rdma_bulk_regions":
@@ -3882,6 +3934,8 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
         "clean_remap_prefault_errors":
             final_x_cxl.get("clean-remap-prefault-errors", 0),
         "total_time_ms": latency.get("total_time_ms"),
+        "precopy_time_ms": latency.get("precopy_time_ms"),
+        "postcopy_time_ms": latency.get("postcopy_time_ms"),
         "setup_time_ms": latency.get("setup_time_ms"),
         "downtime_ms": latency.get("downtime_ms"),
         "stop_to_start_time_ms": latency.get("stop_to_start_time_ms"),
@@ -3902,6 +3956,8 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
         "guest_total_gap_during_migration_ms":
             guest_latency.get("total_gap_during_migration_ms"),
         "guest_total_stall_during_migration_ms":
+            guest_latency.get("total_stall_during_migration_ms"),
+        "guest_stall_ms":
             guest_latency.get("total_stall_during_migration_ms"),
         "guest_max_gap_stall_ms":
             guest_latency.get("max_gap_stall_ms"),
@@ -4115,6 +4171,8 @@ def summarize_grouped_runs(pressure, mode, threshold_profile, run_results, rows)
 
     for metric in (
         "total_time_ms",
+        "precopy_time_ms",
+        "postcopy_time_ms",
         "observed_migration_window_ms",
         "qemu_total_time_window_ms",
         "qmp_poll_tail_ms",
@@ -4223,6 +4281,8 @@ def summarize_grouped_runs(pressure, mode, threshold_profile, run_results, rows)
         "region_publish_pages",
         "region_publish_time_ns",
         "region_publish_mean_ns",
+        "cxl_publish_pages",
+        "cxl_publish_time_ns",
         "rdma_bulk_regions",
         "rdma_bulk_bytes",
         *RDMA_SIDECAR_METRICS,
