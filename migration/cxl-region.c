@@ -989,6 +989,12 @@ void cxl_hybrid_invalidate_region_rdma_ready(uint64_t region_index)
     cxl_hybrid_account_rdma_invalidate(region_index, pages);
 }
 
+bool cxl_hybrid_region_rdma_ready_current(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_region_ready_current(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
 bool cxl_hybrid_region_commit_rdma_ready(uint64_t region_index)
 {
     return cxl_hybrid_rdma_sidecar_commit_ready_region(

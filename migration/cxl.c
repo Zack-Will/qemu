@@ -5883,43 +5883,85 @@ uint64_t cxl_clear_remapped_dirty_bits(RAMBlock *block)
     return cleared;
 }
 
+static bool cxl_hybrid_ready_region_has_dirty_pages(size_t first_page,
+                                                    size_t npages)
+{
+    uint64_t region_start;
+    uint64_t region_len;
+    uint64_t region_end;
+    RAMBlock *block;
+
+    if (!npages || first_page > UINT64_MAX >> TARGET_PAGE_BITS ||
+        npages > UINT64_MAX >> TARGET_PAGE_BITS) {
+        return false;
+    }
+
+    region_start = (uint64_t)first_page << TARGET_PAGE_BITS;
+    region_len = (uint64_t)npages << TARGET_PAGE_BITS;
+    if (region_len > UINT64_MAX - region_start) {
+        return true;
+    }
+    region_end = region_start + region_len;
+
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
+        uint64_t block_start = block->offset;
+        uint64_t block_end;
+        uint64_t overlap_start;
+        uint64_t overlap_end;
+        size_t block_pages;
+        size_t local_first_page;
+        size_t local_last_page;
+
+        if (!block->bmap) {
+            continue;
+        }
+        if (block->used_length > UINT64_MAX - block_start) {
+            block_end = UINT64_MAX;
+        } else {
+            block_end = block_start + block->used_length;
+        }
+
+        overlap_start = MAX(region_start, block_start);
+        overlap_end = MIN(region_end, block_end);
+        if (overlap_start >= overlap_end) {
+            continue;
+        }
+
+        block_pages = DIV_ROUND_UP(block->used_length, TARGET_PAGE_SIZE);
+        local_first_page = (overlap_start - block_start) >> TARGET_PAGE_BITS;
+        local_last_page = DIV_ROUND_UP(overlap_end - block_start,
+                                       TARGET_PAGE_SIZE);
+        local_last_page = MIN(local_last_page, block_pages);
+        if (local_first_page < local_last_page &&
+            bitmap_count_one_with_offset(block->bmap, local_first_page,
+                                         local_last_page - local_first_page)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void cxl_hybrid_sync_rdma_dirty_for_postcopy(void)
 {
-    RAMBlock *block;
+    uint64_t region_idx;
 
     if (!migrate_cxl_rdma_sidecar()) {
         return;
     }
 
     RCU_READ_LOCK_GUARD();
-    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
-        unsigned long pages;
-        ram_addr_t offset;
+    for (region_idx = 0; region_idx < cxl_state.total_regions; region_idx++) {
+        size_t first_page;
+        size_t npages;
 
-        if (!block->bmap || !cxl_state.remap_granule ||
-            !QEMU_IS_ALIGNED(cxl_state.remap_granule, TARGET_PAGE_SIZE)) {
+        if (!cxl_hybrid_region_rdma_ready_current(region_idx) ||
+            !cxl_hybrid_region_page_span(region_idx, &first_page, &npages)) {
             continue;
         }
 
-        pages = DIV_ROUND_UP(block->used_length, TARGET_PAGE_SIZE);
-        for (offset = 0;
-             offset + cxl_state.remap_granule <= block->used_length;
-             offset += cxl_state.remap_granule) {
-            size_t region_idx;
-            unsigned long first_page = offset >> TARGET_PAGE_BITS;
-            unsigned long npages = cxl_state.remap_granule >> TARGET_PAGE_BITS;
-
-            if (!cxl_hybrid_region_index_from_block_offset(block, offset,
-                                                           &region_idx) ||
-                first_page >= pages) {
-                continue;
-            }
-
-            npages = MIN(npages, pages - first_page);
-            if (bitmap_count_one_with_offset(block->bmap, first_page,
-                                             npages)) {
-                cxl_hybrid_invalidate_region_rdma_ready(region_idx);
-            }
+        if (cxl_hybrid_ready_region_has_dirty_pages(first_page, npages)) {
+            cxl_hybrid_invalidate_region_rdma_ready(region_idx);
         }
     }
 }

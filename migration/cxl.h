@@ -483,6 +483,7 @@ bool cxl_hybrid_region_cxl_bulk_allowed(uint64_t region_index);
 void cxl_hybrid_region_drop_rdma(uint64_t region_index);
 void cxl_hybrid_mark_region_rdma_ready(uint64_t region_index);
 void cxl_hybrid_invalidate_region_rdma_ready(uint64_t region_index);
+bool cxl_hybrid_region_rdma_ready_current(uint64_t region_index);
 bool cxl_hybrid_region_commit_rdma_ready(uint64_t region_index);
 bool cxl_hybrid_region_note_cxl_republish(uint64_t region_index);
 bool cxl_hybrid_commit_rdma_ready_region(uint64_t region_index,

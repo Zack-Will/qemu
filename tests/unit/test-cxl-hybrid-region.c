@@ -786,6 +786,7 @@ static void test_rdma_sidecar_switch_commits_only_final_clean_ready_regions(void
     g_assert_false(cxl_hybrid_rdma_sidecar_commit_ready_region(&state, 1));
     g_assert_true(cxl_hybrid_rdma_sidecar_region_committed(&state, 0));
     g_assert_false(cxl_hybrid_rdma_sidecar_region_committed(&state, 1));
+    g_assert_true(cxl_hybrid_rdma_sidecar_region_invalidated(&state, 1));
     g_assert_true(cxl_hybrid_rdma_sidecar_region_is_cxl_owned(&state, 1));
 
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
