@@ -175,6 +175,7 @@ static void test_header_reset_clears_visible_bitmap(void)
     cxl_hybrid_control_reset_run_state(&hdr, visible_bitmap,
                                        G_N_ELEMENTS(visible_bitmap) *
                                        BITS_PER_LONG,
+                                       NULL, 0,
                                        visible_region_bitmap,
                                        G_N_ELEMENTS(visible_region_bitmap) *
                                        BITS_PER_LONG,
@@ -212,6 +213,44 @@ static void test_header_reset_clears_visible_bitmap(void)
     g_assert_cmphex(visible_bitmap[1], ==, 0);
     g_assert_cmphex(visible_region_bitmap[0], ==, 0);
     g_assert_cmphex(owned_bitmap[0], ==, 0);
+}
+
+static void test_page_state_bitmap_bytes_match_total_pages(void)
+{
+    g_assert_cmpuint(cxl_hybrid_control_page_state_words(0), ==, 0);
+    g_assert_cmpuint(cxl_hybrid_control_page_state_words(1), ==, 1);
+    g_assert_cmpuint(cxl_hybrid_control_page_state_words(UINT32_MAX), ==,
+                     UINT32_MAX);
+    g_assert_cmpuint(cxl_hybrid_control_page_state_words(
+                         (uint64_t)UINT32_MAX + 1), ==, SIZE_MAX);
+
+    g_assert_cmpuint(cxl_hybrid_control_page_state_bytes(0), ==, 0);
+    g_assert_cmpuint(cxl_hybrid_control_page_state_bytes(1), ==,
+                     sizeof(uint64_t));
+    g_assert_cmpuint(cxl_hybrid_control_page_state_bytes(65), ==,
+                     65 * sizeof(uint64_t));
+}
+
+static void test_header_reset_initializes_page_state_words(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    uint64_t page_state[4] = { UINT64_MAX, UINT64_MAX, UINT64_MAX,
+                               UINT64_MAX };
+
+    cxl_hybrid_control_reset_run_state(&hdr, NULL,
+                                       G_N_ELEMENTS(page_state),
+                                       page_state,
+                                       G_N_ELEMENTS(page_state),
+                                       NULL, 0, NULL, 0,
+                                       64 * 1024, 12, 5);
+
+    g_assert_cmpuint(hdr.page_state_words, ==, G_N_ELEMENTS(page_state));
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        g_assert_cmpuint(cxl_hybrid_page_state_kind(page_state[i]), ==,
+                         CXL_HYBRID_PAGE_STATE_NOT_SENT);
+        g_assert_cmpuint(cxl_hybrid_page_state_generation(page_state[i]), ==,
+                         5);
+    }
 }
 
 static void test_header_abort_generation_only_matches_expected(void)
@@ -421,7 +460,7 @@ static void test_visible_bitmap_rejects_padded_tail(void)
     unsigned long visible[BITS_TO_LONGS(BITS_PER_LONG + 1)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, BITS_PER_LONG + 1,
-                                       NULL, 0, NULL, 0, 0, 12, 8);
+                                       NULL, 0, NULL, 0, NULL, 0, 0, 12, 8);
 
     g_assert_false(cxl_hybrid_control_region_visible(&hdr, visible, NULL,
                                                      0, 0, 8));
@@ -441,7 +480,7 @@ static void test_region_owned_bitmap_respects_generation(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024, NULL, 0,
-                                       owned, 8, 64 * 1024, 12, 11);
+                                       NULL, 0, owned, 8, 64 * 1024, 12, 11);
 
     g_assert_false(cxl_hybrid_control_region_owned(&hdr, owned, 3, 10));
     g_assert_false(cxl_hybrid_control_region_owned(&hdr, owned, 3, 11));
@@ -455,8 +494,9 @@ static void test_region_owned_bitmap_rejects_padded_tail(void)
     CXLHybridControlHeader hdr = { 0 };
     unsigned long owned[BITS_TO_LONGS(BITS_PER_LONG + 1)] = { 0 };
 
-    cxl_hybrid_control_reset_run_state(&hdr, NULL, 0, NULL, 0, owned,
-                                       BITS_PER_LONG + 1, 64 * 1024, 12, 9);
+    cxl_hybrid_control_reset_run_state(&hdr, NULL, 0, NULL, 0, NULL, 0,
+                                       owned, BITS_PER_LONG + 1,
+                                       64 * 1024, 12, 9);
 
     cxl_hybrid_control_mark_region_owned(&hdr, owned, BITS_PER_LONG + 1);
     g_assert_false(cxl_hybrid_control_region_owned(&hdr, owned,
@@ -470,7 +510,7 @@ static void test_region_visibility_requires_all_pages(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024, NULL, 0,
-                                       owned, 8, 64 * 1024, 12, 4);
+                                       NULL, 0, owned, 8, 64 * 1024, 12, 4);
 
     cxl_hybrid_control_mark_page_visible(&hdr, visible, 10);
     cxl_hybrid_control_mark_page_visible(&hdr, visible, 11);
@@ -489,7 +529,7 @@ static void test_region_visible_bitmap_marks_region_visible(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
     g_assert_false(cxl_hybrid_control_page_visible(&hdr, visible, 512, 4));
@@ -516,7 +556,7 @@ static void test_region_bit_visible_synthesizes_from_page_bitmap(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
     bitmap_set(visible, 512, 128);
 
@@ -553,7 +593,7 @@ static void test_region_span_valid_requires_complete_region(void)
     uint64_t region_index = UINT64_MAX;
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
     g_assert_true(cxl_hybrid_control_region_span_valid(&hdr, 512, 128));
@@ -575,7 +615,7 @@ static void test_set_page_visible_rejects_stale_generation(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
     cxl_hybrid_control_mark_page_visible_generation(&hdr, visible, 512, 3);
@@ -599,7 +639,7 @@ static void test_set_pages_visible_marks_range_once_generation_matches(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
     cxl_hybrid_control_mark_pages_visible_generation(&hdr, visible,
@@ -627,7 +667,7 @@ static void test_mark_region_visible_for_complete_span_generation(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
     g_assert_false(cxl_hybrid_control_mark_region_visible_for_span_generation(
@@ -650,7 +690,7 @@ static void test_mark_visible_region_span_requires_complete_span(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
     g_assert_false(cxl_hybrid_control_mark_visible_region_span_generation(
@@ -676,7 +716,7 @@ static void test_mark_visible_region_span_rejects_stale_generation(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
     g_assert_false(cxl_hybrid_control_mark_visible_region_span_generation(
@@ -694,7 +734,7 @@ static void test_partial_remap_span_marks_pages_without_region_bit(void)
     unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
 
     cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
-                                       visible_regions, 8,
+                                       NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
     cxl_hybrid_control_mark_pages_visible_generation(&hdr, visible,
@@ -952,6 +992,10 @@ int main(int argc, char **argv)
                     test_align_mapping_bytes_rounds_up_to_device_align);
     g_test_add_func("/cxl-hybrid-control/header-reset-clears-visible-bitmap",
                     test_header_reset_clears_visible_bitmap);
+    g_test_add_func("/cxl-hybrid-control/page-state-bytes",
+                    test_page_state_bitmap_bytes_match_total_pages);
+    g_test_add_func("/cxl-hybrid-control/header-reset-page-state",
+                    test_header_reset_initializes_page_state_words);
     g_test_add_func("/cxl-hybrid-control/header-abort-generation",
                     test_header_abort_generation_only_matches_expected);
     g_test_add_func("/cxl-hybrid-control/header-abort-generation-wraps",

@@ -22,6 +22,20 @@ size_t cxl_hybrid_control_visible_bitmap_bytes(uint64_t pages)
            sizeof(unsigned long);
 }
 
+size_t cxl_hybrid_control_page_state_words(uint64_t pages)
+{
+    if (pages > UINT32_MAX) {
+        return SIZE_MAX;
+    }
+
+    return pages;
+}
+
+size_t cxl_hybrid_control_page_state_bytes(uint64_t pages)
+{
+    return pages * sizeof(uint64_t);
+}
+
 size_t cxl_hybrid_control_visible_region_bitmap_words(uint64_t regions)
 {
     return BITS_TO_LONGS(regions);
@@ -489,6 +503,8 @@ bool cxl_hybrid_control_mark_visible_region_span_generation(
 void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
                                         unsigned long *visible_bitmap,
                                         uint64_t visible_pages,
+                                        uint64_t *page_state,
+                                        uint64_t page_state_words,
                                         unsigned long *visible_region_bitmap,
                                         uint64_t visible_regions,
                                         unsigned long *owned_region_bitmap,
@@ -509,6 +525,8 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
     hdr->completed_generation = 0;
     hdr->completion_flags = 0;
     hdr->visible_page_words = BITS_TO_LONGS(visible_pages);
+    hdr->page_state_words = page_state_words;
+    hdr->page_state_word_size = sizeof(uint64_t);
     hdr->visible_region_words = BITS_TO_LONGS(visible_regions);
     hdr->owned_region_words = BITS_TO_LONGS(total_regions);
     hdr->region_granule_shift =
@@ -521,6 +539,12 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
     if (visible_bitmap && hdr->visible_page_words) {
         memset(visible_bitmap, 0,
                (size_t)hdr->visible_page_words * sizeof(*visible_bitmap));
+    }
+    if (page_state) {
+        for (uint64_t page = 0; page < page_state_words; page++) {
+            page_state[page] =
+                cxl_hybrid_page_state_make_not_sent(generation);
+        }
     }
     if (visible_region_bitmap && hdr->visible_region_words) {
         memset(visible_region_bitmap, 0,
@@ -537,8 +561,8 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
 void cxl_hybrid_control_reset_header_for_run(CXLHybridControlHeader *hdr,
                                              uint32_t generation)
 {
-    cxl_hybrid_control_reset_run_state(hdr, NULL, 0, NULL, 0, NULL, 0, 0, 0,
-                                       generation);
+    cxl_hybrid_control_reset_run_state(hdr, NULL, 0, NULL, 0, NULL, 0, NULL,
+                                       0, 0, 0, generation);
 }
 
 bool cxl_hybrid_control_region_owned(const CXLHybridControlHeader *hdr,

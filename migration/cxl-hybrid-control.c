@@ -20,6 +20,7 @@ typedef struct CXLHybridControlRegion {
     int fd;
     CXLHybridControlHeader *hdr;
     unsigned long *visible_bitmap;
+    uint64_t *page_state;
     unsigned long *visible_region_bitmap;
     unsigned long *owned_region_bitmap;
     CXLHybridFaultRequestRecord *request_ring;
@@ -27,6 +28,7 @@ typedef struct CXLHybridControlRegion {
     uint64_t total_regions;
     uint64_t region_granule;
     uint32_t visible_page_words;
+    uint32_t page_state_words;
     uint32_t visible_region_words;
     uint32_t owned_region_words;
     uint32_t region_granule_shift;
@@ -39,6 +41,8 @@ typedef struct CXLHybridControlState {
     void *map_base;
     size_t map_len;
     unsigned long *visible_bitmap;
+    uint64_t *page_state;
+    uint32_t page_state_words;
     unsigned long *visible_region_bitmap;
     unsigned long *owned_region_bitmap;
     CXLHybridFaultRequestRecord *request_ring;
@@ -145,6 +149,8 @@ uint64_t cxl_hybrid_fault_control_region_bytes(void)
         cxl_hybrid_ctrl_total_regions(total_pages, TARGET_PAGE_SIZE);
     size_t visible_bitmap_bytes =
         cxl_hybrid_control_visible_bitmap_bytes(total_pages);
+    size_t page_state_bytes =
+        cxl_hybrid_control_page_state_bytes(total_pages);
     size_t visible_region_bitmap_bytes =
         cxl_hybrid_control_visible_region_bitmap_bytes(total_regions);
     size_t owned_region_bitmap_bytes =
@@ -154,8 +160,8 @@ uint64_t cxl_hybrid_fault_control_region_bytes(void)
         sizeof(CXLHybridFaultRequestRecord);
 
     return ROUND_UP(sizeof(CXLHybridControlHeader) + visible_bitmap_bytes +
-                    visible_region_bitmap_bytes + owned_region_bitmap_bytes +
-                    request_bytes,
+                    page_state_bytes + visible_region_bitmap_bytes +
+                    owned_region_bitmap_bytes + request_bytes,
                     (size_t)qemu_real_host_page_size());
 }
 
@@ -232,6 +238,8 @@ static void cxl_hybrid_ctrl_bind_state(CXLHybridControlState *state)
     state->map_base = cxl_hybrid_control_region.map_base;
     state->map_len = cxl_hybrid_control_region.map_len;
     state->visible_bitmap = cxl_hybrid_control_region.visible_bitmap;
+    state->page_state = cxl_hybrid_control_region.page_state;
+    state->page_state_words = cxl_hybrid_control_region.page_state_words;
     state->visible_region_bitmap =
         cxl_hybrid_control_region.visible_region_bitmap;
     state->owned_region_bitmap =
@@ -278,9 +286,11 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
     uint64_t total_regions;
     uint64_t region_granule;
     uint32_t visible_page_words;
+    size_t page_state_words;
     uint32_t visible_region_words;
     uint32_t owned_region_words;
     size_t visible_bitmap_bytes;
+    size_t page_state_bytes;
     size_t visible_region_bitmap_bytes;
     size_t owned_region_bitmap_bytes;
     int fd;
@@ -307,8 +317,18 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
         return -errno;
     }
 
-    map_len = cxl_hybrid_fault_control_region_allocation_bytes(cioc->align);
     total_pages = cxl_hybrid_ctrl_total_pages();
+    page_state_words = cxl_hybrid_control_page_state_words(total_pages);
+    if (page_state_words == SIZE_MAX) {
+        error_setg(errp,
+                   "CXL hybrid fault control page-state array supports at "
+                   "most %u pages (total-pages=%" PRIu64 ")",
+                   UINT32_MAX, total_pages);
+        object_unref(OBJECT(cioc));
+        return -EOVERFLOW;
+    }
+
+    map_len = cxl_hybrid_fault_control_region_allocation_bytes(cioc->align);
     total_ram = ram_bytes_total();
     region_granule = cxl_hybrid_ctrl_region_granule(cioc->align, total_ram);
     total_regions = cxl_hybrid_ctrl_total_regions(total_pages,
@@ -319,6 +339,7 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
     owned_region_words = cxl_hybrid_ctrl_owned_region_words(total_regions);
     visible_bitmap_bytes =
         cxl_hybrid_control_visible_bitmap_bytes(total_pages);
+    page_state_bytes = cxl_hybrid_control_page_state_bytes(total_pages);
     visible_region_bitmap_bytes =
         cxl_hybrid_control_visible_region_bitmap_bytes(total_regions);
     owned_region_bitmap_bytes =
@@ -362,6 +383,7 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
     cxl_hybrid_control_region.total_regions = total_regions;
     cxl_hybrid_control_region.region_granule = region_granule;
     cxl_hybrid_control_region.visible_page_words = visible_page_words;
+    cxl_hybrid_control_region.page_state_words = (uint32_t)page_state_words;
     cxl_hybrid_control_region.visible_region_words = visible_region_words;
     cxl_hybrid_control_region.owned_region_words = owned_region_words;
     cxl_hybrid_control_region.region_granule_shift =
@@ -369,9 +391,12 @@ static int cxl_hybrid_ctrl_region_ensure(Error **errp)
     cxl_hybrid_control_region.request_ring_entries =
         cxl_hybrid_ctrl_ring_entries(CXL_HYBRID_CTRL_REQUEST_ORDER);
     cxl_hybrid_control_region.visible_bitmap = (unsigned long *)(hdr + 1);
+    cxl_hybrid_control_region.page_state =
+        (uint64_t *)((char *)cxl_hybrid_control_region.visible_bitmap +
+                    visible_bitmap_bytes);
     cxl_hybrid_control_region.visible_region_bitmap =
-        (unsigned long *)((char *)cxl_hybrid_control_region.visible_bitmap +
-                         visible_bitmap_bytes);
+        (unsigned long *)((char *)cxl_hybrid_control_region.page_state +
+                         page_state_bytes);
     cxl_hybrid_control_region.owned_region_bitmap =
         (unsigned long *)((char *)
                           cxl_hybrid_control_region.visible_region_bitmap +
@@ -768,6 +793,8 @@ int cxl_hybrid_control_begin_source_run(Error **errp)
     cxl_hybrid_control_reset_run_state(cxl_hybrid_control_source.hdr,
                                        cxl_hybrid_control_source.visible_bitmap,
                                        cxl_hybrid_control_region.total_pages,
+                                       cxl_hybrid_control_source.page_state,
+                                       cxl_hybrid_control_source.page_state_words,
                                        visible_region_bitmap,
                                        cxl_hybrid_control_region.total_regions,
                                        owned_region_bitmap,
@@ -866,6 +893,7 @@ int cxl_hybrid_control_activate_destination(Error **errp)
     uint64_t region_granule;
     uint32_t generation;
     size_t expected_visible_page_words;
+    size_t expected_page_state_words;
     size_t expected_owned_region_words;
     uint32_t expected_region_granule_shift;
 
@@ -898,6 +926,31 @@ int cxl_hybrid_control_activate_destination(Error **errp)
                    "(header=%" PRIu64 " expected=%" PRIu64 ")",
                    hdr->total_pages,
                    cxl_hybrid_control_region.total_pages);
+        return -EINVAL;
+    }
+    expected_page_state_words =
+        cxl_hybrid_control_page_state_words(cxl_hybrid_ctrl_total_pages());
+    if (expected_page_state_words == SIZE_MAX) {
+        error_setg(errp,
+                   "CXL hybrid fault control page-state array supports at "
+                   "most %u pages",
+                   UINT32_MAX);
+        return -EOVERFLOW;
+    }
+    if (hdr->page_state_words != expected_page_state_words) {
+        error_setg(errp,
+                   "CXL hybrid fault control page state mismatch "
+                   "(header=%u expected=%zu)",
+                   hdr->page_state_words,
+                   expected_page_state_words);
+        return -EINVAL;
+    }
+    if (hdr->page_state_word_size != sizeof(uint64_t)) {
+        error_setg(errp,
+                   "CXL hybrid fault control page state word size mismatch "
+                   "(header=%u expected=%zu)",
+                   hdr->page_state_word_size,
+                   sizeof(uint64_t));
         return -EINVAL;
     }
     expected_owned_region_words =

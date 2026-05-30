@@ -18,7 +18,7 @@
 
 #define CXL_HYBRID_METADATA_VERSION 1
 #define CXL_HYBRID_CTRL_MAGIC 0x43584c48U
-#define CXL_HYBRID_CTRL_VERSION 5
+#define CXL_HYBRID_CTRL_VERSION 6
 #define CXL_HYBRID_CTRL_REQUEST_ORDER 10
 #define CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE (1U << 0)
 #define CXL_FAULT_REGION_GRANULE_DEFAULT (2 * 1024 * 1024)
@@ -82,6 +82,8 @@ typedef struct CXLHybridControlHeader {
     uint32_t request_ring_order;
     uint32_t generation;
     uint32_t visible_page_words;
+    uint32_t page_state_words;
+    uint32_t page_state_word_size;
     uint32_t visible_region_words;
     uint32_t owned_region_words;
     uint32_t region_granule_shift;
@@ -670,6 +672,8 @@ bool cxl_hybrid_page_state_can_consume(uint64_t word,
                                        CXLHybridPageLocation location);
 size_t cxl_hybrid_control_visible_bitmap_words(uint64_t pages);
 size_t cxl_hybrid_control_visible_bitmap_bytes(uint64_t pages);
+size_t cxl_hybrid_control_page_state_words(uint64_t pages);
+size_t cxl_hybrid_control_page_state_bytes(uint64_t pages);
 size_t cxl_hybrid_control_visible_region_bitmap_words(uint64_t regions);
 size_t cxl_hybrid_control_visible_region_bitmap_bytes(uint64_t regions);
 size_t cxl_hybrid_control_owned_region_bitmap_words(uint64_t regions);
@@ -767,6 +771,8 @@ bool cxl_hybrid_control_mark_visible_region_span_generation(
 void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
                                         unsigned long *visible_bitmap,
                                         uint64_t visible_pages,
+                                        uint64_t *page_state,
+                                        uint64_t page_state_words,
                                         unsigned long *visible_region_bitmap,
                                         uint64_t visible_regions,
                                         unsigned long *owned_region_bitmap,
