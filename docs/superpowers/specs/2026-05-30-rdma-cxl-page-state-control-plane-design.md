@@ -23,14 +23,16 @@ The target model is:
 
 - control plane: per-page state machine in shared CXL memory, updated with
   atomic compare-and-swap and release/acquire fences;
-- scheduler: the main migration flow scans dirty/fault state, classifies work,
-  claims pages, and enqueues descriptors, but does not copy page data;
-- data plane: CXL and RDMA workers consume lane-local queues and complete pages
-  back into the shared page state;
+- scheduler: the main migration flow scans dirty state, classifies work, claims
+  pages, and enqueues descriptors, but does not copy bulk page data;
+- data plane: a CXL fault poller moves only the faulting page, CXL/RDMA workers
+  consume lane-local queues, and all lanes complete pages back into the shared
+  page state;
 - RDMA target: destination RAM, matching the intended native-RDMA-like data
   placement, not CXL backing and not a new staging buffer;
-- postcopy faults: mark or enqueue only the demanded page as urgent CXL work,
-  and optionally enqueue the containing region as low-priority RDMA prefetch;
+- postcopy faults: the poller serves the faulting page immediately, then
+  enqueues dirty pages in the containing region to the CXL worker high-priority
+  queue for prefetch/backfill;
 - remap: use linear GPA-to-DAX offsets so adjacent page remaps use contiguous
   file offsets and can be merged by the kernel.
 
@@ -49,7 +51,8 @@ The current branch still treats region state as control state:
   `cxl_hybrid_invalidate_region_rdma_ready()`, and CXL republish accounting is
   region-based.
 - the CXL request worker in `migration/cxl-hybrid-control.c` dequeues fault
-  requests and directly performs page or region publication.
+  requests and directly performs page or region publication without a per-page
+  ownership arbiter.
 - postcopy region mode still validates and waits for a complete region before
   remap.
 
@@ -66,9 +69,14 @@ stale fallback.
 - Remove the rule "RDMA region invalidated means whole region CXL republish".
 - Serve stale or faulted pages on demand at page granularity.
 - Keep region as an RDMA transfer or prefetch unit only.
-- Keep the main migration flow as a scheduler/classifier, not a memcpy path.
+- Keep the main migration flow as a scheduler/classifier, not a bulk memcpy
+  path.
+- Keep the CXL poller as the fault fast path and allow it to copy exactly the
+  demanded page.
 - Allow workers to exist during both precopy and postcopy.
 - Allow urgent postcopy demand to preempt queued background/prefetch work.
+- Use CXL worker high/low priority queues, with de-duplication guaranteed by
+  the shared per-page state CAS rules.
 - Use linear GPA-to-DAX offsets so remap fragmentation is transient and can
   converge as adjacent VMAs become identical.
 
@@ -77,7 +85,8 @@ stale fallback.
 - No memcpy or shadow-copy RDMA sidecar fallback.
 - No conversion of hybrid migration into QEMU native RDMA migration.
 - No region-wide CXL republish caused by one stale RDMA page.
-- No cross-lane merge of CXL and RDMA work.
+- No cross-lane merge of CXL and RDMA work. Within one CXL worker transfer,
+  adjacent pages from the same priority queue may be merged.
 - No source-side brake policy work in this redesign.
 
 ## Shared CXL Page State
@@ -126,9 +135,9 @@ Consumers must load the state with acquire semantics before trusting the data.
 
 ## Scheduler
 
-The main migration flow becomes the scheduler. It is allowed to scan, classify,
-perform atomic page claims, and enqueue descriptors. It is not allowed to copy
-guest page bytes on the normal hybrid path.
+The main migration flow becomes the bulk scheduler. It is allowed to scan,
+classify, perform atomic page claims, and enqueue descriptors. It is not allowed
+to copy guest page bytes for bulk migration.
 
 Precopy bulk scheduling:
 
@@ -143,11 +152,13 @@ Precopy bulk scheduling:
 Postcopy demand scheduling:
 
 - a faulted page is always high priority;
-- if the page is not already consumable, enqueue a CXL demand descriptor for
+- if the page is not already consumable, the CXL poller claims and copies
   exactly that page;
-- enqueue the containing region as a low-priority RDMA prefetch descriptor only
-  for pages not already claimed or published;
-- a later fault can preempt queued prefetch pages before RDMA posts them.
+- after the fault page is published, enqueue dirty pages from the containing
+  region into the CXL worker high-priority queue;
+- the CXL worker may also consume low-priority background bulk descriptors;
+- RDMA prefetch can still be queued for pages not already claimed or published,
+  but a later CXL fault path can preempt queued RDMA work before RDMA posts it.
 
 To keep the experiment aligned with the intended CXL+RDMA parallel hardware
 benefit, the implementation should keep a configurable CXL background share for
@@ -157,12 +168,44 @@ working in parallel.
 
 ## Data Lanes
 
+### CXL Fault Poller
+
+The CXL poller remains a dedicated fault fast path. It may perform data
+movement, but only for the single demanded page. Its job is to minimize guest
+stall, not to batch a whole region.
+
+On each fault request, the poller:
+
+1. reads the page state;
+2. if the page is already consumable, wakes/remaps without copying;
+3. if the page can be claimed by CXL, CASes it to `IN_FLIGHT(owner=CXL)` and
+   copies exactly one page into the linear CXL backing offset;
+4. publishes the page as `PUBLISHED@CXL`;
+5. enqueues the rest of the dirty pages in the containing region to the CXL
+   worker high-priority queue.
+
+If the page is covered by an already-posted RDMA write to destination RAM, the
+poller does not copy and wake the same local page. It waits for RDMA completion
+or failure, then either consumes `PUBLISHED@DST_LOCAL` or requeues the page as
+CXL demand.
+
 ### CXL Lane
 
-The CXL worker should be a refactor of the current CXL request-poller shape, not
-a completely new thread model. It consumes page descriptors instead of making
-region-level control decisions itself. Demand descriptors have strict priority
-over background descriptors.
+The CXL worker should be a refactor near the current CXL poller/request-worker
+shape, not a completely new thread model. Unlike the poller, it is allowed to
+batch. It consumes page descriptors instead of making region-level control
+decisions itself.
+
+Use two queues:
+
+- high priority: dirty pages from regions that recently had a postcopy fault;
+- low priority: background bulk or prefetch pages.
+
+The worker drains high priority first. It may keep a low-priority transfer in
+progress to completion, but it should check the high-priority queue between
+lane-local merged transfers. Queue de-duplication is optional; correctness
+comes from the per-page CAS. Duplicate descriptors that fail CAS are dropped and
+counted.
 
 For adjacent pages in the same CXL lane queue, the worker may coalesce into one
 contiguous memcpy into the linear DAX offset range. It must complete each page
@@ -171,7 +214,8 @@ state separately, or complete a range only if every page still has the matching
 
 The CXL lane is responsible for:
 
-- urgent postcopy demand;
+- fault-adjacent high-priority prefetch/backfill after the poller serves the
+  demanded page;
 - optional background bulk share;
 - stale RDMA page fallback;
 - pages that RDMA cannot claim because of budget, MR limits, or active fault
@@ -210,13 +254,17 @@ On destination fault:
 3. if `PUBLISHED@CXL`, remap or place the page from CXL and wake the fault;
 4. if `PUBLISHED@DST_LOCAL`, mark the local page received and wake the fault;
 5. if `PUBLISHED@ZERO`, install or mark the zero page and wake the fault;
-6. if `NOT_SENT`, `DIRTY`, `STALE`, or queued-but-not-consumable, enqueue CXL
-   demand for that page and wait for that page state only;
-7. enqueue a low-priority RDMA prefetch descriptor for nearby pages that are
-   not demanded, not published, and not already in flight.
+6. if `NOT_SENT`, `DIRTY`, `STALE`, or queued-but-not-consumable, let the CXL
+   poller claim and copy exactly the faulting page;
+7. after the faulting page is published, enqueue dirty pages in the containing
+   region to the CXL worker high-priority queue;
+8. optionally enqueue RDMA prefetch descriptors for nearby pages that are not
+   demanded, not published, not already in flight, and not in the CXL
+   high-priority queue.
 
 The fault path must not request "publish this whole region via CXL" for RDMA
-staleness. Whole-region work is only a prefetch hint.
+staleness. Region remains only a source for candidate pages; the poller copies
+one page and the worker claims pages individually.
 
 ## Remap And GPA-to-DAX Mapping
 
@@ -235,11 +283,26 @@ That allows Linux to merge adjacent VMAs after page/subrange remap.
 Remap policy changes:
 
 - remap is no longer required at region granularity;
+- destination remap is speculative and span-based: on each remap attempt, scan
+  left and right from the fault page and choose the longest contiguous valid
+  CXL-backed span;
+- the span is not fixed to one region and is not fixed to one page;
 - only hot pages or hot contiguous spans need CXL remap;
 - background RDMA pages published to destination local RAM do not require CXL
   remap;
 - fragmentation is acceptable only as a temporary state and must converge when
   adjacent pages share the same file, offset continuity, protection, and flags.
+
+A page is valid for inclusion in a speculative remap span only if:
+
+- its page state is current and `PUBLISHED@CXL`;
+- its DAX offset is contiguous with the previous page;
+- it is not dirty, stale, or in flight;
+- it belongs to the same RAMBlock and maps with the same protection and flags.
+
+The span scan should stop at the first invalid page on each side. The first
+implementation can add a configurable maximum scan window if needed to protect
+fault latency, but correctness must not depend on a region boundary.
 
 The experiment should measure VMA count and `/proc/<qemu-pid>/maps` convergence
 after a postcopy run with repeated hot-page remaps.
@@ -259,8 +322,8 @@ Remove or demote these region-control concepts:
   `cxl_republish_*_due_to_rdma_invalidate` semantics;
 - `cxl_hybrid_commit_rdma_ready_regions_for_postcopy()` as a region scan;
 - the source request-worker behavior that independently decides region
-  publication. The thread shape may remain as the CXL worker, but it must
-  consume per-page descriptors and complete page state;
+  publication. The poller/worker thread shapes may remain, but the poller must
+  copy only the fault page and the worker must consume per-page descriptors;
 - complete-region validation for normal postcopy demand service.
 
 Derived region counters may remain for reporting RDMA transfer efficiency, but
@@ -276,10 +339,12 @@ Add these units:
   `try_claim_page(owner)`, `complete_page(owner, location)`,
   `mark_page_dirty()`, `mark_page_stale()`, and `page_can_consume()`;
 - scheduler queues with priority classes:
-  `CXL_DEMAND`, `CXL_BULK`, `RDMA_BULK`, and `RDMA_PREFETCH`;
-- worker lifecycle shared by precopy and postcopy, reusing the current CXL
-  poller-like worker shape and the current RDMA sidecar thread shape where
-  possible;
+  `CXL_HIGH`, `CXL_LOW`, `RDMA_BULK`, and `RDMA_PREFETCH`;
+- a CXL poller fast path for single-page fault service;
+- CXL worker high/low priority queues, reusing the current poller-like worker
+  shape where possible;
+- worker lifecycle shared by precopy and postcopy, reusing the current RDMA
+  sidecar thread shape where possible;
 - RDMA descriptors that contain region base plus owned page spans or a page
   mask;
 - CXL descriptors that contain page spans and demand/fallback reason;
@@ -293,10 +358,10 @@ Add these units:
 - `migration/ram.c`: convert the bulk scan from copy/claim-and-clear to
   classify/claim/enqueue. The main path should stop calling RDMA region claim
   before CXL has a chance to classify pages.
-- `migration/cxl-hybrid-control.c`: extend the shared control layout and
-  refactor the current request worker into the CXL worker path. It may continue
-  to poll/dequeue demand work, but it should consume scheduler-created per-page
-  descriptors and update page state, not publish whole regions on its own.
+- `migration/cxl-hybrid-control.c`: extend the shared control layout and split
+  the current request-worker behavior into a CXL poller fast path plus CXL
+  worker queues. The poller may copy the fault page immediately; the worker
+  consumes per-page high/low priority descriptors and updates page state.
 - `migration/cxl-hybrid-control-header.c`: add pure helpers for the page state
   word, including CAS transitions and release/acquire publication helpers.
 - `migration/cxl.c`: change fault publish paths from page-or-region copy
@@ -318,6 +383,8 @@ The redesign is successful when:
 
 - no normal hybrid bulk or demand path performs page memcpy in the main
   migration thread;
+- the CXL poller copies at most the faulting page before waking the fault;
+- fault-adjacent dirty pages are served by the CXL worker high-priority queue;
 - a stale RDMA page causes one-page CXL demand service, not whole-region CXL
   republish;
 - RDMA completed bytes are real RDMA verbs completions;
@@ -332,6 +399,8 @@ The redesign is successful when:
 - CXL demand cannot wake a destination local page while an RDMA write covering
   that page is already posted;
 - VMA count does not grow without bound after page/subrange CXL remap;
+- destination remap chooses the longest contiguous valid CXL span around the
+  fault page instead of a fixed region or fixed single page;
 - removing region republish counters does not remove observability: per-page
   stale and fallback counters replace them.
 
@@ -355,9 +424,10 @@ The highest-risk parts are:
   and postcopy switch;
 - RDMA writes to destination RAM racing with CXL demand and destination wakeup;
 - maintaining low postcopy demand latency while the old request poller is
-  refactored into a per-page CXL worker;
+  refactored into a one-page poller plus CXL worker queues;
 - avoiding a new imbalance where all precopy bulk goes to RDMA and CXL becomes
   demand-only;
+- bounding speculative remap-span scans so they do not add tail latency;
 - preserving QEMU migration lifecycle cleanup when workers persist across
   precopy and postcopy;
 - proving that linear DAX offsets actually allow VMA merge on the test kernel.
@@ -393,15 +463,18 @@ Exit criteria:
 - zero pages are classified before RDMA;
 - CAS failure and lane selection metrics are stable.
 
-### Phase 3: CXL Worker Page Data Path
+### Phase 3: CXL Poller And Worker Data Path
 
-Move CXL page copies into a CXL worker based on the current CXL request-poller
-shape. Demand faults enqueue page descriptors and wait for per-page state.
+Split CXL data movement into a poller fast path and worker queues. The poller
+copies only the fault page. The worker handles high-priority region-dirty pages
+and low-priority background descriptors.
 
 Exit criteria:
 
 - main migration thread does not memcpy CXL page data in the worker-enabled
   path;
+- poller copies one page per fault request and never publishes a whole region;
+- CXL worker high-priority queue receives dirty pages from the fault region;
 - postcopy demand latency is no worse than current CXL-only baseline;
 - CXL worker bytes/time replace ambiguous backing-write accounting.
 
@@ -419,25 +492,30 @@ Exit criteria:
 
 ### Phase 5: Fault Prefetch And Priority
 
-Use faulted pages as CXL demand and use containing regions as RDMA prefetch
-hints. Demand can preempt queued prefetch before RDMA posts it.
+Use faulted pages as poller demand and use containing regions as CXL
+high-priority page candidates plus RDMA prefetch hints. Demand can preempt
+queued prefetch before RDMA posts it.
 
 Exit criteria:
 
 - a postcopy fault on an RDMA-stale page causes one-page CXL demand;
-- pending RDMA prefetch never blocks urgent CXL demand;
+- pending RDMA prefetch never blocks the CXL poller;
+- CXL worker high-priority work outranks low-priority background work;
 - queued RDMA prefetch can be preempted before post;
 - posted RDMA pages make the fault wait for RDMA completion/failure;
 - posted RDMA race rule is tested with fault injection.
 
-### Phase 6: Linear Remap Policy
+### Phase 6: Linear And Speculative Remap Policy
 
 Remove the assumption that remap must be region-sized. Use the linear
-GPA-to-DAX offset mapping for hot pages or hot spans.
+GPA-to-DAX offset mapping for hot pages or hot spans, and remap the longest
+valid contiguous CXL-backed span around a fault.
 
 Exit criteria:
 
 - adjacent remapped pages have contiguous DAX offsets;
+- remap attempts are not fixed to region size or single-page size;
+- invalid pages stop span growth on each side;
 - `/proc/<pid>/maps` shows VMA merging or bounded fragmentation;
 - remap success/failure metrics are per span/page rather than only per region.
 
@@ -461,7 +539,7 @@ real RDMA sidecar work remains valuable for connection setup and verbs posting,
 but the region ownership layer should be removed instead of extended.
 
 The implementation plan should preserve the current thread shapes where they
-fit: CXL worker as the current poller style with per-page descriptors, and RDMA
-worker as the current sidecar thread with page-state completion. The main
-structural change is the control authority, not the existence of the worker
-threads.
+fit: CXL poller as the one-page fault fast path, CXL worker as high/low priority
+queue consumers, and RDMA worker as the current sidecar thread with page-state
+completion. The main structural change is the control authority and granularity,
+not the existence of the worker threads.
