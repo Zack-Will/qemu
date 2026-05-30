@@ -291,6 +291,20 @@ typedef struct CXLHybridRDMABulkClaim {
     void *dst;
 } CXLHybridRDMABulkClaim;
 
+typedef struct CXLHybridRDMAPageDescriptor {
+    RAMBlock *block;
+    ram_addr_t block_offset;
+    uint64_t first_page;
+    uint32_t nr_pages;
+    unsigned long *claimed_bmap;
+    CXLHybridPageClaim *claims;
+    uint32_t generation;
+    uint32_t claimed_pages;
+    uint32_t posted_pages;
+    uint32_t completed_pages;
+    uint32_t stale_pages;
+} CXLHybridRDMAPageDescriptor;
+
 void cxl_hybrid_metadata_cleanup(CXLHybridMetadata *meta);
 int cxl_hybrid_metadata_encoded_len(const CXLHybridMetadata *meta,
                                     size_t *len,
@@ -579,6 +593,21 @@ bool cxl_hybrid_rdma_bulk_claim_init(CXLHybridRDMABulkClaim *claim,
                                      ram_addr_t block_offset);
 bool cxl_hybrid_rdma_try_claim_bulk_region(CXLHybridRDMABulkClaim *claim);
 void cxl_hybrid_rdma_drop_bulk_claim(const CXLHybridRDMABulkClaim *claim);
+bool cxl_hybrid_rdma_descriptor_claim_pages_for_test(
+    CXLHybridRDMAPageDescriptor *desc,
+    uint64_t *page_state,
+    uint64_t total_pages,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation);
+bool cxl_hybrid_rdma_descriptor_page_claimed(
+    const CXLHybridRDMAPageDescriptor *desc,
+    uint32_t page_offset);
+void cxl_hybrid_rdma_descriptor_complete_pages_for_test(
+    CXLHybridRDMAPageDescriptor *desc,
+    uint64_t *page_state,
+    uint64_t total_pages);
+void cxl_hybrid_rdma_descriptor_destroy(CXLHybridRDMAPageDescriptor *desc);
 bool cxl_hybrid_rdma_sidecar_get_backing(void **basep, size_t *sizep);
 bool cxl_hybrid_start_rdma_sidecar(bool incoming, bool wait_for_setup,
                                    Error **errp);

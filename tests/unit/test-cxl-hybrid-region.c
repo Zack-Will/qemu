@@ -454,6 +454,109 @@ static void test_warm_page_eligible_excludes_already_visible_pages(void)
                                                           42));
 }
 
+static void test_rdma_descriptor_claims_only_requested_pages(void)
+{
+    uint64_t page_state[8];
+    CXLHybridRDMAPageDescriptor desc = { 0 };
+    uint32_t generation = 2;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_dirty(generation, i + 1);
+    }
+    page_state[3] = cxl_hybrid_page_state_make_published(
+        generation, CXL_HYBRID_PAGE_LOCATION_CXL, 0);
+
+    g_assert_true(cxl_hybrid_rdma_descriptor_claim_pages_for_test(
+        &desc, page_state, G_N_ELEMENTS(page_state), 0, 8, generation));
+    g_assert_cmpuint(desc.first_page, ==, 0);
+    g_assert_cmpuint(desc.nr_pages, ==, 8);
+    g_assert_cmpuint(desc.claimed_pages, ==, 7);
+    g_assert_false(cxl_hybrid_rdma_descriptor_page_claimed(&desc, 3));
+    g_assert_true(cxl_hybrid_rdma_descriptor_page_claimed(&desc, 4));
+
+    cxl_hybrid_rdma_descriptor_destroy(&desc);
+}
+
+static void test_rdma_descriptor_completion_ignores_stale_page(void)
+{
+    uint64_t page_state[4];
+    CXLHybridRDMAPageDescriptor desc = { 0 };
+    uint32_t generation = 6;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_dirty(generation, i + 1);
+    }
+    g_assert_true(cxl_hybrid_rdma_descriptor_claim_pages_for_test(
+        &desc, page_state, G_N_ELEMENTS(page_state), 0, 4, generation));
+    cxl_hybrid_page_state_mark_dirty(&page_state[1], generation, 99);
+
+    cxl_hybrid_rdma_descriptor_complete_pages_for_test(&desc, page_state,
+                                                       G_N_ELEMENTS(page_state));
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        page_state[0], generation, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL));
+    g_assert_cmpuint(cxl_hybrid_page_state_kind(page_state[1]), ==,
+                     CXL_HYBRID_PAGE_STATE_DIRTY);
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        page_state[2], generation, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL));
+    g_assert_cmpuint(desc.completed_pages, ==, 3);
+    g_assert_cmpuint(desc.stale_pages, ==, 1);
+
+    cxl_hybrid_rdma_descriptor_destroy(&desc);
+}
+
+static void test_rdma_descriptor_no_claims_clears_descriptor(void)
+{
+    uint64_t page_state[4];
+    CXLHybridRDMAPageDescriptor desc = { 0 };
+    uint32_t generation = 4;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_dirty(generation, i + 1);
+    }
+    g_assert_true(cxl_hybrid_rdma_descriptor_claim_pages_for_test(
+        &desc, page_state, G_N_ELEMENTS(page_state), 0, 4, generation));
+    g_assert_nonnull(desc.claimed_bmap);
+    g_assert_nonnull(desc.claims);
+
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_published(
+            generation, CXL_HYBRID_PAGE_LOCATION_CXL, 0);
+    }
+    g_assert_false(cxl_hybrid_rdma_descriptor_claim_pages_for_test(
+        &desc, page_state, G_N_ELEMENTS(page_state), 0, 4, generation));
+    g_assert_null(desc.claimed_bmap);
+    g_assert_null(desc.claims);
+    g_assert_cmpuint(desc.claimed_pages, ==, 0);
+
+    cxl_hybrid_rdma_descriptor_destroy(&desc);
+}
+
+static void test_rdma_descriptor_completion_consumes_claims_once(void)
+{
+    uint64_t page_state[4];
+    CXLHybridRDMAPageDescriptor desc = { 0 };
+    uint32_t generation = 7;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_dirty(generation, i + 1);
+    }
+    g_assert_true(cxl_hybrid_rdma_descriptor_claim_pages_for_test(
+        &desc, page_state, G_N_ELEMENTS(page_state), 0, 4, generation));
+    cxl_hybrid_page_state_mark_dirty(&page_state[1], generation, 99);
+
+    cxl_hybrid_rdma_descriptor_complete_pages_for_test(&desc, page_state,
+                                                       G_N_ELEMENTS(page_state));
+    g_assert_cmpuint(desc.completed_pages, ==, 3);
+    g_assert_cmpuint(desc.stale_pages, ==, 1);
+
+    cxl_hybrid_rdma_descriptor_complete_pages_for_test(&desc, page_state,
+                                                       G_N_ELEMENTS(page_state));
+    g_assert_cmpuint(desc.completed_pages, ==, 3);
+    g_assert_cmpuint(desc.stale_pages, ==, 1);
+
+    cxl_hybrid_rdma_descriptor_destroy(&desc);
+}
+
 static void test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish(void)
 {
     CXLHybridRDMASidecarState state = { 0 };
@@ -888,6 +991,14 @@ int main(int argc, char **argv)
                     test_clean_remap_prefault_mode_helpers);
     g_test_add_func("/cxl/region/warm-page-eligible-excludes-already-visible-pages",
                     test_warm_page_eligible_excludes_already_visible_pages);
+    g_test_add_func("/cxl/region/rdma-descriptor-claims-requested-pages",
+                    test_rdma_descriptor_claims_only_requested_pages);
+    g_test_add_func("/cxl/region/rdma-descriptor-completion-ignores-stale-page",
+                    test_rdma_descriptor_completion_ignores_stale_page);
+    g_test_add_func("/cxl/region/rdma-descriptor-no-claims-clears-descriptor",
+                    test_rdma_descriptor_no_claims_clears_descriptor);
+    g_test_add_func("/cxl/region/rdma-descriptor-completion-consumes-once",
+                    test_rdma_descriptor_completion_consumes_claims_once);
     g_test_add_func("/cxl/region/rdma-sidecar-accounting",
                     test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish);
     g_test_add_func("/cxl/region/rdma-sidecar-inflight-does-not-block-cxl",

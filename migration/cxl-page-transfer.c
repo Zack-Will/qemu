@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "qemu/bitmap.h"
 #include "migration/cxl.h"
 
 CXLHybridTransferClass cxl_hybrid_scheduler_choose_zero_page_lane(
@@ -149,6 +150,87 @@ bool cxl_hybrid_transfer_queue_pop_rdma(CXLHybridTransferQueue *queue,
 
     return cxl_hybrid_transfer_queue_pop_ordered(
         queue, order, G_N_ELEMENTS(order), desc, klass);
+}
+
+bool cxl_hybrid_rdma_descriptor_page_claimed(
+    const CXLHybridRDMAPageDescriptor *desc,
+    uint32_t page_offset)
+{
+    return desc && desc->claimed_bmap && page_offset < desc->nr_pages &&
+           test_bit(page_offset, desc->claimed_bmap);
+}
+
+void cxl_hybrid_rdma_descriptor_destroy(CXLHybridRDMAPageDescriptor *desc)
+{
+    if (!desc) {
+        return;
+    }
+    g_free(desc->claimed_bmap);
+    g_free(desc->claims);
+    memset(desc, 0, sizeof(*desc));
+}
+
+bool cxl_hybrid_rdma_descriptor_claim_pages_for_test(
+    CXLHybridRDMAPageDescriptor *desc,
+    uint64_t *page_state,
+    uint64_t total_pages,
+    uint64_t first_page,
+    uint32_t nr_pages,
+    uint32_t generation)
+{
+    if (!desc || !page_state || !nr_pages ||
+        first_page >= total_pages || nr_pages > total_pages - first_page) {
+        return false;
+    }
+
+    cxl_hybrid_rdma_descriptor_destroy(desc);
+    desc->first_page = first_page;
+    desc->nr_pages = nr_pages;
+    desc->generation = generation;
+    desc->claimed_bmap = bitmap_new(nr_pages);
+    desc->claims = g_new0(CXLHybridPageClaim, nr_pages);
+
+    for (uint32_t i = 0; i < nr_pages; i++) {
+        if (cxl_hybrid_page_state_claim_for_rdma(&page_state[first_page + i],
+                                                 generation,
+                                                 &desc->claims[i])) {
+            set_bit(i, desc->claimed_bmap);
+            desc->claimed_pages++;
+        }
+    }
+
+    if (!desc->claimed_pages) {
+        cxl_hybrid_rdma_descriptor_destroy(desc);
+        return false;
+    }
+
+    return true;
+}
+
+void cxl_hybrid_rdma_descriptor_complete_pages_for_test(
+    CXLHybridRDMAPageDescriptor *desc,
+    uint64_t *page_state,
+    uint64_t total_pages)
+{
+    uint32_t limit;
+
+    if (!desc || !page_state || desc->first_page >= total_pages) {
+        return;
+    }
+
+    limit = MIN(desc->nr_pages, total_pages - desc->first_page);
+    for (uint32_t i = 0; i < limit; i++) {
+        if (!cxl_hybrid_rdma_descriptor_page_claimed(desc, i)) {
+            continue;
+        }
+        if (cxl_hybrid_page_state_complete_rdma(
+                &page_state[desc->first_page + i], &desc->claims[i])) {
+            desc->completed_pages++;
+        } else {
+            desc->stale_pages++;
+        }
+        clear_bit(i, desc->claimed_bmap);
+    }
 }
 
 uint64_t cxl_hybrid_transfer_queue_depth(CXLHybridTransferQueue *queue,
