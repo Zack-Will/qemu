@@ -736,14 +736,18 @@ void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
 void cxl_hybrid_control_mark_page_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
+    uint64_t *page_state,
     uint64_t page_index,
-    uint32_t generation);
+    uint32_t generation,
+    CXLHybridPageLocation location);
 void cxl_hybrid_control_mark_pages_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
+    uint64_t *page_state,
     uint64_t first_page,
     uint64_t nr_pages,
-    uint32_t generation);
+    uint32_t generation,
+    CXLHybridPageLocation location);
 void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
                                            unsigned long *visible_bitmap,
                                            uint64_t page_index);
@@ -765,9 +769,11 @@ bool cxl_hybrid_control_mark_visible_region_span_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
     unsigned long *visible_region_bitmap,
+    uint64_t *page_state,
     uint64_t first_page,
     uint32_t nr_pages,
-    uint32_t generation);
+    uint32_t generation,
+    CXLHybridPageLocation location);
 void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
                                         unsigned long *visible_bitmap,
                                         uint64_t visible_pages,

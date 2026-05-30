@@ -384,22 +384,39 @@ void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
 void cxl_hybrid_control_mark_page_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
+    uint64_t *page_state,
     uint64_t page_index,
-    uint32_t generation)
+    uint32_t generation,
+    CXLHybridPageLocation location)
 {
     if (!cxl_hybrid_control_generation_matches(hdr, generation)) {
         return;
     }
 
-    cxl_hybrid_control_mark_page_visible(hdr, visible_bitmap, page_index);
+    if (!visible_bitmap ||
+        !cxl_hybrid_control_page_in_range(hdr, page_index)) {
+        return;
+    }
+
+    if (page_state && page_index < hdr->page_state_words) {
+        smp_mb_release();
+        qatomic_set(&page_state[page_index],
+                    cxl_hybrid_page_state_make_published(generation,
+                                                         location, 0));
+    } else {
+        smp_mb_release();
+    }
+    set_bit_atomic(page_index, visible_bitmap);
 }
 
 void cxl_hybrid_control_mark_pages_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
+    uint64_t *page_state,
     uint64_t first_page,
     uint64_t nr_pages,
-    uint32_t generation)
+    uint32_t generation,
+    CXLHybridPageLocation location)
 {
     if (!visible_bitmap || !nr_pages ||
         nr_pages > LONG_MAX ||
@@ -410,9 +427,10 @@ void cxl_hybrid_control_mark_pages_visible_generation(
         return;
     }
 
-    /* Publish page data before making the visibility range observable. */
-    smp_mb_release();
-    bitmap_set_atomic(visible_bitmap, first_page, nr_pages);
+    for (uint64_t page = first_page; page < first_page + nr_pages; page++) {
+        cxl_hybrid_control_mark_page_visible_generation(
+            hdr, visible_bitmap, page_state, page, generation, location);
+    }
 }
 
 void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
@@ -480,9 +498,11 @@ bool cxl_hybrid_control_mark_visible_region_span_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
     unsigned long *visible_region_bitmap,
+    uint64_t *page_state,
     uint64_t first_page,
     uint32_t nr_pages,
-    uint32_t generation)
+    uint32_t generation,
+    CXLHybridPageLocation location)
 {
     uint64_t region_index = UINT64_MAX;
 
@@ -494,7 +514,8 @@ bool cxl_hybrid_control_mark_visible_region_span_generation(
     }
 
     cxl_hybrid_control_mark_pages_visible_generation(
-        hdr, visible_bitmap, first_page, nr_pages, generation);
+        hdr, visible_bitmap, page_state, first_page, nr_pages, generation,
+        location);
     cxl_hybrid_control_mark_region_visible(hdr, visible_region_bitmap,
                                            region_index);
     return true;

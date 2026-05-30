@@ -1034,7 +1034,8 @@ void cxl_hybrid_ctrl_set_page_visible(uint64_t page_index,
     }
 
     cxl_hybrid_control_mark_page_visible_generation(
-        state->hdr, state->visible_bitmap, page_index, generation);
+        state->hdr, state->visible_bitmap, state->page_state, page_index,
+        generation, CXL_HYBRID_PAGE_LOCATION_CXL);
 }
 
 void cxl_hybrid_ctrl_set_pages_visible(uint64_t first_page,
@@ -1048,7 +1049,8 @@ void cxl_hybrid_ctrl_set_pages_visible(uint64_t first_page,
     }
 
     cxl_hybrid_control_mark_pages_visible_generation(
-        state->hdr, state->visible_bitmap, first_page, nr_pages, generation);
+        state->hdr, state->visible_bitmap, state->page_state, first_page,
+        nr_pages, generation, CXL_HYBRID_PAGE_LOCATION_CXL);
 }
 
 void cxl_hybrid_ctrl_clear_page_visible(uint64_t page_index)
@@ -1124,7 +1126,8 @@ void cxl_hybrid_ctrl_set_region_visible(uint64_t first_page,
 
     cxl_hybrid_control_mark_visible_region_span_generation(
         state->hdr, state->visible_bitmap, state->visible_region_bitmap,
-        first_page, nr_pages, generation);
+        state->page_state, first_page, nr_pages, generation,
+        CXL_HYBRID_PAGE_LOCATION_CXL);
 }
 
 bool cxl_hybrid_ctrl_synthesize_region_visible(uint64_t first_page,

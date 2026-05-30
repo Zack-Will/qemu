@@ -618,17 +618,43 @@ static void test_set_page_visible_rejects_stale_generation(void)
                                        NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
-    cxl_hybrid_control_mark_page_visible_generation(&hdr, visible, 512, 3);
+    cxl_hybrid_control_mark_page_visible_generation(
+        &hdr, visible, NULL, 512, 3, CXL_HYBRID_PAGE_LOCATION_CXL);
     g_assert_false(test_bit(512, visible));
     cxl_hybrid_control_mark_region_visible_generation(&hdr, visible_regions,
                                                       4, 3);
     g_assert_false(test_bit(4, visible_regions));
 
-    cxl_hybrid_control_mark_page_visible_generation(&hdr, visible, 512, 4);
+    cxl_hybrid_control_mark_page_visible_generation(
+        &hdr, visible, NULL, 512, 4, CXL_HYBRID_PAGE_LOCATION_CXL);
     cxl_hybrid_control_mark_region_visible_generation(&hdr, visible_regions,
                                                       4, 4);
     g_assert_true(test_bit(512, visible));
     g_assert_true(test_bit(4, visible_regions));
+}
+
+static void test_mark_page_visible_sets_page_state_cxl(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[1] = { 0 };
+    uint64_t page_state[8];
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible,
+                                       G_N_ELEMENTS(page_state),
+                                       page_state,
+                                       G_N_ELEMENTS(page_state),
+                                       NULL, 0, NULL, 0,
+                                       64 * 1024, 12, 4);
+
+    cxl_hybrid_control_mark_page_visible_generation(
+        &hdr, visible, page_state, 3, 4,
+        CXL_HYBRID_PAGE_LOCATION_CXL);
+
+    g_assert_true(test_bit(3, visible));
+    g_assert_cmpuint(cxl_hybrid_page_state_kind(page_state[3]), ==,
+                     CXL_HYBRID_PAGE_STATE_PUBLISHED);
+    g_assert_cmpuint(cxl_hybrid_page_state_location(page_state[3]), ==,
+                     CXL_HYBRID_PAGE_LOCATION_CXL);
 }
 
 static void test_set_pages_visible_marks_range_once_generation_matches(void)
@@ -642,20 +668,20 @@ static void test_set_pages_visible_marks_range_once_generation_matches(void)
                                        NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
-    cxl_hybrid_control_mark_pages_visible_generation(&hdr, visible,
-                                                     100, 200, 3);
+    cxl_hybrid_control_mark_pages_visible_generation(
+        &hdr, visible, NULL, 100, 200, 3, CXL_HYBRID_PAGE_LOCATION_CXL);
     g_assert_false(test_bit(100, visible));
     g_assert_false(test_bit(299, visible));
 
-    cxl_hybrid_control_mark_pages_visible_generation(&hdr, visible,
-                                                     100, 200, 4);
+    cxl_hybrid_control_mark_pages_visible_generation(
+        &hdr, visible, NULL, 100, 200, 4, CXL_HYBRID_PAGE_LOCATION_CXL);
     g_assert_false(test_bit(99, visible));
     g_assert_true(test_bit(100, visible));
     g_assert_true(test_bit(299, visible));
     g_assert_false(test_bit(300, visible));
 
-    cxl_hybrid_control_mark_pages_visible_generation(&hdr, visible,
-                                                     900, 200, 4);
+    cxl_hybrid_control_mark_pages_visible_generation(
+        &hdr, visible, NULL, 900, 200, 4, CXL_HYBRID_PAGE_LOCATION_CXL);
     g_assert_false(test_bit(900, visible));
 }
 
@@ -694,13 +720,15 @@ static void test_mark_visible_region_span_requires_complete_span(void)
                                        owned, 8, 512 * 1024, 12, 4);
 
     g_assert_false(cxl_hybrid_control_mark_visible_region_span_generation(
-                       &hdr, visible, visible_regions, 512, 64, 4));
+                       &hdr, visible, visible_regions, NULL, 512, 64, 4,
+                       CXL_HYBRID_PAGE_LOCATION_CXL));
     g_assert_false(test_bit(512, visible));
     g_assert_false(test_bit(575, visible));
     g_assert_false(test_bit(4, visible_regions));
 
     g_assert_true(cxl_hybrid_control_mark_visible_region_span_generation(
-                      &hdr, visible, visible_regions, 512, 128, 4));
+                      &hdr, visible, visible_regions, NULL, 512, 128, 4,
+                      CXL_HYBRID_PAGE_LOCATION_CXL));
     g_assert_false(test_bit(511, visible));
     g_assert_true(test_bit(512, visible));
     g_assert_true(test_bit(639, visible));
@@ -720,7 +748,8 @@ static void test_mark_visible_region_span_rejects_stale_generation(void)
                                        owned, 8, 512 * 1024, 12, 4);
 
     g_assert_false(cxl_hybrid_control_mark_visible_region_span_generation(
-                       &hdr, visible, visible_regions, 512, 128, 3));
+                       &hdr, visible, visible_regions, NULL, 512, 128, 3,
+                       CXL_HYBRID_PAGE_LOCATION_CXL));
     g_assert_false(test_bit(512, visible));
     g_assert_false(test_bit(639, visible));
     g_assert_false(test_bit(4, visible_regions));
@@ -737,16 +766,16 @@ static void test_partial_remap_span_marks_pages_without_region_bit(void)
                                        NULL, 0, visible_regions, 8,
                                        owned, 8, 512 * 1024, 12, 4);
 
-    cxl_hybrid_control_mark_pages_visible_generation(&hdr, visible,
-                                                     512, 64, 4);
+    cxl_hybrid_control_mark_pages_visible_generation(
+        &hdr, visible, NULL, 512, 64, 4, CXL_HYBRID_PAGE_LOCATION_CXL);
     g_assert_true(test_bit(512, visible));
     g_assert_true(test_bit(575, visible));
     g_assert_false(test_bit(4, visible_regions));
     g_assert_false(cxl_hybrid_control_region_visible_or_synthesize(
                        &hdr, visible, visible_regions, 512, 128, 4));
 
-    cxl_hybrid_control_mark_pages_visible_generation(&hdr, visible,
-                                                     576, 64, 4);
+    cxl_hybrid_control_mark_pages_visible_generation(
+        &hdr, visible, NULL, 576, 64, 4, CXL_HYBRID_PAGE_LOCATION_CXL);
     g_assert_true(cxl_hybrid_control_region_visible_or_synthesize(
                       &hdr, visible, visible_regions, 512, 128, 4));
     g_assert_true(test_bit(4, visible_regions));
@@ -1040,6 +1069,8 @@ int main(int argc, char **argv)
                     test_region_span_valid_requires_complete_region);
     g_test_add_func("/cxl-hybrid-control/set-page-visible-rejects-stale-generation",
                     test_set_page_visible_rejects_stale_generation);
+    g_test_add_func("/cxl-hybrid-control/page-visible-mirrors-page-state",
+                    test_mark_page_visible_sets_page_state_cxl);
     g_test_add_func("/cxl-hybrid-control/set-pages-visible-marks-range-once-generation-matches",
                     test_set_pages_visible_marks_range_once_generation_matches);
     g_test_add_func("/cxl-hybrid-control/mark-region-visible-for-complete-span-generation",
