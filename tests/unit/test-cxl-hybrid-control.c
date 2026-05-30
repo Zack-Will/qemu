@@ -276,6 +276,71 @@ static void test_header_fault_pressure_tracks_pending_and_active_requests(void)
     g_assert_false(cxl_hybrid_control_fault_pressure(&hdr, 5));
 }
 
+static void test_page_state_claim_and_complete_cxl(void)
+{
+    uint64_t slot = cxl_hybrid_page_state_make_not_sent(7);
+    CXLHybridPageClaim claim = { 0 };
+
+    g_assert_true(cxl_hybrid_page_state_try_claim(
+        &slot, CXL_HYBRID_PAGE_OWNER_CXL, 7, &claim));
+    g_assert_cmpuint(cxl_hybrid_page_state_kind(slot), ==,
+                     CXL_HYBRID_PAGE_STATE_IN_FLIGHT);
+    g_assert_cmpuint(cxl_hybrid_page_state_owner(slot), ==,
+                     CXL_HYBRID_PAGE_OWNER_CXL);
+
+    g_assert_true(cxl_hybrid_page_state_complete(
+        &slot, &claim, CXL_HYBRID_PAGE_LOCATION_CXL));
+    g_assert_cmpuint(cxl_hybrid_page_state_kind(slot), ==,
+                     CXL_HYBRID_PAGE_STATE_PUBLISHED);
+    g_assert_cmpuint(cxl_hybrid_page_state_location(slot), ==,
+                     CXL_HYBRID_PAGE_LOCATION_CXL);
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        slot, 7, CXL_HYBRID_PAGE_LOCATION_CXL));
+}
+
+static void test_page_state_dirty_makes_rdma_completion_stale(void)
+{
+    uint64_t slot = cxl_hybrid_page_state_make_dirty(3, 11);
+    CXLHybridPageClaim claim = { 0 };
+
+    g_assert_true(cxl_hybrid_page_state_try_claim(
+        &slot, CXL_HYBRID_PAGE_OWNER_RDMA, 3, &claim));
+    cxl_hybrid_page_state_mark_dirty(&slot, 3, 12);
+    g_assert_false(cxl_hybrid_page_state_complete(
+        &slot, &claim, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL));
+    g_assert_cmpuint(cxl_hybrid_page_state_kind(slot), ==,
+                     CXL_HYBRID_PAGE_STATE_DIRTY);
+    g_assert_cmpuint(cxl_hybrid_page_state_dirty_seq(slot), ==, 12);
+}
+
+static void test_page_state_rejects_double_claim(void)
+{
+    uint64_t slot = cxl_hybrid_page_state_make_not_sent(9);
+    CXLHybridPageClaim cxl_claim = { 0 };
+    CXLHybridPageClaim rdma_claim = { 0 };
+
+    g_assert_true(cxl_hybrid_page_state_try_claim(
+        &slot, CXL_HYBRID_PAGE_OWNER_CXL, 9, &cxl_claim));
+    g_assert_false(cxl_hybrid_page_state_try_claim(
+        &slot, CXL_HYBRID_PAGE_OWNER_RDMA, 9, &rdma_claim));
+}
+
+static void test_page_state_matches_encoded_generation(void)
+{
+    uint32_t generation = 0x10007;
+    uint64_t slot = cxl_hybrid_page_state_make_not_sent(generation);
+    CXLHybridPageClaim claim = { 0 };
+
+    g_assert_cmpuint(cxl_hybrid_page_state_generation(slot), ==, 7);
+    g_assert_true(cxl_hybrid_page_state_try_claim(
+        &slot, CXL_HYBRID_PAGE_OWNER_CXL, generation, &claim));
+    g_assert_cmpuint(claim.generation, ==, 7);
+    g_assert_true(cxl_hybrid_page_state_complete(
+        &slot, &claim, CXL_HYBRID_PAGE_LOCATION_CXL));
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        slot, generation, CXL_HYBRID_PAGE_LOCATION_CXL));
+}
+
 static void test_visible_bitmap_bytes_round_up_by_ulong(void)
 {
     g_assert_cmpuint(cxl_hybrid_control_visible_bitmap_words(0), ==, 0);
@@ -895,6 +960,14 @@ int main(int argc, char **argv)
                     test_header_source_write_count_balances);
     g_test_add_func("/cxl-hybrid-control/header-fault-pressure-tracks-pending-and-active-requests",
                     test_header_fault_pressure_tracks_pending_and_active_requests);
+    g_test_add_func("/cxl-hybrid-control/page-state-claim-complete-cxl",
+                    test_page_state_claim_and_complete_cxl);
+    g_test_add_func("/cxl-hybrid-control/page-state-dirty-stales-rdma",
+                    test_page_state_dirty_makes_rdma_completion_stale);
+    g_test_add_func("/cxl-hybrid-control/page-state-rejects-double-claim",
+                    test_page_state_rejects_double_claim);
+    g_test_add_func("/cxl-hybrid-control/page-state-matches-encoded-generation",
+                    test_page_state_matches_encoded_generation);
     g_test_add_func("/cxl-hybrid-control/staging-shared-map-supports-fixed-extent-io",
                     test_staging_shared_map_supports_fixed_extent_io);
     g_test_add_func("/cxl-hybrid-control/staging-shared-map-rejects-extent-overflow-without-growing",

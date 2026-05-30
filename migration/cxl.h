@@ -98,6 +98,33 @@ typedef struct CXLHybridControlHeader {
     uint32_t completion_flags;
 } CXLHybridControlHeader;
 
+typedef enum CXLHybridPageStateKind {
+    CXL_HYBRID_PAGE_STATE_NOT_SENT = 0,
+    CXL_HYBRID_PAGE_STATE_IN_FLIGHT = 1,
+    CXL_HYBRID_PAGE_STATE_PUBLISHED = 2,
+    CXL_HYBRID_PAGE_STATE_DIRTY = 3,
+} CXLHybridPageStateKind;
+
+typedef enum CXLHybridPageOwner {
+    CXL_HYBRID_PAGE_OWNER_NONE = 0,
+    CXL_HYBRID_PAGE_OWNER_CXL = 1,
+    CXL_HYBRID_PAGE_OWNER_RDMA = 2,
+} CXLHybridPageOwner;
+
+typedef enum CXLHybridPageLocation {
+    CXL_HYBRID_PAGE_LOCATION_NONE = 0,
+    CXL_HYBRID_PAGE_LOCATION_CXL = 1,
+    CXL_HYBRID_PAGE_LOCATION_DST_LOCAL = 2,
+    CXL_HYBRID_PAGE_LOCATION_ZERO = 3,
+} CXLHybridPageLocation;
+
+typedef struct CXLHybridPageClaim {
+    uint64_t observed;
+    uint32_t generation;
+    uint32_t dirty_seq;
+    CXLHybridPageOwner owner;
+} CXLHybridPageClaim;
+
 typedef struct CXLHybridFaultRequestRecord {
     uint64_t seq;
     uint64_t page_index;
@@ -616,6 +643,31 @@ int cxl_hybrid_control_activate_destination(Error **errp);
 void cxl_hybrid_control_cleanup_source(void);
 void cxl_hybrid_control_cleanup_destination(void);
 uint64_t cxl_hybrid_fault_control_region_bytes(void);
+uint64_t cxl_hybrid_page_state_make_not_sent(uint32_t generation);
+uint64_t cxl_hybrid_page_state_make_dirty(uint32_t generation,
+                                          uint32_t dirty_seq);
+uint64_t cxl_hybrid_page_state_make_published(
+    uint32_t generation,
+    CXLHybridPageLocation location,
+    uint32_t dirty_seq);
+CXLHybridPageStateKind cxl_hybrid_page_state_kind(uint64_t word);
+CXLHybridPageOwner cxl_hybrid_page_state_owner(uint64_t word);
+CXLHybridPageLocation cxl_hybrid_page_state_location(uint64_t word);
+uint32_t cxl_hybrid_page_state_generation(uint64_t word);
+uint32_t cxl_hybrid_page_state_dirty_seq(uint64_t word);
+bool cxl_hybrid_page_state_try_claim(uint64_t *slot,
+                                     CXLHybridPageOwner owner,
+                                     uint32_t generation,
+                                     CXLHybridPageClaim *claim);
+bool cxl_hybrid_page_state_complete(uint64_t *slot,
+                                    const CXLHybridPageClaim *claim,
+                                    CXLHybridPageLocation location);
+void cxl_hybrid_page_state_mark_dirty(uint64_t *slot,
+                                      uint32_t generation,
+                                      uint32_t dirty_seq);
+bool cxl_hybrid_page_state_can_consume(uint64_t word,
+                                       uint32_t generation,
+                                       CXLHybridPageLocation location);
 size_t cxl_hybrid_control_visible_bitmap_words(uint64_t pages);
 size_t cxl_hybrid_control_visible_bitmap_bytes(uint64_t pages);
 size_t cxl_hybrid_control_visible_region_bitmap_words(uint64_t regions);
