@@ -19,6 +19,17 @@
 
 #define TEST_ALIGN_2M (2 * MiB)
 
+bool cxl_hybrid_rdma_sidecar_get_backing(void **basep, size_t *sizep)
+{
+    if (basep) {
+        *basep = NULL;
+    }
+    if (sizep) {
+        *sizep = 0;
+    }
+    return false;
+}
+
 static void test_align_mapping_bytes_rounds_up_to_device_align(void)
 {
     uint64_t raw = 3 * MiB + 4096;
