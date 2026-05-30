@@ -94,3 +94,75 @@ bool cxl_hybrid_transfer_queue_pop(CXLHybridTransferQueue *queue,
     qemu_mutex_unlock(&queue->lock);
     return false;
 }
+
+static bool cxl_hybrid_transfer_queue_pop_ordered(
+    CXLHybridTransferQueue *queue,
+    const CXLHybridTransferClass *order,
+    size_t order_len,
+    CXLHybridPageDescriptor *desc,
+    CXLHybridTransferClass *klass)
+{
+    CXLHybridPageDescriptor *copy;
+
+    if (!queue || !queue->lock_ready || !desc || !order || !order_len) {
+        return false;
+    }
+
+    qemu_mutex_lock(&queue->lock);
+    for (size_t i = 0; i < order_len; i++) {
+        copy = g_queue_pop_head(&queue->classes[order[i]]);
+        if (copy) {
+            *desc = *copy;
+            if (klass) {
+                *klass = order[i];
+            }
+            g_free(copy);
+            qemu_mutex_unlock(&queue->lock);
+            return true;
+        }
+    }
+    qemu_mutex_unlock(&queue->lock);
+    return false;
+}
+
+bool cxl_hybrid_transfer_queue_pop_cxl(CXLHybridTransferQueue *queue,
+                                       CXLHybridPageDescriptor *desc,
+                                       CXLHybridTransferClass *klass)
+{
+    static const CXLHybridTransferClass order[] = {
+        CXL_HYBRID_TRANSFER_CXL_HIGH,
+        CXL_HYBRID_TRANSFER_CXL_LOW,
+    };
+
+    return cxl_hybrid_transfer_queue_pop_ordered(
+        queue, order, G_N_ELEMENTS(order), desc, klass);
+}
+
+bool cxl_hybrid_transfer_queue_pop_rdma(CXLHybridTransferQueue *queue,
+                                        CXLHybridPageDescriptor *desc,
+                                        CXLHybridTransferClass *klass)
+{
+    static const CXLHybridTransferClass order[] = {
+        CXL_HYBRID_TRANSFER_RDMA_BULK,
+        CXL_HYBRID_TRANSFER_RDMA_PREFETCH,
+    };
+
+    return cxl_hybrid_transfer_queue_pop_ordered(
+        queue, order, G_N_ELEMENTS(order), desc, klass);
+}
+
+uint64_t cxl_hybrid_transfer_queue_depth(CXLHybridTransferQueue *queue,
+                                         CXLHybridTransferClass klass)
+{
+    uint64_t depth;
+
+    if (!queue || !queue->lock_ready || (int)klass < 0 ||
+        klass >= CXL_HYBRID_TRANSFER_CLASS_COUNT) {
+        return 0;
+    }
+
+    qemu_mutex_lock(&queue->lock);
+    depth = g_queue_get_length(&queue->classes[klass]);
+    qemu_mutex_unlock(&queue->lock);
+    return depth;
+}

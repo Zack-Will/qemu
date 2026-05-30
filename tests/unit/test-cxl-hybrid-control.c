@@ -1166,6 +1166,52 @@ static void test_cxl_transfer_queue_ignores_negative_class(void)
     cxl_hybrid_transfer_queue_destroy_for_test(&queue);
 }
 
+static void test_transfer_queue_pop_cxl_ignores_rdma(void)
+{
+    CXLHybridTransferQueue queue;
+    CXLHybridPageDescriptor rdma = { .page_index = 10, .nr_pages = 2 };
+    CXLHybridPageDescriptor cxl = { .page_index = 20, .nr_pages = 1 };
+    CXLHybridPageDescriptor out = { 0 };
+    CXLHybridTransferClass klass = CXL_HYBRID_TRANSFER_CLASS_COUNT;
+
+    cxl_hybrid_transfer_queue_init_for_test(&queue);
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_RDMA_BULK,
+                                   &rdma);
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_LOW,
+                                   &cxl);
+
+    g_assert_true(cxl_hybrid_transfer_queue_pop_cxl(&queue, &out, &klass));
+    g_assert_cmpuint(klass, ==, CXL_HYBRID_TRANSFER_CXL_LOW);
+    g_assert_cmpuint(out.page_index, ==, 20);
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_depth(
+                         &queue, CXL_HYBRID_TRANSFER_RDMA_BULK), ==, 1);
+
+    cxl_hybrid_transfer_queue_destroy_for_test(&queue);
+}
+
+static void test_transfer_queue_pop_rdma_ignores_cxl(void)
+{
+    CXLHybridTransferQueue queue;
+    CXLHybridPageDescriptor cxl = { .page_index = 7, .nr_pages = 1 };
+    CXLHybridPageDescriptor rdma = { .page_index = 8, .nr_pages = 4 };
+    CXLHybridPageDescriptor out = { 0 };
+    CXLHybridTransferClass klass = CXL_HYBRID_TRANSFER_CLASS_COUNT;
+
+    cxl_hybrid_transfer_queue_init_for_test(&queue);
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_HIGH,
+                                   &cxl);
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_RDMA_PREFETCH,
+                                   &rdma);
+
+    g_assert_true(cxl_hybrid_transfer_queue_pop_rdma(&queue, &out, &klass));
+    g_assert_cmpuint(klass, ==, CXL_HYBRID_TRANSFER_RDMA_PREFETCH);
+    g_assert_cmpuint(out.page_index, ==, 8);
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_depth(
+                         &queue, CXL_HYBRID_TRANSFER_CXL_HIGH), ==, 1);
+
+    cxl_hybrid_transfer_queue_destroy_for_test(&queue);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1277,5 +1323,9 @@ int main(int argc, char **argv)
                     test_cxl_transfer_queue_duplicate_descriptor_is_allowed);
     g_test_add_func("/cxl-hybrid-control/transfer-queue-ignores-negative-class",
                     test_cxl_transfer_queue_ignores_negative_class);
+    g_test_add_func("/cxl-hybrid-control/transfer-queue-pop-cxl-ignores-rdma",
+                    test_transfer_queue_pop_cxl_ignores_rdma);
+    g_test_add_func("/cxl-hybrid-control/transfer-queue-pop-rdma-ignores-cxl",
+                    test_transfer_queue_pop_rdma_ignores_cxl);
     return g_test_run();
 }

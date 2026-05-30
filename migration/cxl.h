@@ -418,6 +418,14 @@ void cxl_hybrid_transfer_queue_push(CXLHybridTransferQueue *queue,
                                     const CXLHybridPageDescriptor *desc);
 bool cxl_hybrid_transfer_queue_pop(CXLHybridTransferQueue *queue,
                                    CXLHybridPageDescriptor *desc);
+bool cxl_hybrid_transfer_queue_pop_cxl(CXLHybridTransferQueue *queue,
+                                       CXLHybridPageDescriptor *desc,
+                                       CXLHybridTransferClass *klass);
+bool cxl_hybrid_transfer_queue_pop_rdma(CXLHybridTransferQueue *queue,
+                                        CXLHybridPageDescriptor *desc,
+                                        CXLHybridTransferClass *klass);
+uint64_t cxl_hybrid_transfer_queue_depth(CXLHybridTransferQueue *queue,
+                                         CXLHybridTransferClass klass);
 void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,
                                                uint64_t total_regions);
 void cxl_hybrid_dst_region_state_destroy_for_test(
