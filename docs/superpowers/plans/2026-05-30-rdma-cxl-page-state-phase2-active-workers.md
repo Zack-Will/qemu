@@ -827,6 +827,15 @@ git commit -m "migration/cxl: add rdma page descriptor claims"
 - Modify: `migration/cxl.c`
 - Test: `tests/unit/test-cxl-hybrid-control.c`
 
+**Corrected implementation note:** the current request record stores
+`page_index` as region `first_page` for region requests. Task 10 must add an
+explicit `demand_page` to the request record; otherwise the source would publish
+the first page of the region rather than the faulting page. Destination must not
+wait for `cxl_hybrid_ctrl_wait_region_visible()` after source publishes only one
+page. Until partial-remap state exists, demand faults should use the existing
+page-visible + destination staging/copy path. Production CXL_HIGH draining and
+one-page `MAP_FIXED` remap are deferred to later tasks.
+
 - [ ] **Step 1: Write failing request classification tests**
 
 Add pure helper tests to `tests/unit/test-cxl-hybrid-control.c`:
@@ -888,6 +897,39 @@ bool cxl_hybrid_fault_region_plan(uint64_t first_page,
                                   CXLHybridFaultRegionPlan *plan);
 ```
 
+Also extend `CXLHybridFaultRequestRecord` in `migration/cxl.h`:
+
+```c
+typedef struct CXLHybridFaultRequestRecord {
+    uint64_t seq;
+    uint64_t page_index;
+    uint64_t demand_page;
+    uint32_t generation;
+    uint32_t flags;
+    uint32_t nr_pages;
+    uint64_t request_ts_ns;
+} CXLHybridFaultRequestRecord;
+```
+
+Bump `CXL_HYBRID_CTRL_VERSION` because the shared request ring record layout
+changes:
+
+```c
+#define CXL_HYBRID_CTRL_VERSION 7
+```
+
+Change the region enqueue prototype in `migration/cxl.h`:
+
+```c
+int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
+                                                 uint32_t nr_pages,
+                                                 uint64_t demand_page,
+                                                 uint32_t generation,
+                                                 uint64_t request_ts_ns,
+                                                 bool *queuedp,
+                                                 Error **errp);
+```
+
 - [ ] **Step 4: Implement pure plan helper**
 
 Add to `migration/cxl-page-transfer.c`:
@@ -911,14 +953,46 @@ bool cxl_hybrid_fault_region_plan(uint64_t first_page,
 }
 ```
 
-- [ ] **Step 5: Route region requests through the plan**
+- [ ] **Step 5: Route region requests through demand-page publication**
 
-In `migration/cxl-hybrid-control.c:cxl_hybrid_ctrl_request_worker_thread()` replace the `CXL_HYBRID_FAULT_REQUEST_F_REGION` branch so it:
+In `migration/cxl-hybrid-control.c:cxl_hybrid_ctrl_enqueue_fault_region_request()`,
+validate and store the demand page:
+
+```c
+if (!cxl_hybrid_fault_region_plan(first_page, nr_pages, demand_page, &plan)) {
+    error_setg(errp,
+               "CXL hybrid fault region demand page out of span "
+               "(first-page=%" PRIu64 " pages=%u demand=%" PRIu64 ")",
+               first_page, nr_pages, demand_page);
+    return -EINVAL;
+}
+record.demand_page = demand_page;
+```
+
+In `migration/cxl.c:cxl_hybrid_wait_and_resolve_region_fault()`, compute and
+pass the actual fault page:
+
+```c
+uint64_t demand_page = cxl_global_page_index(rb, offset);
+
+ret = cxl_hybrid_ctrl_enqueue_fault_region_request(g.first_page_index,
+                                                   g.nr_pages,
+                                                   demand_page,
+                                                   generation,
+                                                   wait_start_ns,
+                                                   NULL,
+                                                   errp);
+```
+
+In `migration/cxl-hybrid-control.c:cxl_hybrid_ctrl_request_worker_thread()`
+replace the `CXL_HYBRID_FAULT_REQUEST_F_REGION` branch so it:
 
 1. validates the span with `cxl_hybrid_ctrl_validate_region_span()`;
-2. calls `cxl_hybrid_fault_region_plan(record.page_index, record.nr_pages, record.page_index, &plan)`;
+2. calls `cxl_hybrid_fault_region_plan(record.page_index, record.nr_pages,
+   record.demand_page, &plan)`;
 3. publishes only `plan.demand_page` with `cxl_hybrid_publish_fault_request_core(..., emit_burst=false, ...)`;
-4. enqueues every other page in the region to `CXL_HYBRID_TRANSFER_CXL_HIGH`.
+4. does not call `cxl_hybrid_publish_fault_region_request_core()` and does not
+   mark the region visible.
 
 Use this outline:
 
@@ -926,7 +1000,7 @@ Use this outline:
 CXLHybridFaultRegionPlan plan;
 
 if (!cxl_hybrid_fault_region_plan(record.page_index, record.nr_pages,
-                                  record.page_index, &plan)) {
+                                  record.demand_page, &plan)) {
     cxl_hybrid_ctrl_abort_generation(state, record.generation);
     goto request_done;
 }
@@ -944,12 +1018,48 @@ if (ret) {
     cxl_hybrid_ctrl_abort_generation(state, record.generation);
     goto request_done;
 }
-cxl_hybrid_ctrl_enqueue_cxl_region_prefetch(state, &plan,
-                                            record.generation);
 goto request_done;
 ```
 
-Add `cxl_hybrid_ctrl_enqueue_cxl_region_prefetch()` in the same file. It should resolve pages with `cxl_hybrid_lookup_global_page()`, skip `plan.prefetch_skip_page`, and push `CXLHybridPageDescriptor` entries to the CXL high queue. In this task the CXL high queue can be a control-state member initialized by `cxl_hybrid_transfer_queue_init_for_test()` style code; Task 11 starts the worker that drains it.
+Do not enqueue the rest of the region to a production CXL_HIGH queue in this
+task. The queue type exists, but no source-side production worker drains it yet.
+Task 11 owns production CXL worker lifecycle and queue draining.
+
+In `migration/cxl.c`, avoid strict whole-region waiting for this demand path:
+
+1. change `cxl_hybrid_wait_and_resolve_region_fault()` to accept the existing
+   `place_page` callback from `cxl_hybrid_wait_and_resolve_fault()`;
+2. after enqueueing a region demand request, wait for
+   `cxl_hybrid_ctrl_wait_page_visible(demand_page, generation, errp)`;
+3. register the visible CXL page with destination staging using
+   `cxl_hybrid_dst_staging_register_external_page()`;
+4. call `cxl_hybrid_try_resolve_fault()` to copy/place the single demanded page;
+5. do not call `cxl_hybrid_dst_remap_region()` from this page-state demand path.
+
+Use the same checks already present in the non-region page fault path:
+
+```c
+if (!cxl_hybrid_source_page_cxl_offset(qemu_ram_get_idstr(rb), offset,
+                                       &cxl_offset)) {
+    error_setg(errp,
+               "CXL hybrid fault page %s/0x%" PRIx64
+               " has no stable CXL offset",
+               qemu_ram_get_idstr(rb), (uint64_t)offset);
+    return -EINVAL;
+}
+ret = cxl_hybrid_dst_staging_register_external_page(
+    qemu_ram_get_idstr(rb), offset, cxl_offset, qemu_ram_pagesize(rb), errp);
+```
+
+Because strict region-remap mode did not previously initialize copy staging,
+extend `cxl_destination_copy_staging_needed()` so region-remap mode initializes
+destination staging while this page-state demand path is active:
+
+```c
+return migrate_cxl_fault_resolve_copy() ||
+       migrate_cxl_fault_resolve_region_remap() ||
+       migrate_cxl_fault_resolve_region_remap_fallback_copy();
+```
 
 - [ ] **Step 6: Run tests**
 
@@ -960,7 +1070,9 @@ ninja -C build tests/unit/test-cxl-hybrid-control
 ./build/tests/unit/test-cxl-hybrid-control --tap
 ```
 
-Expected: PASS. Existing region publication tests should still pass, but region request runtime now has a one-page demand path and high-priority queue population.
+Expected: PASS. Existing region publication tests should still pass. Runtime
+region demand now publishes and resolves the faulting page, but does not claim
+that the whole region is visible.
 
 - [ ] **Step 7: Commit**
 
