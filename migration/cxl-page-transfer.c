@@ -1,6 +1,89 @@
 #include "qemu/osdep.h"
 #include "qemu/bitmap.h"
+#include "qapi/error.h"
 #include "migration/cxl.h"
+
+bool cxl_hybrid_fault_region_plan(uint64_t first_page,
+                                  uint32_t nr_pages,
+                                  uint64_t demand_page,
+                                  CXLHybridFaultRegionPlan *plan)
+{
+    uint64_t end_page;
+
+    if (!plan || !nr_pages || nr_pages > UINT64_MAX - first_page) {
+        return false;
+    }
+
+    end_page = first_page + nr_pages;
+    if (demand_page < first_page || demand_page >= end_page) {
+        return false;
+    }
+
+    plan->demand_page = demand_page;
+    plan->prefetch_first_page = first_page;
+    plan->prefetch_nr_pages = nr_pages;
+    plan->prefetch_skip_page = demand_page;
+    return true;
+}
+
+bool cxl_hybrid_fault_request_demand_visible(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const CXLHybridFaultRequestRecord *record)
+{
+    uint64_t page_index;
+
+    if (!record) {
+        return false;
+    }
+
+    if (record->flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
+        CXLHybridFaultRegionPlan plan = { 0 };
+
+        if (!cxl_hybrid_fault_region_plan(record->page_index,
+                                          record->nr_pages,
+                                          record->demand_page,
+                                          &plan)) {
+            return false;
+        }
+        page_index = plan.demand_page;
+    } else {
+        page_index = record->page_index;
+    }
+
+    return cxl_hybrid_control_page_visible(hdr, visible_bitmap, page_index,
+                                           record->generation);
+}
+
+int cxl_hybrid_fault_request_completed_status(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const CXLHybridFaultRequestRecord *record,
+    Error **errp)
+{
+    if (!record) {
+        error_setg(errp, "CXL hybrid completed request status missing record");
+        return -EINVAL;
+    }
+
+    if (cxl_hybrid_fault_request_demand_visible(hdr, visible_bitmap, record)) {
+        return 0;
+    }
+
+    if (record->flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
+        error_setg(errp,
+                   "CXL hybrid source completed before region demand page "
+                   "%" PRIu64 " became visible "
+                   "(first-page=%" PRIu64 " pages=%u)",
+                   record->demand_page, record->page_index, record->nr_pages);
+    } else {
+        error_setg(errp,
+                   "CXL hybrid source completed before page %" PRIu64
+                   " became visible",
+                   record->page_index);
+    }
+    return -ENOENT;
+}
 
 CXLHybridTransferClass cxl_hybrid_scheduler_choose_zero_page_lane(
     const CXLHybridSchedulerPolicy *policy)

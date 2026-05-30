@@ -1180,10 +1180,18 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
                                                     ram_addr_t offset,
                                                     uint64_t haddr,
                                                     uint32_t tid,
+                                                    int (*place_page)(MigrationIncomingState *mis,
+                                                                      void *host,
+                                                                      void *from,
+                                                                      RAMBlock *rb),
                                                     Error **errp)
 {
     CXLHybridFaultRegionGeometry g = { 0 };
+    const char *ramblock;
     void *fault_host;
+    size_t pagesize;
+    uint64_t demand_page;
+    uint64_t cxl_offset;
     uint32_t generation;
     uint64_t wait_start_ns;
     int ret;
@@ -1202,12 +1210,15 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
         return 0;
     }
 
+    ramblock = qemu_ram_get_idstr(rb);
+    pagesize = qemu_ram_pagesize(rb);
+    demand_page = cxl_global_page_index(rb, offset);
     generation = cxl_hybrid_fault_publish_generation();
     wait_start_ns = cxl_now_ns();
-    if (!cxl_hybrid_ctrl_region_bit_visible(g.first_page_index, g.nr_pages,
-                                            generation)) {
+    if (!cxl_hybrid_ctrl_page_visible(demand_page, generation)) {
         ret = cxl_hybrid_ctrl_enqueue_fault_region_request(g.first_page_index,
                                                            g.nr_pages,
+                                                           demand_page,
                                                            generation,
                                                            wait_start_ns,
                                                            NULL,
@@ -1217,8 +1228,25 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
         }
     }
 
-    ret = cxl_hybrid_ctrl_wait_region_visible(g.first_page_index, g.nr_pages,
-                                              generation, errp);
+    ret = cxl_hybrid_ctrl_wait_page_visible(demand_page, generation, errp);
+    if (!ret &&
+        !cxl_hybrid_source_page_cxl_offset(ramblock, offset, &cxl_offset)) {
+        error_setg(errp,
+                   "CXL hybrid fault page %s/0x%" PRIx64
+                   " has no stable CXL offset",
+                   ramblock, (uint64_t)offset);
+        ret = -EINVAL;
+    }
+    if (!ret) {
+        if (!cxl_hybrid_dst_staging_is_active()) {
+            error_setg(errp,
+                       "CXL hybrid region fault resolution requires destination staging");
+            ret = -EINVAL;
+        } else {
+            ret = cxl_hybrid_dst_staging_register_external_page(
+                ramblock, offset, cxl_offset, pagesize, errp);
+        }
+    }
     cxl_hybrid_record_timing(&cxl_state.dst_region_wait_samples,
                              &cxl_state.dst_region_wait_time_ns,
                              &cxl_state.max_dst_region_wait_time_ns,
@@ -1227,8 +1255,19 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
         return ret;
     }
 
-    ret = cxl_hybrid_dst_remap_region(mis, rb, &g, fault_host, errp);
-    return ret < 0 ? ret : 0;
+    ret = cxl_hybrid_try_resolve_fault(mis, rb, offset, place_page, errp);
+    if (ret < 0) {
+        return ret;
+    }
+    if (ret == 0) {
+        error_setg(errp,
+                   "CXL hybrid visible region demand page did not make "
+                   "%s/0x%" PRIx64 " available",
+                   ramblock, (uint64_t)offset);
+        return -ENOENT;
+    }
+
+    return 0;
 }
 
 static int cxl_hybrid_try_resolve_region_fault_fast(
@@ -1440,7 +1479,8 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
 
     if (migrate_cxl_fault_resolve_region_remap()) {
         return cxl_hybrid_wait_and_resolve_region_fault(mis, rb, offset,
-                                                        haddr, tid, errp);
+                                                        haddr, tid,
+                                                        place_page, errp);
     }
 
     if (migrate_cxl_fault_resolve_region_remap_fallback_copy()) {
@@ -1583,6 +1623,7 @@ int cxl_hybrid_wait_and_resolve_fault(MigrationIncomingState *mis,
 static bool cxl_destination_copy_staging_needed(void)
 {
     return migrate_cxl_fault_resolve_copy() ||
+           migrate_cxl_fault_resolve_region_remap() ||
            migrate_cxl_fault_resolve_region_remap_fallback_copy();
 }
 

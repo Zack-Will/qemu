@@ -18,7 +18,7 @@
 
 #define CXL_HYBRID_METADATA_VERSION 1
 #define CXL_HYBRID_CTRL_MAGIC 0x43584c48U
-#define CXL_HYBRID_CTRL_VERSION 6
+#define CXL_HYBRID_CTRL_VERSION 7
 #define CXL_HYBRID_CTRL_REQUEST_ORDER 10
 #define CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE (1U << 0)
 #define CXL_FAULT_REGION_GRANULE_DEFAULT (2 * 1024 * 1024)
@@ -130,6 +130,7 @@ typedef struct CXLHybridPageClaim {
 typedef struct CXLHybridFaultRequestRecord {
     uint64_t seq;
     uint64_t page_index;
+    uint64_t demand_page;
     uint32_t generation;
     uint32_t flags;
     uint32_t nr_pages;
@@ -180,6 +181,27 @@ typedef struct CXLHybridFaultRegionGeometry {
     uint32_t nr_pages;
     uint64_t region_index;
 } CXLHybridFaultRegionGeometry;
+
+typedef struct CXLHybridFaultRegionPlan {
+    uint64_t demand_page;
+    uint64_t prefetch_first_page;
+    uint32_t prefetch_nr_pages;
+    uint64_t prefetch_skip_page;
+} CXLHybridFaultRegionPlan;
+
+bool cxl_hybrid_fault_region_plan(uint64_t first_page,
+                                  uint32_t nr_pages,
+                                  uint64_t demand_page,
+                                  CXLHybridFaultRegionPlan *plan);
+bool cxl_hybrid_fault_request_demand_visible(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const CXLHybridFaultRequestRecord *record);
+int cxl_hybrid_fault_request_completed_status(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const CXLHybridFaultRequestRecord *record,
+    Error **errp);
 
 #define CXL_HYBRID_FAULT_REQUEST_F_REGION       (1U << 0)
 
@@ -928,6 +950,7 @@ int cxl_hybrid_ctrl_wait_region_visible(uint64_t first_page,
                                         Error **errp);
 int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
                                                  uint32_t nr_pages,
+                                                 uint64_t demand_page,
                                                  uint32_t generation,
                                                  uint64_t request_ts_ns,
                                                  bool *queuedp,

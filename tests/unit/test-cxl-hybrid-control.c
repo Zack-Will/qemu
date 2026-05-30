@@ -927,6 +927,114 @@ static void test_region_resolution_rejects_hole(void)
     g_assert_cmpuint(unresolved_page, ==, 12);
 }
 
+static void test_fault_region_plans_one_demand_and_prefetch_remainder(void)
+{
+    CXLHybridFaultRegionPlan plan = { 0 };
+
+    g_assert_true(cxl_hybrid_fault_region_plan(100, 8, 103, &plan));
+    g_assert_cmpuint(plan.demand_page, ==, 103);
+    g_assert_cmpuint(plan.prefetch_first_page, ==, 100);
+    g_assert_cmpuint(plan.prefetch_nr_pages, ==, 8);
+    g_assert_cmpuint(plan.prefetch_skip_page, ==, 103);
+}
+
+static void test_fault_region_plan_rejects_out_of_span_demand(void)
+{
+    CXLHybridFaultRegionPlan plan = { 0 };
+
+    g_assert_false(cxl_hybrid_fault_region_plan(100, 8, 108, &plan));
+}
+
+static void test_fault_region_completed_visibility_uses_demand_page(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[BITS_TO_LONGS(1024)] = { 0 };
+    unsigned long visible_regions[BITS_TO_LONGS(8)] = { 0 };
+    unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
+    CXLHybridFaultRequestRecord record = {
+        .page_index = 512,
+        .demand_page = 531,
+        .generation = 4,
+        .flags = CXL_HYBRID_FAULT_REQUEST_F_REGION,
+        .nr_pages = 128,
+    };
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
+                                       NULL, 0, visible_regions, 8,
+                                       owned, 8, 512 * 1024, 12, 4);
+    cxl_hybrid_control_mark_page_visible_generation(
+        &hdr, visible, NULL, record.demand_page, 4,
+        CXL_HYBRID_PAGE_LOCATION_CXL);
+
+    g_assert_true(cxl_hybrid_fault_request_demand_visible(&hdr, visible,
+                                                          &record));
+    g_assert_false(cxl_hybrid_control_region_visible_or_synthesize(
+                       &hdr, visible, visible_regions, record.page_index,
+                       record.nr_pages, record.generation));
+}
+
+static void test_fault_region_completed_status_accepts_demand_page(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[BITS_TO_LONGS(1024)] = { 0 };
+    unsigned long visible_regions[BITS_TO_LONGS(8)] = { 0 };
+    unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
+    CXLHybridFaultRequestRecord record = {
+        .page_index = 512,
+        .demand_page = 531,
+        .generation = 4,
+        .flags = CXL_HYBRID_FAULT_REQUEST_F_REGION,
+        .nr_pages = 128,
+    };
+    Error *err = NULL;
+    int ret;
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
+                                       NULL, 0, visible_regions, 8,
+                                       owned, 8, 512 * 1024, 12, 4);
+    cxl_hybrid_control_mark_page_visible_generation(
+        &hdr, visible, NULL, 531, 4, CXL_HYBRID_PAGE_LOCATION_CXL);
+
+    ret = cxl_hybrid_fault_request_completed_status(&hdr, visible, &record,
+                                                    &err);
+
+    if (err) {
+        error_free_or_abort(&err);
+    }
+    g_assert_cmpint(ret, ==, 0);
+    g_assert_false(cxl_hybrid_control_region_visible_or_synthesize(
+                       &hdr, visible, visible_regions, record.page_index,
+                       record.nr_pages, record.generation));
+}
+
+static void test_fault_region_completed_status_rejects_missing_demand_page(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[BITS_TO_LONGS(1024)] = { 0 };
+    unsigned long visible_regions[BITS_TO_LONGS(8)] = { 0 };
+    unsigned long owned[BITS_TO_LONGS(8)] = { 0 };
+    CXLHybridFaultRequestRecord record = {
+        .page_index = 512,
+        .demand_page = 531,
+        .generation = 4,
+        .flags = CXL_HYBRID_FAULT_REQUEST_F_REGION,
+        .nr_pages = 128,
+    };
+    Error *err = NULL;
+    int ret;
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible, 1024,
+                                       NULL, 0, visible_regions, 8,
+                                       owned, 8, 512 * 1024, 12, 4);
+
+    ret = cxl_hybrid_fault_request_completed_status(&hdr, visible, &record,
+                                                    &err);
+
+    g_assert_cmpint(ret, ==, -ENOENT);
+    g_assert_nonnull(err);
+    error_free(err);
+}
+
 static void test_fault_generation_uses_stable_source_run(void)
 {
     g_assert_cmpuint(cxl_hybrid_select_fault_publish_generation(
@@ -1319,6 +1427,16 @@ int main(int argc, char **argv)
                     test_partial_remap_span_marks_pages_without_region_bit);
     g_test_add_func("/cxl-hybrid-control/region-resolution-rejects-hole",
                     test_region_resolution_rejects_hole);
+    g_test_add_func("/cxl-hybrid-control/fault-region-plan-demand-plus-prefetch",
+                    test_fault_region_plans_one_demand_and_prefetch_remainder);
+    g_test_add_func("/cxl-hybrid-control/fault-region-plan-rejects-out-of-span",
+                    test_fault_region_plan_rejects_out_of_span_demand);
+    g_test_add_func("/cxl-hybrid-control/fault-region-completed-visibility-uses-demand-page",
+                    test_fault_region_completed_visibility_uses_demand_page);
+    g_test_add_func("/cxl-hybrid-control/fault-region-completed-status-accepts-demand-page",
+                    test_fault_region_completed_status_accepts_demand_page);
+    g_test_add_func("/cxl-hybrid-control/fault-region-completed-status-rejects-missing-demand-page",
+                    test_fault_region_completed_status_rejects_missing_demand_page);
     g_test_add_func("/cxl-hybrid-control/fault-generation-uses-stable-source-run",
                     test_fault_generation_uses_stable_source_run);
     g_test_add_func("/cxl-hybrid-control/switch-policy-enters-brake-before-coverage-switch",

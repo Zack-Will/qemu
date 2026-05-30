@@ -468,42 +468,14 @@ static bool cxl_hybrid_ctrl_state_quiescing(
     return flags & CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE;
 }
 
-static bool cxl_hybrid_ctrl_request_visible(
-    const CXLHybridControlState *state,
-    const CXLHybridFaultRequestRecord *record)
-{
-    if (record->flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
-        return cxl_hybrid_control_region_visible_or_synthesize(
-            state->hdr, state->visible_bitmap, state->visible_region_bitmap,
-            record->page_index, record->nr_pages, record->generation);
-    }
-
-    return cxl_hybrid_control_page_visible(state->hdr, state->visible_bitmap,
-                                           record->page_index,
-                                           record->generation);
-}
-
 static int cxl_hybrid_ctrl_request_completed_status(
     const CXLHybridControlState *state,
     const CXLHybridFaultRequestRecord *record,
     Error **errp)
 {
-    if (cxl_hybrid_ctrl_request_visible(state, record)) {
-        return 0;
-    }
-
-    if (record->flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
-        error_setg(errp,
-                   "CXL hybrid source completed before region "
-                   "(first-page=%" PRIu64 " pages=%u) became visible",
-                   record->page_index, record->nr_pages);
-    } else {
-        error_setg(errp,
-                   "CXL hybrid source completed before page %" PRIu64
-                   " became visible",
-                   record->page_index);
-    }
-    return -ENOENT;
+    return cxl_hybrid_fault_request_completed_status(state->hdr,
+                                                     state->visible_bitmap,
+                                                     record, errp);
 }
 
 static uint64_t cxl_hybrid_ctrl_active_request_count(
@@ -567,6 +539,8 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                 goto request_done;
             }
             if (record.flags & CXL_HYBRID_FAULT_REQUEST_F_REGION) {
+                CXLHybridFaultRegionPlan plan = { 0 };
+
                 trace_cxl_hybrid_region_request_dequeue(record.page_index,
                                                         record.nr_pages,
                                                         record.generation);
@@ -579,9 +553,26 @@ static void *cxl_hybrid_ctrl_request_worker_thread(void *opaque)
                     cxl_hybrid_ctrl_abort_generation(state, record.generation);
                     goto request_done;
                 }
-                if (cxl_hybrid_publish_fault_region_request_core(
-                        record.page_index, record.nr_pages,
-                        record.generation, record.request_ts_ns,
+                if (!cxl_hybrid_fault_region_plan(record.page_index,
+                                                  record.nr_pages,
+                                                  record.demand_page,
+                                                  &plan) ||
+                    !cxl_hybrid_lookup_global_page(plan.demand_page, &block,
+                                                   &block_offset)) {
+                    cxl_hybrid_ctrl_abort_generation(state, record.generation);
+                    goto request_done;
+                }
+
+                cxl_hybrid_note_publish_request_received(qemu_ram_get_idstr(block),
+                                                         block_offset,
+                                                         record.generation,
+                                                         record.request_ts_ns);
+                if (cxl_hybrid_publish_fault_request_core(
+                        qemu_ram_get_idstr(block),
+                        block_offset,
+                        TARGET_PAGE_SIZE,
+                        record.generation,
+                        false,
                         &local_err)) {
                     if (local_err) {
                         error_report_err(local_err);
@@ -1257,13 +1248,16 @@ int cxl_hybrid_ctrl_enqueue_fault_request(uint64_t page_index,
 
 int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
                                                  uint32_t nr_pages,
+                                                 uint64_t demand_page,
                                                  uint32_t generation,
                                                  uint64_t request_ts_ns,
                                                  bool *queuedp,
                                                  Error **errp)
 {
+    CXLHybridFaultRegionPlan plan = { 0 };
     CXLHybridFaultRequestRecord record = {
         .page_index = first_page,
+        .demand_page = demand_page,
         .generation = generation,
         .flags = CXL_HYBRID_FAULT_REQUEST_F_REGION,
         .nr_pages = nr_pages,
@@ -1279,6 +1273,14 @@ int cxl_hybrid_ctrl_enqueue_fault_region_request(uint64_t first_page,
         cxl_hybrid_control_destination.hdr, first_page, nr_pages, NULL, errp);
     if (ret) {
         return ret;
+    }
+    if (!cxl_hybrid_fault_region_plan(first_page, nr_pages, demand_page,
+                                      &plan)) {
+        error_setg(errp,
+                   "CXL hybrid fault region demand page out of range "
+                   "(first-page=%" PRIu64 " pages=%u demand-page=%" PRIu64 ")",
+                   first_page, nr_pages, demand_page);
+        return -EINVAL;
     }
 
     return cxl_hybrid_ctrl_try_enqueue_request(
