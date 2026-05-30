@@ -348,6 +348,30 @@ static void test_page_state_claim_and_complete_cxl(void)
         slot, 7, CXL_HYBRID_PAGE_LOCATION_CXL));
 }
 
+static void test_cxl_page_claim_complete_publishes_cxl(void)
+{
+    uint64_t slot = cxl_hybrid_page_state_make_dirty(4, 88);
+    CXLHybridPageClaim claim = { 0 };
+
+    g_assert_true(cxl_hybrid_page_state_claim_for_cxl(&slot, 4, &claim));
+    g_assert_cmpuint(claim.owner, ==, CXL_HYBRID_PAGE_OWNER_CXL);
+    g_assert_true(cxl_hybrid_page_state_complete_cxl(&slot, &claim));
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        slot, 4, CXL_HYBRID_PAGE_LOCATION_CXL));
+}
+
+static void test_rdma_page_claim_complete_publishes_dst_local(void)
+{
+    uint64_t slot = cxl_hybrid_page_state_make_not_sent(5);
+    CXLHybridPageClaim claim = { 0 };
+
+    g_assert_true(cxl_hybrid_page_state_claim_for_rdma(&slot, 5, &claim));
+    g_assert_cmpuint(claim.owner, ==, CXL_HYBRID_PAGE_OWNER_RDMA);
+    g_assert_true(cxl_hybrid_page_state_complete_rdma(&slot, &claim));
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        slot, 5, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL));
+}
+
 static void test_page_state_dirty_makes_rdma_completion_stale(void)
 {
     uint64_t slot = cxl_hybrid_page_state_make_dirty(3, 11);
@@ -1233,6 +1257,10 @@ int main(int argc, char **argv)
                     test_header_fault_pressure_tracks_pending_and_active_requests);
     g_test_add_func("/cxl-hybrid-control/page-state-claim-complete-cxl",
                     test_page_state_claim_and_complete_cxl);
+    g_test_add_func("/cxl-hybrid-control/page-state-cxl-claim-complete-wrapper",
+                    test_cxl_page_claim_complete_publishes_cxl);
+    g_test_add_func("/cxl-hybrid-control/page-state-rdma-claim-complete-wrapper",
+                    test_rdma_page_claim_complete_publishes_dst_local);
     g_test_add_func("/cxl-hybrid-control/page-state-dirty-stales-rdma",
                     test_page_state_dirty_makes_rdma_completion_stale);
     g_test_add_func("/cxl-hybrid-control/page-state-rejects-double-claim",

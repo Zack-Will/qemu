@@ -716,9 +716,19 @@ bool cxl_hybrid_page_state_try_claim(uint64_t *slot,
                                      CXLHybridPageOwner owner,
                                      uint32_t generation,
                                      CXLHybridPageClaim *claim);
+bool cxl_hybrid_page_state_claim_for_cxl(uint64_t *slot,
+                                         uint32_t generation,
+                                         CXLHybridPageClaim *claim);
+bool cxl_hybrid_page_state_claim_for_rdma(uint64_t *slot,
+                                          uint32_t generation,
+                                          CXLHybridPageClaim *claim);
 bool cxl_hybrid_page_state_complete(uint64_t *slot,
                                     const CXLHybridPageClaim *claim,
                                     CXLHybridPageLocation location);
+bool cxl_hybrid_page_state_complete_cxl(uint64_t *slot,
+                                        const CXLHybridPageClaim *claim);
+bool cxl_hybrid_page_state_complete_rdma(uint64_t *slot,
+                                         const CXLHybridPageClaim *claim);
 void cxl_hybrid_page_state_mark_dirty(uint64_t *slot,
                                       uint32_t generation,
                                       uint32_t dirty_seq);

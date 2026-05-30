@@ -135,6 +135,22 @@ bool cxl_hybrid_page_state_try_claim(uint64_t *slot,
     }
 }
 
+bool cxl_hybrid_page_state_claim_for_cxl(uint64_t *slot,
+                                         uint32_t generation,
+                                         CXLHybridPageClaim *claim)
+{
+    return cxl_hybrid_page_state_try_claim(
+        slot, CXL_HYBRID_PAGE_OWNER_CXL, generation, claim);
+}
+
+bool cxl_hybrid_page_state_claim_for_rdma(uint64_t *slot,
+                                          uint32_t generation,
+                                          CXLHybridPageClaim *claim)
+{
+    return cxl_hybrid_page_state_try_claim(
+        slot, CXL_HYBRID_PAGE_OWNER_RDMA, generation, claim);
+}
+
 bool cxl_hybrid_page_state_complete(uint64_t *slot,
                                     const CXLHybridPageClaim *claim,
                                     CXLHybridPageLocation location)
@@ -149,6 +165,22 @@ bool cxl_hybrid_page_state_complete(uint64_t *slot,
         claim->generation, location, claim->dirty_seq);
     return qatomic_cmpxchg(slot, claim->observed, published) ==
            claim->observed;
+}
+
+bool cxl_hybrid_page_state_complete_cxl(uint64_t *slot,
+                                        const CXLHybridPageClaim *claim)
+{
+    return claim && claim->owner == CXL_HYBRID_PAGE_OWNER_CXL &&
+           cxl_hybrid_page_state_complete(
+               slot, claim, CXL_HYBRID_PAGE_LOCATION_CXL);
+}
+
+bool cxl_hybrid_page_state_complete_rdma(uint64_t *slot,
+                                         const CXLHybridPageClaim *claim)
+{
+    return claim && claim->owner == CXL_HYBRID_PAGE_OWNER_RDMA &&
+           cxl_hybrid_page_state_complete(
+               slot, claim, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL);
 }
 
 void cxl_hybrid_page_state_mark_dirty(uint64_t *slot,
