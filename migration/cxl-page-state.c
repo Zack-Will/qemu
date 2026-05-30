@@ -178,3 +178,85 @@ bool cxl_hybrid_page_state_can_consume(uint64_t word,
            cxl_hybrid_page_state_encoded_generation(generation) &&
            cxl_hybrid_page_state_location(word) == location;
 }
+
+static bool cxl_hybrid_page_state_word_is_cxl_published(uint64_t word,
+                                                        uint32_t generation)
+{
+    return cxl_hybrid_page_state_can_consume(
+        word, generation, CXL_HYBRID_PAGE_LOCATION_CXL);
+}
+
+bool cxl_hybrid_page_state_longest_cxl_span(const uint64_t *page_state,
+                                            uint64_t total_pages,
+                                            uint64_t fault_page,
+                                            uint32_t generation,
+                                            uint32_t max_pages,
+                                            CXLHybridRemapSpan *span)
+{
+    uint64_t first;
+    uint64_t last;
+    uint64_t span_len;
+    uint64_t left_target;
+    uint64_t right_target;
+    uint64_t left_used;
+    uint64_t right_used;
+
+    if (!page_state || !span || fault_page >= total_pages ||
+        !cxl_hybrid_page_state_word_is_cxl_published(
+            qatomic_load_acquire(&page_state[fault_page]), generation)) {
+        return false;
+    }
+
+    first = fault_page;
+    last = fault_page + 1;
+
+    if (max_pages) {
+        left_target = (max_pages - 1) / 2;
+        right_target = (max_pages - 1) - left_target;
+        left_used = 0;
+        right_used = 0;
+
+        while (left_used < left_target && first > 0 &&
+               cxl_hybrid_page_state_word_is_cxl_published(
+                   qatomic_load_acquire(&page_state[first - 1]), generation)) {
+            first--;
+            left_used++;
+        }
+        right_target += left_target - left_used;
+
+        while (right_used < right_target && last < total_pages &&
+               cxl_hybrid_page_state_word_is_cxl_published(
+                   qatomic_load_acquire(&page_state[last]), generation)) {
+            last++;
+            right_used++;
+        }
+        left_target += right_target - right_used;
+
+        while (left_used < left_target && first > 0 &&
+               cxl_hybrid_page_state_word_is_cxl_published(
+                   qatomic_load_acquire(&page_state[first - 1]), generation)) {
+            first--;
+            left_used++;
+        }
+    } else {
+        while (first > 0 &&
+               cxl_hybrid_page_state_word_is_cxl_published(
+                   qatomic_load_acquire(&page_state[first - 1]), generation)) {
+            first--;
+        }
+        while (last < total_pages &&
+               cxl_hybrid_page_state_word_is_cxl_published(
+                   qatomic_load_acquire(&page_state[last]), generation)) {
+            last++;
+        }
+    }
+
+    span_len = last - first;
+    if (span_len == 0 || span_len > UINT32_MAX) {
+        return false;
+    }
+
+    span->first_page = first;
+    span->nr_pages = span_len;
+    return true;
+}

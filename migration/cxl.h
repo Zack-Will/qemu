@@ -153,6 +153,11 @@ typedef struct CXLHybridPageDescriptor {
     uint32_t nr_pages;
 } CXLHybridPageDescriptor;
 
+typedef struct CXLHybridRemapSpan {
+    uint64_t first_page;
+    uint32_t nr_pages;
+} CXLHybridRemapSpan;
+
 typedef struct CXLHybridTransferQueue {
     QemuMutex lock;
     GQueue classes[CXL_HYBRID_TRANSFER_CLASS_COUNT];
@@ -712,6 +717,12 @@ void cxl_hybrid_page_state_mark_dirty(uint64_t *slot,
 bool cxl_hybrid_page_state_can_consume(uint64_t word,
                                        uint32_t generation,
                                        CXLHybridPageLocation location);
+bool cxl_hybrid_page_state_longest_cxl_span(const uint64_t *page_state,
+                                            uint64_t total_pages,
+                                            uint64_t fault_page,
+                                            uint32_t generation,
+                                            uint32_t max_pages,
+                                            CXLHybridRemapSpan *span);
 size_t cxl_hybrid_control_visible_bitmap_words(uint64_t pages);
 size_t cxl_hybrid_control_visible_bitmap_bytes(uint64_t pages);
 size_t cxl_hybrid_control_page_state_words(uint64_t pages);
