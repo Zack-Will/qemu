@@ -629,6 +629,14 @@ void cxl_hybrid_rdma_descriptor_complete_pages_for_test(
     CXLHybridRDMAPageDescriptor *desc,
     uint64_t *page_state,
     uint64_t total_pages);
+void cxl_hybrid_cxl_descriptor_complete_pages_for_test(
+    uint64_t *page_state,
+    uint64_t total_pages,
+    uint64_t first_page,
+    const CXLHybridPageClaim *claims,
+    uint32_t nr_pages,
+    uint32_t *completedp,
+    uint32_t *stalep);
 void cxl_hybrid_rdma_descriptor_destroy(CXLHybridRDMAPageDescriptor *desc);
 bool cxl_hybrid_rdma_sidecar_get_backing(void **basep, size_t *sizep);
 bool cxl_hybrid_start_rdma_sidecar(bool incoming, bool wait_for_setup,

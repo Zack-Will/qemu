@@ -360,6 +360,32 @@ static void test_cxl_page_claim_complete_publishes_cxl(void)
         slot, 4, CXL_HYBRID_PAGE_LOCATION_CXL));
 }
 
+static void test_cxl_descriptor_completion_skips_stale_page(void)
+{
+    uint64_t page_state[3];
+    CXLHybridPageClaim claims[3];
+    uint32_t generation = 11;
+    uint32_t completed = 0;
+    uint32_t stale = 0;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_dirty(generation, i);
+        g_assert_true(cxl_hybrid_page_state_claim_for_cxl(
+            &page_state[i], generation, &claims[i]));
+    }
+    cxl_hybrid_page_state_mark_dirty(&page_state[1], generation, 44);
+
+    cxl_hybrid_cxl_descriptor_complete_pages_for_test(
+        page_state, G_N_ELEMENTS(page_state), 0, claims, 3,
+        &completed, &stale);
+    g_assert_cmpuint(completed, ==, 2);
+    g_assert_cmpuint(stale, ==, 1);
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        page_state[0], generation, CXL_HYBRID_PAGE_LOCATION_CXL));
+    g_assert_cmpuint(cxl_hybrid_page_state_kind(page_state[1]), ==,
+                     CXL_HYBRID_PAGE_STATE_DIRTY);
+}
+
 static void test_rdma_page_claim_complete_publishes_dst_local(void)
 {
     uint64_t slot = cxl_hybrid_page_state_make_not_sent(5);
@@ -1367,6 +1393,8 @@ int main(int argc, char **argv)
                     test_page_state_claim_and_complete_cxl);
     g_test_add_func("/cxl-hybrid-control/page-state-cxl-claim-complete-wrapper",
                     test_cxl_page_claim_complete_publishes_cxl);
+    g_test_add_func("/cxl-hybrid-control/cxl-descriptor-completion-skips-stale",
+                    test_cxl_descriptor_completion_skips_stale_page);
     g_test_add_func("/cxl-hybrid-control/page-state-rdma-claim-complete-wrapper",
                     test_rdma_page_claim_complete_publishes_dst_local);
     g_test_add_func("/cxl-hybrid-control/page-state-dirty-stales-rdma",

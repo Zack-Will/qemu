@@ -316,6 +316,28 @@ void cxl_hybrid_rdma_descriptor_complete_pages_for_test(
     }
 }
 
+void cxl_hybrid_cxl_descriptor_complete_pages_for_test(
+    uint64_t *page_state,
+    uint64_t total_pages,
+    uint64_t first_page,
+    const CXLHybridPageClaim *claims,
+    uint32_t nr_pages,
+    uint32_t *completedp,
+    uint32_t *stalep)
+{
+    for (uint32_t i = 0; page_state && claims && i < nr_pages &&
+         first_page + i < total_pages; i++) {
+        if (cxl_hybrid_page_state_complete_cxl(&page_state[first_page + i],
+                                               &claims[i])) {
+            if (completedp) {
+                (*completedp)++;
+            }
+        } else if (stalep) {
+            (*stalep)++;
+        }
+    }
+}
+
 uint64_t cxl_hybrid_transfer_queue_depth(CXLHybridTransferQueue *queue,
                                          CXLHybridTransferClass klass)
 {
