@@ -516,6 +516,18 @@ uint64_t ram_bytes_remaining(void)
                        0;
 }
 
+static void cxl_hybrid_shadow_classify_bulk_page(RAMState *rs,
+                                                 PageSearchStatus *pss)
+{
+    (void)rs;
+
+    if (!migrate_cxl_hybrid()) {
+        return;
+    }
+    cxl_hybrid_account_shadow_bulk_candidate(pss->block,
+                                             pss->page << TARGET_PAGE_BITS);
+}
+
 bool cxl_hybrid_rdma_try_claim_bulk_region(CXLHybridRDMABulkClaim *claim)
 {
     RAMBlock *block;
@@ -2918,6 +2930,7 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
         return 0;
     }
 
+    cxl_hybrid_shadow_classify_bulk_page(rs, pss);
     /* Update host page boundary information */
     pss_host_page_prepare(pss);
 

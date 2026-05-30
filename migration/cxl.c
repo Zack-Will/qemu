@@ -2616,6 +2616,13 @@ bool cxl_hybrid_rdma_bulk_claim_init(CXLHybridRDMABulkClaim *claim,
     return true;
 }
 
+void cxl_hybrid_account_shadow_bulk_candidate(RAMBlock *block,
+                                               ram_addr_t block_offset)
+{
+    (void)block;
+    (void)block_offset;
+}
+
 bool cxl_hybrid_rdma_sidecar_get_backing(void **basep, size_t *sizep)
 {
     if (!basep || !sizep || !cxl_state.mmap_base || !cxl_state.mmap_size) {

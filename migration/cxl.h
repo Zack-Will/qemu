@@ -159,6 +159,11 @@ typedef struct CXLHybridTransferQueue {
     bool lock_ready;
 } CXLHybridTransferQueue;
 
+typedef struct CXLHybridSchedulerPolicy {
+    uint64_t rdma_budget_pages;
+    uint64_t cxl_background_pages;
+} CXLHybridSchedulerPolicy;
+
 typedef bool (*CXLHybridPageResolveFunc)(uint64_t page_index, void *opaque);
 
 typedef struct CXLHybridFaultRegionGeometry {
@@ -513,6 +518,13 @@ void cxl_hybrid_reset_rdma_sidecar_stats_for_test(void);
 void cxl_hybrid_rdma_sidecar_global_init(uint64_t total_regions,
                                          uint64_t pages_per_region);
 void cxl_hybrid_rdma_sidecar_global_destroy(void);
+CXLHybridTransferClass cxl_hybrid_scheduler_choose_bulk_lane(
+    const CXLHybridSchedulerPolicy *policy,
+    uint64_t page_index);
+CXLHybridTransferClass cxl_hybrid_scheduler_choose_zero_page_lane(
+    const CXLHybridSchedulerPolicy *policy);
+void cxl_hybrid_account_shadow_bulk_candidate(RAMBlock *block,
+                                               ram_addr_t block_offset);
 void cxl_hybrid_account_rdma_ready(uint64_t region_index,
                                    uint64_t pages);
 void cxl_hybrid_account_rdma_invalidate(uint64_t region_index,

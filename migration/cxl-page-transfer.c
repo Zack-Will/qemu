@@ -1,6 +1,26 @@
 #include "qemu/osdep.h"
 #include "migration/cxl.h"
 
+CXLHybridTransferClass cxl_hybrid_scheduler_choose_zero_page_lane(
+    const CXLHybridSchedulerPolicy *policy)
+{
+    (void)policy;
+
+    return CXL_HYBRID_TRANSFER_CXL_LOW;
+}
+
+CXLHybridTransferClass cxl_hybrid_scheduler_choose_bulk_lane(
+    const CXLHybridSchedulerPolicy *policy,
+    uint64_t page_index)
+{
+    (void)page_index;
+
+    if (policy && policy->rdma_budget_pages) {
+        return CXL_HYBRID_TRANSFER_RDMA_BULK;
+    }
+    return CXL_HYBRID_TRANSFER_CXL_LOW;
+}
+
 void cxl_hybrid_transfer_queue_init_for_test(CXLHybridTransferQueue *queue)
 {
     int i;

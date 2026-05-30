@@ -792,6 +792,45 @@ static void test_rdma_sidecar_switch_commits_only_final_clean_ready_regions(void
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
 }
 
+static void test_scheduler_prefers_cxl_low_when_rdma_budget_exhausted(void)
+{
+    CXLHybridSchedulerPolicy policy = {
+        .rdma_budget_pages = 0,
+        .cxl_background_pages = 512,
+    };
+
+    g_assert_cmpuint(cxl_hybrid_scheduler_choose_bulk_lane(&policy, 12), ==,
+                     CXL_HYBRID_TRANSFER_CXL_LOW);
+}
+
+static void test_scheduler_prefers_rdma_bulk_when_budget_available(void)
+{
+    CXLHybridSchedulerPolicy policy = {
+        .rdma_budget_pages = 512,
+        .cxl_background_pages = 512,
+    };
+
+    g_assert_cmpuint(cxl_hybrid_scheduler_choose_bulk_lane(&policy, 12), ==,
+                     CXL_HYBRID_TRANSFER_RDMA_BULK);
+}
+
+static void test_scheduler_prefers_cxl_low_without_policy(void)
+{
+    g_assert_cmpuint(cxl_hybrid_scheduler_choose_bulk_lane(NULL, 12), ==,
+                     CXL_HYBRID_TRANSFER_CXL_LOW);
+}
+
+static void test_scheduler_skips_zero_page_for_rdma(void)
+{
+    CXLHybridSchedulerPolicy policy = {
+        .rdma_budget_pages = 512,
+        .cxl_background_pages = 512,
+    };
+
+    g_assert_cmpuint(cxl_hybrid_scheduler_choose_zero_page_lane(&policy), ==,
+                     CXL_HYBRID_TRANSFER_CXL_LOW);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -881,5 +920,13 @@ int main(int argc, char **argv)
                     test_rdma_sidecar_global_republish_is_idempotent);
     g_test_add_func("/cxl/region/rdma-sidecar-switch-commits-final-clean",
                     test_rdma_sidecar_switch_commits_only_final_clean_ready_regions);
+    g_test_add_func("/cxl/region/scheduler-rdma-budget-exhausted",
+                    test_scheduler_prefers_cxl_low_when_rdma_budget_exhausted);
+    g_test_add_func("/cxl/region/scheduler-rdma-budget-available",
+                    test_scheduler_prefers_rdma_bulk_when_budget_available);
+    g_test_add_func("/cxl/region/scheduler-null-policy-cxl",
+                    test_scheduler_prefers_cxl_low_without_policy);
+    g_test_add_func("/cxl/region/scheduler-zero-page-cxl",
+                    test_scheduler_skips_zero_page_for_rdma);
     return g_test_run();
 }
