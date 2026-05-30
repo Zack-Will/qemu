@@ -2,6 +2,7 @@
 migration_files = files(
   'cxl-hybrid-control-header.c',
   'cxl-page-state.c',
+  'cxl-page-transfer.c',
   'cxl-rdma.c',
   'cxl-region.c',
   'downtime.c',
@@ -24,6 +25,7 @@ system_ss.add(files(
   'cpr.c',
   'cxl-hybrid-control.c',
   'cxl-page-state.c',
+  'cxl-page-transfer.c',
   'cxl.c',
   'cpr-transfer.c',
   'cpr-exec.c',

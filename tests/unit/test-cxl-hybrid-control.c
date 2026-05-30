@@ -1014,6 +1014,56 @@ static void test_source_remap_coverage_uses_staged_pages_denominator(void)
                      100);
 }
 
+static void test_cxl_transfer_queue_drains_high_before_low(void)
+{
+    CXLHybridTransferQueue queue;
+    CXLHybridPageDescriptor out = { 0 };
+
+    cxl_hybrid_transfer_queue_init_for_test(&queue);
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_LOW,
+        &(CXLHybridPageDescriptor) { .page_index = 10 });
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_HIGH,
+        &(CXLHybridPageDescriptor) { .page_index = 20 });
+
+    g_assert_true(cxl_hybrid_transfer_queue_pop(&queue, &out));
+    g_assert_cmpuint(out.page_index, ==, 20);
+    g_assert_true(cxl_hybrid_transfer_queue_pop(&queue, &out));
+    g_assert_cmpuint(out.page_index, ==, 10);
+    cxl_hybrid_transfer_queue_destroy_for_test(&queue);
+}
+
+static void test_cxl_transfer_queue_duplicate_descriptor_is_allowed(void)
+{
+    CXLHybridTransferQueue queue;
+    CXLHybridPageDescriptor out = { 0 };
+
+    cxl_hybrid_transfer_queue_init_for_test(&queue);
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_HIGH,
+        &(CXLHybridPageDescriptor) { .page_index = 7 });
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_HIGH,
+        &(CXLHybridPageDescriptor) { .page_index = 7 });
+
+    g_assert_true(cxl_hybrid_transfer_queue_pop(&queue, &out));
+    g_assert_cmpuint(out.page_index, ==, 7);
+    g_assert_true(cxl_hybrid_transfer_queue_pop(&queue, &out));
+    g_assert_cmpuint(out.page_index, ==, 7);
+    g_assert_false(cxl_hybrid_transfer_queue_pop(&queue, &out));
+    cxl_hybrid_transfer_queue_destroy_for_test(&queue);
+}
+
+static void test_cxl_transfer_queue_ignores_negative_class(void)
+{
+    CXLHybridTransferQueue queue;
+    CXLHybridPageDescriptor out = { 0 };
+
+    cxl_hybrid_transfer_queue_init_for_test(&queue);
+    cxl_hybrid_transfer_queue_push(&queue, (CXLHybridTransferClass)-1,
+        &(CXLHybridPageDescriptor) { .page_index = 99 });
+
+    g_assert_false(cxl_hybrid_transfer_queue_pop(&queue, &out));
+    cxl_hybrid_transfer_queue_destroy_for_test(&queue);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1109,5 +1159,11 @@ int main(int argc, char **argv)
                     test_switch_policy_preserves_legacy_brake_without_coverage);
     g_test_add_func("/cxl-hybrid-control/source-remap-coverage-uses-staged-pages-denominator",
                     test_source_remap_coverage_uses_staged_pages_denominator);
+    g_test_add_func("/cxl-hybrid-control/transfer-queue-high-before-low",
+                    test_cxl_transfer_queue_drains_high_before_low);
+    g_test_add_func("/cxl-hybrid-control/transfer-queue-allows-duplicates",
+                    test_cxl_transfer_queue_duplicate_descriptor_is_allowed);
+    g_test_add_func("/cxl-hybrid-control/transfer-queue-ignores-negative-class",
+                    test_cxl_transfer_queue_ignores_negative_class);
     return g_test_run();
 }

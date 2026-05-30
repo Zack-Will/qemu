@@ -136,6 +136,29 @@ typedef struct CXLHybridFaultRequestRecord {
     uint64_t request_ts_ns;
 } CXLHybridFaultRequestRecord;
 
+typedef enum CXLHybridTransferClass {
+    CXL_HYBRID_TRANSFER_CXL_HIGH = 0,
+    CXL_HYBRID_TRANSFER_CXL_LOW = 1,
+    CXL_HYBRID_TRANSFER_RDMA_BULK = 2,
+    CXL_HYBRID_TRANSFER_RDMA_PREFETCH = 3,
+    CXL_HYBRID_TRANSFER_CLASS_COUNT,
+} CXLHybridTransferClass;
+
+typedef struct CXLHybridPageDescriptor {
+    RAMBlock *block;
+    ram_addr_t block_offset;
+    uint64_t page_index;
+    uint64_t cxl_offset;
+    uint32_t generation;
+    uint32_t nr_pages;
+} CXLHybridPageDescriptor;
+
+typedef struct CXLHybridTransferQueue {
+    QemuMutex lock;
+    GQueue classes[CXL_HYBRID_TRANSFER_CLASS_COUNT];
+    bool lock_ready;
+} CXLHybridTransferQueue;
+
 typedef bool (*CXLHybridPageResolveFunc)(uint64_t page_index, void *opaque);
 
 typedef struct CXLHybridFaultRegionGeometry {
@@ -378,6 +401,13 @@ bool cxl_hybrid_mapped_ram_layout_next(uint64_t *offsetp,
                                        uint64_t target_page_size,
                                        uint64_t *pages_offsetp,
                                        uint64_t *pages_lenp);
+void cxl_hybrid_transfer_queue_init_for_test(CXLHybridTransferQueue *queue);
+void cxl_hybrid_transfer_queue_destroy_for_test(CXLHybridTransferQueue *queue);
+void cxl_hybrid_transfer_queue_push(CXLHybridTransferQueue *queue,
+                                    CXLHybridTransferClass klass,
+                                    const CXLHybridPageDescriptor *desc);
+bool cxl_hybrid_transfer_queue_pop(CXLHybridTransferQueue *queue,
+                                   CXLHybridPageDescriptor *desc);
 void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,
                                                uint64_t total_regions);
 void cxl_hybrid_dst_region_state_destroy_for_test(
