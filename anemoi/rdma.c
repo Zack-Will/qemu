@@ -795,12 +795,24 @@ fail:
     return NULL;
 }
 
+static void anemoi_rdma_pool_install_signals(void)
+{
+    struct sigaction sa;
+
+    /*
+     * Deliberately omit SA_RESTART so a blocking accept() in the connection
+     * loop returns EINTR on SIGINT/SIGTERM and the pool can shut down.
+     */
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = anemoi_rdma_pool_signal;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
 int anemoi_rdma_pool_serve(const AnemoiRDMAPoolConfig *cfg, Error **errp)
 {
     AnemoiRDMALinkConfig link_cfg;
-    AnemoiRDMALink link;
-    AnemoiRDMAPeerInfo local_info;
-    AnemoiRDMAPeerInfo remote_info;
+    GArray *links;
     void *pool = NULL;
     uint64_t total_pages;
     uint64_t total_bytes;
@@ -831,37 +843,67 @@ int anemoi_rdma_pool_serve(const AnemoiRDMAPoolConfig *cfg, Error **errp)
     link_cfg.ib_port = cfg->ib_port ? cfg->ib_port : link_cfg.ib_port;
     link_cfg.gid_idx = cfg->gid_idx;
 
-    if (anemoi_rdma_link_init(&link, &link_cfg, pool, (size_t)total_bytes,
-                              IBV_ACCESS_LOCAL_WRITE |
-                              IBV_ACCESS_REMOTE_READ |
-                              IBV_ACCESS_REMOTE_WRITE, errp) != 0) {
-        goto out_pool;
-    }
-
-    local_info = anemoi_rdma_local_peer_info(&link);
-    if (anemoi_rdma_exchange(cfg->role, cfg->peer_host, cfg->tcp_port,
-                             &local_info, &remote_info, errp) != 0 ||
-        anemoi_rdma_connect_qp(&link, &remote_info.qp, errp) != 0) {
-        goto out_link;
-    }
+    links = g_array_new(false, true, sizeof(AnemoiRDMALink));
 
     printf("anemoi-pool: vm-capacity=%u pages-per-vm=%" PRIu64
            " bytes=%" PRIu64 " port=%u\n",
            cfg->vm_capacity, cfg->pages_per_vm, total_bytes, cfg->tcp_port);
-    printf("anemoi-pool: QP connected; press Ctrl-C to stop\n");
+    printf("anemoi-pool: waiting for clients; press Ctrl-C to stop\n");
     fflush(stdout);
 
     anemoi_rdma_pool_stop = 0;
-    signal(SIGINT, anemoi_rdma_pool_signal);
-    signal(SIGTERM, anemoi_rdma_pool_signal);
+    anemoi_rdma_pool_install_signals();
+
+    /*
+     * Accept clients one at a time, giving each its own QP that aliases the
+     * single pool buffer.  Source (Q) and destination (Q') both connect here
+     * and address the pool by {VMID, GFN}, which is how they "link the same M"
+     * across a migration (spec section 4.5).  Each connection re-registers the
+     * same backing memory in its own PD, so all clients see identical bytes.
+     */
     while (!anemoi_rdma_pool_stop) {
-        sleep(3600);
+        AnemoiRDMALink link;
+        AnemoiRDMAPeerInfo local_info;
+        AnemoiRDMAPeerInfo remote_info;
+        Error *local_err = NULL;
+
+        if (anemoi_rdma_link_init(&link, &link_cfg, pool, (size_t)total_bytes,
+                                  IBV_ACCESS_LOCAL_WRITE |
+                                  IBV_ACCESS_REMOTE_READ |
+                                  IBV_ACCESS_REMOTE_WRITE,
+                                  &local_err) != 0) {
+            if (anemoi_rdma_pool_stop) {
+                error_free(local_err);
+                break;
+            }
+            error_propagate(errp, local_err);
+            goto out;
+        }
+
+        local_info = anemoi_rdma_local_peer_info(&link);
+        if (anemoi_rdma_exchange(cfg->role, cfg->peer_host, cfg->tcp_port,
+                                 &local_info, &remote_info, &local_err) != 0 ||
+            anemoi_rdma_connect_qp(&link, &remote_info.qp, &local_err) != 0) {
+            anemoi_rdma_link_close(&link);
+            if (anemoi_rdma_pool_stop) {
+                error_free(local_err);
+                break;
+            }
+            error_propagate(errp, local_err);
+            goto out;
+        }
+
+        g_array_append_val(links, link);
+        printf("anemoi-pool: client %u connected\n", links->len);
+        fflush(stdout);
     }
     ret = 0;
 
-out_link:
-    anemoi_rdma_link_close(&link);
-out_pool:
+out:
+    for (guint i = 0; i < links->len; i++) {
+        anemoi_rdma_link_close(&g_array_index(links, AnemoiRDMALink, i));
+    }
+    g_array_free(links, true);
     qemu_vfree(pool);
     return ret;
 }

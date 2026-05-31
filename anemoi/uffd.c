@@ -98,6 +98,7 @@ static void anemoi_fault_service_handle_msg(AnemoiFaultService *service,
         error_report("Anemoi userfaultfd received unexpected event %u",
                      msg->event);
         qatomic_set(&service->failed, 1);
+        qatomic_set(&service->stopping, 1);
         return;
     }
 

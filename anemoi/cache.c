@@ -154,12 +154,12 @@ static int anemoi_cache_discard_line(AnemoiCache *cache,
 }
 
 static int anemoi_cache_copy_to_hva(AnemoiCache *cache, void *hva_4k,
-                                    void *src_4k, Error **errp)
+                                    void *src_4k, bool dont_wake, Error **errp)
 {
 #ifdef CONFIG_LINUX
     if (cache->uffd_fd >= 0) {
         int ret = uffd_copy_page(cache->uffd_fd, hva_4k, src_4k,
-                                 ANEMOI_PAGE_SIZE, false);
+                                 ANEMOI_PAGE_SIZE, dont_wake);
 
         if (ret == 0) {
             return 0;
@@ -507,16 +507,38 @@ int anemoi_cache_install_page(AnemoiCache *cache, uint64_t gfn, void *hva_4k,
         qemu_mutex_unlock(&set->lock);
         return -1;
     }
-    if (anemoi_cache_copy_to_hva(cache, hva_4k, landing, errp) != 0) {
-        cache->stats.install_errors++;
-        qemu_mutex_unlock(&set->lock);
-        return -1;
-    }
-    if (!is_write &&
-        anemoi_cache_protect_hva(cache, hva_4k, errp) != 0) {
-        cache->stats.install_errors++;
-        qemu_mutex_unlock(&set->lock);
-        return -1;
+    if (is_write) {
+        /* Write fault: install a writable page and wake the vCPU. */
+        if (anemoi_cache_copy_to_hva(cache, hva_4k, landing, false,
+                                     errp) != 0) {
+            cache->stats.install_errors++;
+            qemu_mutex_unlock(&set->lock);
+            return -1;
+        }
+    } else {
+        /*
+         * Read fault: install the page without waking, apply write
+         * protection, and only then wake the vCPU.  Waking before the
+         * page is WP'd (the previous ordering) left a window in which the
+         * guest could dirty the page before UFFDIO_WRITEPROTECT took
+         * effect, so the WP fault never fired and the dirty bit was lost.
+         */
+        if (anemoi_cache_copy_to_hva(cache, hva_4k, landing, true,
+                                     errp) != 0) {
+            cache->stats.install_errors++;
+            qemu_mutex_unlock(&set->lock);
+            return -1;
+        }
+        if (anemoi_cache_protect_hva(cache, hva_4k, errp) != 0) {
+            cache->stats.install_errors++;
+            qemu_mutex_unlock(&set->lock);
+            return -1;
+        }
+        if (anemoi_cache_wake_hva(cache, hva_4k, errp) != 0) {
+            cache->stats.install_errors++;
+            qemu_mutex_unlock(&set->lock);
+            return -1;
+        }
     }
 
     line->gfn = gfn;
