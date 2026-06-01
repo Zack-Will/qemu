@@ -47,12 +47,14 @@ bool migration_postcopy_ram_stream_should_publish_cxl_visible(
 bool migration_postcopy_cxl_source_completion_ready(bool hybrid_mode,
                                                    MigrationStatus state,
                                                    bool cxl_postcopy_warm,
-                                                   bool final_ram_flushed)
+                                                   bool final_ram_flushed,
+                                                   bool cxl_source_drained)
 {
     return hybrid_mode &&
            state == MIGRATION_STATUS_POSTCOPY_ACTIVE &&
            cxl_postcopy_warm &&
-           final_ram_flushed;
+           final_ram_flushed &&
+           cxl_source_drained;
 }
 
 MigrationPostcopyCXLRAMStreamWriteAction

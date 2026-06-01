@@ -514,6 +514,16 @@ static bool cxl_hybrid_ctrl_cxl_queue_empty(CXLHybridControlState *state)
            qatomic_load_acquire(&state->active_cxl_work) == 0;
 }
 
+static bool cxl_hybrid_ctrl_request_path_empty(CXLHybridControlState *state)
+{
+    return state->hdr &&
+           cxl_hybrid_ctrl_active_enqueue_count(state) == 0 &&
+           qatomic_load_acquire(&state->hdr->request_cons) ==
+           qatomic_load_acquire(&state->hdr->request_prod) &&
+           cxl_hybrid_ctrl_active_request_count(state) == 0 &&
+           cxl_hybrid_control_source_write_count(state->hdr) == 0;
+}
+
 static void cxl_hybrid_ctrl_active_enqueue_begin(CXLHybridControlState *state)
 {
     qatomic_inc(&state->hdr->active_enqueue_count);
@@ -1190,6 +1200,30 @@ int cxl_hybrid_control_complete_source_run(Error **errp)
 
     qatomic_store_release(&state->hdr->completed_generation, generation);
     return 0;
+}
+
+bool cxl_hybrid_control_source_drained(void)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_source;
+    CXLHybridPageStateSnapshot snapshot = { 0 };
+    uint32_t generation;
+
+    if (!cxl_hybrid_ctrl_state_ready(state) || !state->page_state) {
+        return true;
+    }
+
+    generation = cxl_hybrid_fault_publish_generation();
+    if (!cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+        return false;
+    }
+
+    cxl_hybrid_page_state_snapshot(state->page_state, state->visible_bitmap,
+                                   state->hdr->page_state_words, generation,
+                                   &snapshot);
+    return snapshot.dirty == 0 &&
+           snapshot.in_flight == 0 &&
+           cxl_hybrid_ctrl_cxl_queue_empty(state) &&
+           cxl_hybrid_ctrl_request_path_empty(state);
 }
 
 void cxl_hybrid_ctrl_trace_page_state_snapshot(const char *tag)

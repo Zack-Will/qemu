@@ -3459,7 +3459,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("cxl_hybrid_ctrl_trace_page_state_snapshot", completion)
         self.assertIn('"completion-enter"', completion)
 
-    def test_pre_eof_cxl_prepare_publishes_remaining_pages_without_publish_ready_drain(self):
+    def test_completion_finish_only_fences_after_postcopy_drain(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
         text = migration_source.read_text(encoding="utf-8")
@@ -3469,9 +3469,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
         postcopy_start = text.index("static void migration_completion_postcopy(MigrationState *s)")
         helper = text[helper_start:postcopy_start]
 
-        self.assertIn("cxl_hybrid_completion_publish_remaining_pages(ms, errp)",
-                      helper)
         self.assertIn("cxl_hybrid_control_complete_source_run(errp)", helper)
+        self.assertNotIn("cxl_hybrid_completion_publish_remaining_pages", helper)
+        self.assertNotIn("cxl_hybrid_completion_publish_remaining_regions", helper)
         self.assertNotIn("cxl_hybrid_send_pending_publish_ready", helper)
         self.assertNotIn("while (ms->rp_state.rp_thread_created", helper)
         self.assertNotIn("ms->rp_state.rp_thread_exited", helper)
@@ -3507,9 +3507,29 @@ class WarmExperimentScriptTest(unittest.TestCase):
         helper = text[helper_start:postcopy_start]
 
         self.assertIn("trace_cxl_hybrid_completion_prepare_begin();", helper)
-        self.assertIn("trace_cxl_hybrid_completion_prepare_end(remaining_sent, 0);",
+        self.assertIn("trace_cxl_hybrid_completion_prepare_end(0, 0);",
                       helper)
         self.assertNotIn("qemu_fflush(ms->to_dst_file)", helper)
+
+    def test_postcopy_completion_ready_waits_for_cxl_source_drain(self):
+        migration_source = (SCRIPT_PATH.parent.parent / "migration" /
+                            "migration.c").resolve()
+        postcopy_source = (SCRIPT_PATH.parent.parent / "migration" /
+                           "postcopy.c").resolve()
+        text = migration_source.read_text(encoding="utf-8")
+        postcopy = postcopy_source.read_text(encoding="utf-8")
+
+        iter_start = text.index(
+            "static MigIterateState migration_iteration_run(MigrationState *s)")
+        iter_end = text.index(
+            "static void migration_iteration_finish(MigrationState *s)",
+            iter_start)
+        body = text[iter_start:iter_end]
+
+        self.assertIn("cxl_hybrid_postcopy_source_drained()", body)
+        self.assertIn("cxl_source_drained", postcopy)
+        self.assertIn("final_ram_flushed &&\n           cxl_source_drained",
+                      postcopy)
 
     def test_warm_push_enqueues_worker_without_warm_descriptor_transport(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -3525,27 +3545,24 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("set_bit_atomic(page_idx, cxl_state.warm_sent_bmap);", send)
         self.assertIn("clear_bit_atomic(page_idx, cxl_state.warm_dirty_bmap);", send)
 
-    def test_completion_publish_remaining_pages_covers_all_unsent_pages(self):
+    def test_postcopy_source_drain_scans_remaining_without_enqueueing(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
 
-        callback_start = text.index(
-            "static int cxl_hybrid_completion_publish_remaining_page")
-        callback_end = text.index(
-            "static size_t cxl_hybrid_pick_recent_miss_page", callback_start)
         helper_start = text.index(
-            "int cxl_hybrid_completion_publish_remaining_pages")
-        next_start = text.index("void cxl_account_dirty_sync_ns")
-        callback = text[callback_start:callback_end]
+            "bool cxl_hybrid_postcopy_source_drained(void)")
+        next_start = text.index(
+            "int cxl_hybrid_completion_publish_remaining_pages",
+            helper_start)
         helper = text[helper_start:next_start]
 
-        self.assertNotIn("ram_cxl_hybrid_walk_unsent", helper)
-        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_page", callback)
-        self.assertNotIn("cxl_hybrid_publish_page_to_cxl", callback)
-        self.assertNotIn("cxl_hybrid_build_warm_desc_range", callback)
-        self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_append", callback)
-        self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_flush", helper)
         self.assertIn("find_next_bit(cxl_state.remaining_bmap", helper)
+        self.assertIn("cxl_hybrid_ctrl_page_location(", helper)
+        self.assertIn("cxl_hybrid_ctrl_page_requires_postcopy_discard(",
+                      helper)
+        self.assertIn("cxl_hybrid_control_source_drained()", helper)
+        self.assertNotIn("cxl_hybrid_ctrl_enqueue_cxl_page", helper)
+        self.assertNotIn("cxl_hybrid_publish_page_to_cxl", helper)
 
     def test_completion_publish_remaining_regions_covers_region_fault_granularity(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -3564,13 +3581,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
         wait_start = migration_text.index("static inline void", finish_start)
         finish = migration_text[finish_start:wait_start]
 
-        self.assertIn("migrate_cxl_fault_resolve_uses_region()", finish)
-        self.assertIn("cxl_hybrid_completion_publish_remaining_regions(errp)",
-                      finish)
-        self.assertLess(
-            finish.index("cxl_hybrid_completion_publish_remaining_regions"),
-            finish.index("cxl_hybrid_control_complete_source_run")
-        )
+        self.assertNotIn("migrate_cxl_fault_resolve_uses_region()", finish)
+        self.assertNotIn("cxl_hybrid_completion_publish_remaining_regions", finish)
+        self.assertIn("cxl_hybrid_control_complete_source_run", finish)
         self.assertIn("RAMBLOCK_FOREACH_NOT_IGNORED(block)", helper)
         self.assertIn("block_first_page", helper)
         self.assertIn("block_last_page", helper)
@@ -3592,26 +3605,21 @@ class WarmExperimentScriptTest(unittest.TestCase):
             helper.index("RAMBLOCK_FOREACH_NOT_IGNORED(block)"),
         )
 
-    def test_completion_publish_remaining_pages_uses_publish_only_callback(self):
-        cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
-        text = cxl_source.read_text(encoding="utf-8")
+    def test_completion_prepare_has_no_bulk_publish_callback(self):
+        migration_source = (SCRIPT_PATH.parent.parent / "migration" /
+                            "migration.c").resolve()
+        text = migration_source.read_text(encoding="utf-8")
 
-        callback_start = text.index(
-            "static int cxl_hybrid_completion_publish_remaining_page")
-        callback_end = text.index(
-            "static size_t cxl_hybrid_pick_recent_miss_page", callback_start)
-        helper_start = text.index(
-            "int cxl_hybrid_completion_publish_remaining_pages")
-        next_start = text.index("void cxl_account_dirty_sync_ns")
-        callback = text[callback_start:callback_end]
-        helper = text[helper_start:next_start]
+        helper_start = text.rindex(
+            "static int migration_completion_finish_cxl_postcopy")
+        postcopy_start = text.index(
+            "static void migration_completion_postcopy(MigrationState *s)")
+        helper = text[helper_start:postcopy_start]
 
-        self.assertNotIn("CXLHybridWarmDescBatchBuilder", callback)
-        self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_append", callback)
-        self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_flush", helper)
-        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_page(", callback)
-        self.assertNotIn("cxl_hybrid_publish_page_to_cxl(", callback)
-        self.assertNotIn("cxl_hybrid_send_warm_descriptor", callback)
+        self.assertNotIn("cxl_hybrid_completion_publish_remaining_pages", helper)
+        self.assertNotIn("cxl_hybrid_completion_publish_remaining_regions", helper)
+        self.assertNotIn("cxl_hybrid_ctrl_enqueue_cxl_page", helper)
+        self.assertNotIn("cxl_hybrid_publish_page_to_cxl", helper)
 
     def test_completion_publish_remaining_pages_filters_on_cxl_visibility(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
@@ -3641,24 +3649,20 @@ class WarmExperimentScriptTest(unittest.TestCase):
                       text)
         self.assertNotIn("GHashTable *published_pages;", text)
 
-    def test_completion_remaining_pages_iterates_remaining_bitmap(self):
+    def test_postcopy_source_drain_iterates_remaining_bitmap(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
 
-        callback_start = text.index(
-            "static int cxl_hybrid_completion_publish_remaining_page")
         helper_start = text.index(
-            "int cxl_hybrid_completion_publish_remaining_pages")
-        callback = text[callback_start:helper_start]
-        next_start = text.index("void cxl_account_dirty_sync_ns")
+            "bool cxl_hybrid_postcopy_source_drained(void)")
+        next_start = text.index(
+            "int cxl_hybrid_completion_publish_remaining_pages", helper_start)
         helper = text[helper_start:next_start]
 
-        self.assertNotIn("ram_cxl_hybrid_walk_unsent", helper)
         self.assertIn("find_next_bit(cxl_state.remaining_bmap", helper)
-        self.assertIn("cxl_hybrid_lookup_global_page(page_idx, &block, &block_offset)",
-                      callback)
-        self.assertIn("cxl_hybrid_completion_publish_remaining_page(s, page_idx",
-                      helper)
+        self.assertIn("cxl_hybrid_mark_page_not_remaining(page_idx);", helper)
+        self.assertIn("cxl_hybrid_mark_page_cxl_visible(page_idx);", helper)
+        self.assertNotIn("cxl_hybrid_completion_publish_remaining_page", helper)
 
     def test_iteration_run_uses_warm_push_without_publish_ready_drain(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
@@ -3887,7 +3891,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("cxl_hybrid_page_state_snapshot_runtime", text)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_send", text)
 
-    def test_pre_eof_cxl_prepare_uses_publish_only_completion(self):
+    def test_pre_eof_cxl_prepare_uses_fence_only_completion(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" /
@@ -3900,17 +3904,21 @@ class WarmExperimentScriptTest(unittest.TestCase):
         postcopy_start = migration_text.index("static void migration_completion_postcopy(MigrationState *s)")
         helper = migration_text[helper_start:postcopy_start]
         completion_start = cxl_text.index(
-            "static int cxl_hybrid_completion_publish_remaining_page")
+            "bool cxl_hybrid_postcopy_source_drained(void)")
         next_start = cxl_text.index(
-            "static size_t cxl_hybrid_pick_recent_miss_page",
+            "int cxl_hybrid_completion_publish_remaining_pages",
             completion_start)
-        completion = cxl_text[completion_start:next_start]
+        drain = cxl_text[completion_start:next_start]
 
-        self.assertIn("cxl_hybrid_completion_publish_remaining_pages(ms, errp)", helper)
-        self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_flush", completion)
-        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_page(", completion)
-        self.assertNotIn("cxl_hybrid_publish_page_to_cxl(", completion)
-        self.assertNotIn("cxl_hybrid_send_warm_descriptor", completion)
+        self.assertIn("cxl_hybrid_control_complete_source_run(errp)", helper)
+        self.assertNotIn("cxl_hybrid_completion_publish_remaining_pages", helper)
+        self.assertNotIn("cxl_hybrid_completion_publish_remaining_regions", helper)
+        self.assertIn("cxl_hybrid_control_source_drained()", drain)
+        self.assertIn("cxl_hybrid_ctrl_page_requires_postcopy_discard(",
+                      drain)
+        self.assertNotIn("cxl_hybrid_ctrl_enqueue_cxl_page(", drain)
+        self.assertNotIn("cxl_hybrid_publish_page_to_cxl(", drain)
+        self.assertNotIn("cxl_hybrid_send_warm_descriptor", drain)
 
     def test_loadvm_has_only_current_cxl_metadata_visibility_command(self):
         savevm_source = (SCRIPT_PATH.parent.parent / "migration" /

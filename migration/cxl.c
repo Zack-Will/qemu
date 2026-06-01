@@ -2860,6 +2860,7 @@ static int cxl_hybrid_send_selected_page(MigrationState *s, size_t page_idx,
     trace_cxl_hybrid_warm_page_queued(block->idstr, block_offset);
     return 1;
 }
+
 static int cxl_hybrid_completion_publish_remaining_page(
     MigrationState *s,
     size_t page_idx,
@@ -3284,6 +3285,12 @@ void cxl_hybrid_account_warm_dirty(const char *rbname, ram_addr_t offset,
                 page_idx = cxl_global_page_index(block, page_offset);
                 if (cxl_state.cxl_visible_bmap) {
                     clear_bit_atomic(page_idx, cxl_state.cxl_visible_bmap);
+                }
+                if (cxl_state.warm_sent_bmap) {
+                    clear_bit_atomic(page_idx, cxl_state.warm_sent_bmap);
+                }
+                if (cxl_state.warm_dirty_bmap) {
+                    set_bit_atomic(page_idx, cxl_state.warm_dirty_bmap);
                 }
                 cxl_hybrid_ctrl_mark_page_dirty(page_idx, generation);
                 if (cxl_state.migrated_bmap &&
@@ -4409,6 +4416,64 @@ int cxl_hybrid_warm_push_iteration(MigrationState *s, Error **errp)
 
     cxl_hybrid_warm_sleep(sent);
     return sent;
+}
+
+bool cxl_hybrid_postcopy_source_drained(void)
+{
+    uint32_t generation;
+    size_t page_idx;
+
+    if (!cxl_state.hybrid_enabled ||
+        cxl_state.phase != CXL_HYBRID_PHASE_POSTCOPY_WARM ||
+        !cxl_state.remaining_bmap) {
+        return cxl_hybrid_control_source_drained();
+    }
+
+    generation = cxl_hybrid_fault_publish_generation();
+    page_idx = find_next_bit(cxl_state.remaining_bmap,
+                             cxl_state.total_pages, 0);
+    while (page_idx < cxl_state.total_pages) {
+        CXLHybridPageLocation location = CXL_HYBRID_PAGE_LOCATION_NONE;
+
+        if (cxl_hybrid_ctrl_page_location(page_idx, generation, &location)) {
+            if (location == CXL_HYBRID_PAGE_LOCATION_CXL) {
+                cxl_hybrid_mark_page_cxl_visible(page_idx);
+            } else {
+                cxl_hybrid_mark_page_not_remaining(page_idx);
+            }
+            page_idx = find_next_bit(cxl_state.remaining_bmap,
+                                     cxl_state.total_pages,
+                                     page_idx + 1);
+            continue;
+        }
+
+        if (cxl_hybrid_ctrl_page_requires_postcopy_discard(page_idx,
+                                                           generation)) {
+            return false;
+        }
+
+        if (!cxl_state.migrated_bmap ||
+            !test_bit(page_idx, cxl_state.migrated_bmap)) {
+            cxl_hybrid_mark_page_not_remaining(page_idx);
+            page_idx = find_next_bit(cxl_state.remaining_bmap,
+                                     cxl_state.total_pages,
+                                     page_idx + 1);
+            continue;
+        }
+
+        if (cxl_state.cxl_visible_bmap &&
+            test_bit(page_idx, cxl_state.cxl_visible_bmap)) {
+            cxl_hybrid_mark_page_cxl_visible(page_idx);
+            page_idx = find_next_bit(cxl_state.remaining_bmap,
+                                     cxl_state.total_pages,
+                                     page_idx + 1);
+            continue;
+        }
+
+        return false;
+    }
+
+    return cxl_hybrid_control_source_drained();
 }
 
 int cxl_hybrid_completion_publish_remaining_pages(MigrationState *s,

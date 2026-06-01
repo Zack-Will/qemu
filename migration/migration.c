@@ -2845,42 +2845,25 @@ static bool stop_return_path_thread_on_source(MigrationState *ms)
 static int migration_completion_finish_cxl_postcopy(MigrationState *ms,
                                                     Error **errp)
 {
-    int remaining_sent;
     int ret;
 
     if (!migration_postcopy_cxl_source_completion_ready(
             migrate_cxl_hybrid(), ms->state,
-            cxl_hybrid_phase() == CXL_HYBRID_PHASE_POSTCOPY_WARM, true)) {
+            cxl_hybrid_phase() == CXL_HYBRID_PHASE_POSTCOPY_WARM, true,
+            cxl_hybrid_postcopy_source_drained())) {
         return 0;
     }
 
     cxl_hybrid_ctrl_trace_page_state_snapshot("completion-prepare-begin");
     trace_cxl_hybrid_completion_prepare_begin();
-    remaining_sent = cxl_hybrid_completion_publish_remaining_pages(ms, errp);
-    if (remaining_sent < 0) {
-        trace_cxl_hybrid_completion_prepare_end(remaining_sent,
-                                                remaining_sent);
-        cxl_hybrid_ctrl_trace_page_state_snapshot("completion-prepare-error");
-        return remaining_sent;
-    }
-    if (migrate_cxl_fault_resolve_uses_region()) {
-        ret = cxl_hybrid_completion_publish_remaining_regions(errp);
-        if (ret < 0) {
-            trace_cxl_hybrid_completion_prepare_end(remaining_sent, ret);
-            cxl_hybrid_ctrl_trace_page_state_snapshot(
-                "completion-prepare-error");
-            return ret;
-        }
-    }
-
     ret = cxl_hybrid_control_complete_source_run(errp);
     if (ret < 0) {
-        trace_cxl_hybrid_completion_prepare_end(remaining_sent, ret);
+        trace_cxl_hybrid_completion_prepare_end(0, ret);
         cxl_hybrid_ctrl_trace_page_state_snapshot("completion-prepare-error");
         return ret;
     }
 
-    trace_cxl_hybrid_completion_prepare_end(remaining_sent, 0);
+    trace_cxl_hybrid_completion_prepare_end(0, 0);
     cxl_hybrid_ctrl_trace_page_state_snapshot("completion-prepare-end");
     return 0;
 }
@@ -3816,6 +3799,7 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                         s->state == MIGRATION_STATUS_POSTCOPY_ACTIVE);
     bool can_switchover = migration_can_switchover(s);
     bool complete_ready;
+    bool cxl_source_drained = true;
     MigIterateState ret = MIG_ITERATE_RESUME;
 
     if (migrate_cxl_hybrid()) {
@@ -3840,10 +3824,11 @@ static MigIterateState migration_iteration_run(MigrationState *s)
          */
         complete_ready = !pending_size;
         if (migrate_cxl_hybrid()) {
+            cxl_source_drained = cxl_hybrid_postcopy_source_drained();
             complete_ready = migration_postcopy_cxl_source_completion_ready(
                 migrate_cxl_hybrid(), s->state,
                 cxl_hybrid_phase() == CXL_HYBRID_PHASE_POSTCOPY_WARM,
-                complete_ready);
+                complete_ready, cxl_source_drained);
         }
         if (migration_postcopy_device_should_wait_for_package_loaded(
                 s->state, migrate_cxl_hybrid(),
@@ -3851,10 +3836,13 @@ static MigIterateState migration_iteration_run(MigrationState *s)
             if (migration_postcopy_device_can_pipeline_before_package_loaded(
                     s->state, migrate_cxl_hybrid(), s->postcopy_package_loaded,
                     pending_size,
-                    s->cxl_hybrid_postcopy_device_pipeline_started)) {
-                s->cxl_hybrid_postcopy_device_pipeline_started = true;
-                migration_trace_postcopy_timeline(
-                    s, "device-pipeline-before-package", pending_size);
+                    s->cxl_hybrid_postcopy_device_pipeline_started) ||
+                !cxl_source_drained) {
+                if (!s->cxl_hybrid_postcopy_device_pipeline_started) {
+                    s->cxl_hybrid_postcopy_device_pipeline_started = true;
+                    migration_trace_postcopy_timeline(
+                        s, "device-pipeline-before-package", pending_size);
+                }
             } else {
                 ret = migration_wait_for_postcopy_package_loaded(s,
                                                                  pending_size);

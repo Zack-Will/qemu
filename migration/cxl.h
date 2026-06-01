@@ -803,6 +803,7 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
                                    uint64_t *cxl_offsetp,
                                    Error **errp);
 void cxl_hybrid_note_cxl_worker_page_visible(uint64_t page_index);
+bool cxl_hybrid_postcopy_source_drained(void);
 int cxl_hybrid_begin_source_run_with_precopy_remaps(Error **errp);
 int cxl_hybrid_publish_staged_pages_for_postcopy(Error **errp);
 void cxl_hybrid_iteration_snapshot_begin(uint64_t ram_pages);
@@ -818,6 +819,7 @@ bool cxl_hybrid_lookup_global_page(size_t page_index,
 int cxl_hybrid_control_init_source(Error **errp);
 int cxl_hybrid_control_init_destination(Error **errp);
 int cxl_hybrid_control_begin_source_run(Error **errp);
+bool cxl_hybrid_control_source_drained(void);
 int cxl_hybrid_control_complete_source_run(Error **errp);
 bool cxl_hybrid_control_source_run_completed(uint32_t generation);
 int cxl_hybrid_control_activate_destination(Error **errp);
