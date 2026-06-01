@@ -558,6 +558,8 @@ static void cxl_hybrid_shadow_classify_bulk_page(RAMState *rs,
                                              pss->page << TARGET_PAGE_BITS);
 }
 
+#define CXL_HYBRID_CXL_BULK_MAX_PAGES 1024
+
 static int cxl_hybrid_cxl_enqueue_bulk_page(RAMState *rs,
                                             PageSearchStatus *pss)
 {
@@ -568,15 +570,28 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(RAMState *rs,
     uint64_t cxl_offset;
     uint64_t page_index;
     uint32_t generation;
+    uint32_t batch_pages;
+    uint32_t enqueued_pages;
+    unsigned long block_pages;
+    unsigned long scan_limit;
+    unsigned long dirty_end;
+    uint64_t max_pages;
+    uint64_t region_pages;
+    bool postcopy;
 
     if (!rs || !pss || !migrate_cxl_hybrid() ||
-        postcopy_preempt_active() || migration_in_postcopy()) {
+        postcopy_preempt_active()) {
+        return 0;
+    }
+    postcopy = migration_in_postcopy();
+    if (!test_bit(pss->page, pss->block->bmap)) {
         return 0;
     }
 
     block_offset = ((ram_addr_t)pss->page) << TARGET_PAGE_BITS;
     region_len = cxl_hybrid_fault_region_granule();
     if (!region_len ||
+        !QEMU_IS_ALIGNED(region_len, TARGET_PAGE_SIZE) ||
         !cxl_hybrid_global_page_offset(pss->block, block_offset,
                                        TARGET_PAGE_SIZE, &global_offset) ||
         !cxl_hybrid_source_page_cxl_offset(pss->block->idstr, block_offset,
@@ -585,7 +600,8 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(RAMState *rs,
     }
 
     region_index = global_offset / region_len;
-    if (cxl_hybrid_scheduler_choose_bulk_lane(
+    if (!postcopy &&
+        cxl_hybrid_scheduler_choose_bulk_lane(
             &(CXLHybridSchedulerPolicy) {
                 .rdma_budget_pages = 1,
                 .cxl_background_pages = 1,
@@ -596,18 +612,50 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(RAMState *rs,
 
     page_index = global_offset >> TARGET_PAGE_BITS;
     generation = cxl_hybrid_fault_publish_generation();
-    cxl_hybrid_ctrl_mark_page_dirty(page_index, generation);
-    if (!cxl_hybrid_ctrl_enqueue_cxl_page(pss->block, block_offset,
-                                          page_index, cxl_offset, generation,
-                                          CXL_HYBRID_TRANSFER_CXL_LOW)) {
+    block_pages = pss->block->used_length >> TARGET_PAGE_BITS;
+    max_pages = MIN((uint64_t)(block_pages - pss->page),
+                    (uint64_t)CXL_HYBRID_CXL_BULK_MAX_PAGES);
+    if (!postcopy) {
+        region_pages = (region_len - (global_offset % region_len)) >>
+                       TARGET_PAGE_BITS;
+        max_pages = MIN(max_pages, region_pages);
+    }
+    if (!max_pages || max_pages > ULONG_MAX - pss->page) {
         return 0;
     }
 
-    cxl_hybrid_invalidate_rdma_ready_region_for_page(pss->block,
-                                                     block_offset);
-    migration_bitmap_clear_dirty(rs, pss->block, pss->page);
-    pss->page++;
-    return 1;
+    scan_limit = pss->page + (unsigned long)max_pages;
+    dirty_end = find_next_zero_bit(pss->block->bmap, scan_limit, pss->page);
+    batch_pages = dirty_end - pss->page;
+    if (!batch_pages) {
+        return 0;
+    }
+
+    cxl_hybrid_ctrl_mark_dirty_pages(pss->block->bmap, pss->page, page_index,
+                                     batch_pages, generation);
+    enqueued_pages = cxl_hybrid_ctrl_enqueue_cxl_pages(
+        pss->block, block_offset, page_index, cxl_offset, generation,
+        CXL_HYBRID_TRANSFER_CXL_LOW, batch_pages);
+    if (!enqueued_pages) {
+        return 0;
+    }
+
+    for (uint32_t page = 0; page < enqueued_pages;) {
+        ram_addr_t offset = block_offset + (ram_addr_t)page * TARGET_PAGE_SIZE;
+        uint32_t pages_in_region = postcopy ?
+            ((region_len - ((global_offset +
+                             (uint64_t)page * TARGET_PAGE_SIZE) %
+                            region_len)) >> TARGET_PAGE_BITS) :
+            enqueued_pages;
+
+        cxl_hybrid_invalidate_rdma_ready_region_for_page(pss->block, offset);
+        page += MAX(pages_in_region, 1);
+    }
+    for (uint32_t page = 0; page < enqueued_pages; page++) {
+        migration_bitmap_clear_dirty(rs, pss->block, pss->page + page);
+    }
+    pss->page += enqueued_pages;
+    return enqueued_pages;
 }
 
 static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,

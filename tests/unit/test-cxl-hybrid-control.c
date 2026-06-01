@@ -1863,6 +1863,55 @@ static void test_transfer_queue_pop_cxl_batch_stops_before_gap(void)
     cxl_hybrid_transfer_queue_destroy_for_test(&queue);
 }
 
+static void test_transfer_queue_push_batch_preserves_cxl_order(void)
+{
+    CXLHybridTransferQueue queue;
+    CXLHybridPageDescriptor in[3] = {
+        {
+            .block_offset = 30 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .page_index = 30,
+            .cxl_offset = 130 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .generation = 11,
+            .nr_pages = 1,
+            .has_claim = true,
+        },
+        {
+            .block_offset = 31 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .page_index = 31,
+            .cxl_offset = 131 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .generation = 11,
+            .nr_pages = 1,
+            .has_claim = true,
+        },
+        {
+            .block_offset = 32 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .page_index = 32,
+            .cxl_offset = 132 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .generation = 11,
+            .nr_pages = 1,
+            .has_claim = true,
+        },
+    };
+    CXLHybridPageDescriptor out[3] = { 0 };
+    CXLHybridTransferClass klass = CXL_HYBRID_TRANSFER_CLASS_COUNT;
+    uint32_t count;
+
+    cxl_hybrid_transfer_queue_init_for_test(&queue);
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_push_batch(
+                         &queue, CXL_HYBRID_TRANSFER_CXL_LOW, in,
+                         G_N_ELEMENTS(in)), ==, 3);
+
+    count = cxl_hybrid_transfer_queue_pop_cxl_batch(
+        &queue, out, G_N_ELEMENTS(out), &klass);
+    g_assert_cmpuint(count, ==, 3);
+    g_assert_cmpuint(klass, ==, CXL_HYBRID_TRANSFER_CXL_LOW);
+    g_assert_cmpuint(out[0].page_index, ==, 30);
+    g_assert_cmpuint(out[1].page_index, ==, 31);
+    g_assert_cmpuint(out[2].page_index, ==, 32);
+
+    cxl_hybrid_transfer_queue_destroy_for_test(&queue);
+}
+
 static void test_transfer_queue_preserves_cxl_claim(void)
 {
     CXLHybridTransferQueue queue;
@@ -2058,6 +2107,8 @@ int main(int argc, char **argv)
                     test_transfer_queue_pop_cxl_batch_merges_adjacent_lane_pages);
     g_test_add_func("/cxl-hybrid-control/transfer-queue-pop-cxl-batch-stops-before-gap",
                     test_transfer_queue_pop_cxl_batch_stops_before_gap);
+    g_test_add_func("/cxl-hybrid-control/transfer-queue-push-batch-preserves-cxl-order",
+                    test_transfer_queue_push_batch_preserves_cxl_order);
     g_test_add_func("/cxl-hybrid-control/transfer-queue-preserves-cxl-claim",
                     test_transfer_queue_preserves_cxl_claim);
     return g_test_run();

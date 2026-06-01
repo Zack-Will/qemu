@@ -33,6 +33,34 @@ static void test_hybrid_postcopy_active_does_not_wait_for_package_loaded(void)
         MIGRATION_STATUS_POSTCOPY_ACTIVE, true, false));
 }
 
+static void test_hybrid_postcopy_device_pipelines_pending_once_before_package(void)
+{
+    g_assert_true(
+        migration_postcopy_device_can_pipeline_before_package_loaded(
+            MIGRATION_STATUS_POSTCOPY_DEVICE, true, false, 4096, false));
+}
+
+static void test_hybrid_postcopy_device_pipeline_requires_pending(void)
+{
+    g_assert_false(
+        migration_postcopy_device_can_pipeline_before_package_loaded(
+            MIGRATION_STATUS_POSTCOPY_DEVICE, true, false, 0, false));
+}
+
+static void test_hybrid_postcopy_device_pipeline_only_once(void)
+{
+    g_assert_false(
+        migration_postcopy_device_can_pipeline_before_package_loaded(
+            MIGRATION_STATUS_POSTCOPY_DEVICE, true, false, 4096, true));
+}
+
+static void test_hybrid_postcopy_device_pipeline_stops_after_package_loaded(void)
+{
+    g_assert_false(
+        migration_postcopy_device_can_pipeline_before_package_loaded(
+            MIGRATION_STATUS_POSTCOPY_DEVICE, true, true, 4096, false));
+}
+
 static void test_hybrid_mapped_cxl_ram_stream_publishes_after_data_save(void)
 {
     g_assert_true(migration_postcopy_ram_stream_should_publish_cxl_visible(
@@ -208,6 +236,14 @@ int main(int argc, char **argv)
                     test_native_postcopy_device_does_not_wait_for_package_loaded);
     g_test_add_func("/migration/postcopy/hybrid-active-does-not-wait-for-package-loaded",
                     test_hybrid_postcopy_active_does_not_wait_for_package_loaded);
+    g_test_add_func("/migration/postcopy/hybrid-device-pipelines-pending-once-before-package",
+                    test_hybrid_postcopy_device_pipelines_pending_once_before_package);
+    g_test_add_func("/migration/postcopy/hybrid-device-pipeline-requires-pending",
+                    test_hybrid_postcopy_device_pipeline_requires_pending);
+    g_test_add_func("/migration/postcopy/hybrid-device-pipeline-only-once",
+                    test_hybrid_postcopy_device_pipeline_only_once);
+    g_test_add_func("/migration/postcopy/hybrid-device-pipeline-stops-after-package-loaded",
+                    test_hybrid_postcopy_device_pipeline_stops_after_package_loaded);
     g_test_add_func("/migration/postcopy/hybrid-mapped-cxl-ram-stream-publishes-after-data-save",
                     test_hybrid_mapped_cxl_ram_stream_publishes_after_data_save);
     g_test_add_func("/migration/postcopy/ram-stream-does-not-publish-cxl-visible-before-data-save",

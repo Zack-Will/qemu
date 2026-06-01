@@ -146,6 +146,7 @@ struct MigrationIncomingState {
     /* To notify the fault_thread to wake, e.g., when need to quit */
     int       userfault_event_fd;
     QEMUFile *to_src_file;
+    bool           rp_shut_sent;
     QemuMutex rp_mutex;    /* We send replies from multiple threads */
     /* RAMBlock of last request sent to source */
     RAMBlock *last_rb;
@@ -274,6 +275,7 @@ struct MigrationIncomingState {
 };
 
 MigrationIncomingState *migration_incoming_get_current(void);
+void migration_incoming_send_rp_shut_once(MigrationIncomingState *mis);
 void migration_incoming_state_destroy(void);
 void migration_incoming_transport_cleanup(MigrationIncomingState *mis);
 void migration_incoming_qemu_exit(void);
@@ -406,6 +408,7 @@ struct MigrationState {
     bool start_postcopy;
     /* Flag set when start_postcopy was requested by hybrid policy */
     bool start_postcopy_auto;
+    bool cxl_hybrid_postcopy_device_pipeline_started;
     uint64_t cxl_hybrid_iteration;
     uint64_t cxl_hybrid_prev_remaining;
     int64_t cxl_hybrid_precopy_start_ms;

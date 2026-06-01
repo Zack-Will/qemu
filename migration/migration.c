@@ -748,8 +748,7 @@ void migration_incoming_state_destroy(void)
     qemu_loadvm_state_cleanup(mis);
 
     if (mis->to_src_file) {
-        /* Tell source that we are done */
-        migrate_send_rp_shut(mis, qemu_file_get_error(mis->from_src_file) != 0);
+        migration_incoming_send_rp_shut_once(mis);
         qemu_fclose(mis->to_src_file);
         mis->to_src_file = NULL;
     }
@@ -1238,8 +1237,31 @@ void migrate_send_rp_shut(MigrationIncomingState *mis,
 {
     uint32_t buf;
 
+    if (!mis) {
+        return;
+    }
+
+    QEMU_LOCK_GUARD(&mis->rp_mutex);
+    if (!mis->to_src_file || mis->rp_shut_sent) {
+        return;
+    }
+
     buf = cpu_to_be32(value);
-    migrate_send_rp_message(mis, MIG_RP_MSG_SHUT, sizeof(buf), &buf);
+    migrate_send_rp_message_locked(mis, MIG_RP_MSG_SHUT, sizeof(buf), &buf);
+    mis->rp_shut_sent = true;
+}
+
+void migration_incoming_send_rp_shut_once(MigrationIncomingState *mis)
+{
+    uint32_t value;
+
+    if (!mis) {
+        return;
+    }
+
+    value = mis->from_src_file ?
+        qemu_file_get_error(mis->from_src_file) != 0 : 0;
+    migrate_send_rp_shut(mis, value);
 }
 
 /*
@@ -3115,6 +3137,7 @@ static int postcopy_start(MigrationState *ms, Error **errp)
      * user specified.
      */
     migration_rate_set(migrate_max_postcopy_bandwidth());
+    ms->cxl_hybrid_postcopy_device_pipeline_started = false;
 
     /*
      * Now, switchover looks all fine, switching to POSTCOPY_DEVICE, or
@@ -3306,6 +3329,7 @@ static void migration_completion(MigrationState *s)
 {
     int ret = 0;
     Error *local_err = NULL;
+    bool trace_return_path_stop = false;
 
     if (s->state == MIGRATION_STATUS_ACTIVE) {
         ret = migration_completion_precopy(s);
@@ -3333,6 +3357,7 @@ static void migration_completion(MigrationState *s)
             migration_trace_postcopy_timeline(s, "completion-prepare-done",
                                               UINT64_MAX);
         }
+        trace_return_path_stop = true;
     } else {
         ret = -1;
     }
@@ -3341,8 +3366,16 @@ static void migration_completion(MigrationState *s)
         goto fail;
     }
 
+    if (trace_return_path_stop) {
+        migration_trace_postcopy_timeline(s, "return-path-stop-begin",
+                                          UINT64_MAX);
+    }
     if (stop_return_path_thread_on_source(s)) {
         goto fail;
+    }
+    if (trace_return_path_stop) {
+        migration_trace_postcopy_timeline(s, "return-path-stop-end",
+                                          UINT64_MAX);
     }
 
     if (qemu_file_get_error(s->to_dst_file)) {
@@ -3806,13 +3839,28 @@ static MigIterateState migration_iteration_run(MigrationState *s)
          * POSTCOPY_ACTIVE it means switchover already happened.
          */
         complete_ready = !pending_size;
+        if (migrate_cxl_hybrid()) {
+            complete_ready = migration_postcopy_cxl_source_completion_ready(
+                migrate_cxl_hybrid(), s->state,
+                cxl_hybrid_phase() == CXL_HYBRID_PHASE_POSTCOPY_WARM,
+                complete_ready);
+        }
         if (migration_postcopy_device_should_wait_for_package_loaded(
                 s->state, migrate_cxl_hybrid(),
                 s->postcopy_package_loaded)) {
-            ret = migration_wait_for_postcopy_package_loaded(s,
-                                                             pending_size);
-            if (ret != MIG_ITERATE_RESUME) {
-                goto out;
+            if (migration_postcopy_device_can_pipeline_before_package_loaded(
+                    s->state, migrate_cxl_hybrid(), s->postcopy_package_loaded,
+                    pending_size,
+                    s->cxl_hybrid_postcopy_device_pipeline_started)) {
+                s->cxl_hybrid_postcopy_device_pipeline_started = true;
+                migration_trace_postcopy_timeline(
+                    s, "device-pipeline-before-package", pending_size);
+            } else {
+                ret = migration_wait_for_postcopy_package_loaded(s,
+                                                                 pending_size);
+                if (ret != MIG_ITERATE_RESUME) {
+                    goto out;
+                }
             }
         }
         if (ret == MIG_ITERATE_RESUME && migrate_has_error(s)) {

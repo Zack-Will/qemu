@@ -13,7 +13,7 @@
 #include "system/ramblock.h"
 #include "trace.h"
 
-#define CXL_HYBRID_CXL_WORKER_MAX_BATCH 64
+#define CXL_HYBRID_CXL_WORKER_MAX_BATCH 1024
 
 typedef struct CXLHybridControlRegion {
     void *map_base;
@@ -549,29 +549,59 @@ static void cxl_hybrid_ctrl_enqueue_fault_region_prefetch(
     uint32_t generation)
 {
     uint64_t end_page;
+    uint64_t page;
 
     if (!plan || !plan->prefetch_nr_pages) {
         return;
     }
 
     end_page = plan->prefetch_first_page + plan->prefetch_nr_pages;
-    for (uint64_t page = plan->prefetch_first_page; page < end_page; page++) {
-        RAMBlock *prefetch_block;
-        ram_addr_t prefetch_offset;
-        uint64_t cxl_offset;
+    for (page = plan->prefetch_first_page; page < end_page; ) {
+        RAMBlock *span_block;
+        ram_addr_t span_offset;
+        uint64_t span_cxl_offset;
+        uint32_t span_pages;
+        uint32_t enqueued;
 
-        if (page == plan->prefetch_skip_page ||
-            !cxl_hybrid_lookup_global_page(page, &prefetch_block,
-                                           &prefetch_offset) ||
-            !cxl_hybrid_source_page_cxl_offset(
-                qemu_ram_get_idstr(prefetch_block), prefetch_offset,
-                &cxl_offset)) {
+        if (page == plan->prefetch_skip_page) {
+            page++;
             continue;
         }
 
-        cxl_hybrid_ctrl_enqueue_cxl_page(prefetch_block, prefetch_offset, page,
-                                         cxl_offset, generation,
-                                         CXL_HYBRID_TRANSFER_CXL_HIGH);
+        if (!cxl_hybrid_lookup_global_page(page, &span_block, &span_offset) ||
+            !cxl_hybrid_source_page_cxl_offset(
+                qemu_ram_get_idstr(span_block), span_offset,
+                &span_cxl_offset)) {
+            page++;
+            continue;
+        }
+
+        span_pages = 1;
+        while (page + span_pages < end_page && span_pages < UINT32_MAX) {
+            RAMBlock *next_block;
+            ram_addr_t next_offset;
+            uint64_t next_cxl_offset;
+
+            if (page + span_pages == plan->prefetch_skip_page ||
+                !cxl_hybrid_lookup_global_page(page + span_pages, &next_block,
+                                               &next_offset) ||
+                !cxl_hybrid_source_page_cxl_offset(
+                    qemu_ram_get_idstr(next_block), next_offset,
+                    &next_cxl_offset) ||
+                next_block != span_block ||
+                next_offset != span_offset +
+                               (ram_addr_t)span_pages * TARGET_PAGE_SIZE ||
+                next_cxl_offset != span_cxl_offset +
+                                   (uint64_t)span_pages * TARGET_PAGE_SIZE) {
+                break;
+            }
+            span_pages++;
+        }
+
+        enqueued = cxl_hybrid_ctrl_enqueue_cxl_pages(
+            span_block, span_offset, page, span_cxl_offset, generation,
+            CXL_HYBRID_TRANSFER_CXL_HIGH, span_pages);
+        page += enqueued ? enqueued : 1;
     }
 }
 
@@ -749,7 +779,9 @@ static bool cxl_hybrid_ctrl_process_cxl_descriptor(
     completed = cxl_hybrid_control_complete_cxl_page_visible_generation(
         state->hdr, state->visible_bitmap, state->page_state,
         desc->page_index, desc->generation, &desc->claim);
-    if (!completed) {
+    if (completed) {
+        cxl_hybrid_note_cxl_worker_page_visible(desc->page_index);
+    } else {
         cxl_hybrid_ctrl_drop_cxl_descriptor(state, desc);
     }
     return completed;
@@ -850,7 +882,9 @@ static void cxl_hybrid_ctrl_process_cxl_batch(
         completed[i] = cxl_hybrid_control_complete_cxl_page_visible_generation(
             state->hdr, state->visible_bitmap, state->page_state,
             descs[i].page_index, descs[i].generation, &descs[i].claim);
-        if (!completed[i]) {
+        if (completed[i]) {
+            cxl_hybrid_note_cxl_worker_page_visible(descs[i].page_index);
+        } else {
             cxl_hybrid_ctrl_drop_cxl_descriptor(state, &descs[i]);
         }
     }
@@ -1508,34 +1542,76 @@ bool cxl_hybrid_ctrl_enqueue_cxl_page(RAMBlock *block,
                                       uint32_t generation,
                                       CXLHybridTransferClass klass)
 {
+    return cxl_hybrid_ctrl_enqueue_cxl_pages(block, block_offset, page_index,
+                                             cxl_offset, generation, klass,
+                                             1) == 1;
+}
+
+uint32_t cxl_hybrid_ctrl_enqueue_cxl_pages(RAMBlock *block,
+                                           ram_addr_t block_offset,
+                                           uint64_t first_page_index,
+                                           uint64_t cxl_offset,
+                                           uint32_t generation,
+                                           CXLHybridTransferClass klass,
+                                           uint32_t nr_pages)
+{
     CXLHybridControlState *state = &cxl_hybrid_control_source;
-    CXLHybridPageDescriptor desc = {
-        .block = block,
-        .block_offset = block_offset,
-        .page_index = page_index,
-        .cxl_offset = cxl_offset,
-        .generation = generation,
-        .nr_pages = 1,
-    };
+    CXLHybridPageDescriptor *descs;
+    uint32_t claimed = 0;
+    uint32_t pushed;
 
     if (!state->hdr || !state->page_state || !state->transfer_queue.lock_ready ||
-        page_index >= state->page_state_words ||
+        !nr_pages || first_page_index >= state->page_state_words ||
+        nr_pages > state->page_state_words - first_page_index ||
         (klass != CXL_HYBRID_TRANSFER_CXL_HIGH &&
          klass != CXL_HYBRID_TRANSFER_CXL_LOW) ||
         !cxl_hybrid_control_generation_matches(state->hdr, generation) ||
         cxl_hybrid_ctrl_state_quiescing(state, generation)) {
-        return false;
+        return 0;
     }
 
-    if (!cxl_hybrid_page_state_claim_for_cxl(&state->page_state[page_index],
-                                             generation, &desc.claim)) {
-        return false;
+    descs = g_new0(CXLHybridPageDescriptor, nr_pages);
+    for (uint32_t i = 0; i < nr_pages; i++) {
+        CXLHybridPageDescriptor *desc = &descs[i];
+
+        desc->block = block;
+        desc->block_offset = block_offset + (ram_addr_t)i * TARGET_PAGE_SIZE;
+        desc->page_index = first_page_index + i;
+        desc->cxl_offset = cxl_offset + (uint64_t)i * TARGET_PAGE_SIZE;
+        desc->generation = generation;
+        desc->nr_pages = 1;
+        if (!cxl_hybrid_page_state_claim_for_cxl(
+                &state->page_state[desc->page_index], generation,
+                &desc->claim)) {
+            break;
+        }
+        desc->has_claim = true;
+        claimed++;
     }
-    desc.has_claim = true;
-    cxl_hybrid_transfer_queue_push(&state->transfer_queue, klass, &desc);
-    trace_cxl_hybrid_cxl_worker_enqueue(
-        cxl_hybrid_ctrl_now_ns(), page_index, generation, (uint32_t)klass);
-    return true;
+
+    if (!claimed) {
+        g_free(descs);
+        return 0;
+    }
+
+    pushed = cxl_hybrid_transfer_queue_push_batch(&state->transfer_queue, klass,
+                                                  descs, claimed);
+    if (pushed != claimed) {
+        for (uint32_t i = 0; i < claimed; i++) {
+            cxl_hybrid_page_state_drop_claim(
+                &state->page_state[descs[i].page_index], &descs[i].claim);
+        }
+        g_free(descs);
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < claimed; i++) {
+        trace_cxl_hybrid_cxl_worker_enqueue(
+            cxl_hybrid_ctrl_now_ns(), descs[i].page_index, generation,
+            (uint32_t)klass);
+    }
+    g_free(descs);
+    return claimed;
 }
 
 bool cxl_hybrid_ctrl_claim_rdma_pages(CXLHybridRDMAPageDescriptor *desc,

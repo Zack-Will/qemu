@@ -19,6 +19,20 @@ bool migration_postcopy_device_should_wait_for_package_loaded(
            !package_loaded;
 }
 
+bool migration_postcopy_device_can_pipeline_before_package_loaded(
+    MigrationStatus state,
+    bool hybrid_mode,
+    bool package_loaded,
+    uint64_t pending_size,
+    bool pipeline_started)
+{
+    return hybrid_mode &&
+           state == MIGRATION_STATUS_POSTCOPY_DEVICE &&
+           !package_loaded &&
+           pending_size > 0 &&
+           !pipeline_started;
+}
+
 bool migration_postcopy_ram_stream_should_publish_cxl_visible(
     bool in_postcopy,
     bool hybrid_mode,

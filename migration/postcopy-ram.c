@@ -2409,6 +2409,7 @@ static void *postcopy_listen_thread(void *opaque)
      */
     migrate_set_state(&mis->state, MIGRATION_STATUS_POSTCOPY_ACTIVE,
                                    MIGRATION_STATUS_COMPLETED);
+    migration_incoming_send_rp_shut_once(mis);
 
 out:
     rcu_unregister_thread();

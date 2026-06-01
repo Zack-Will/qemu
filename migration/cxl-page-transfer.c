@@ -152,18 +152,36 @@ void cxl_hybrid_transfer_queue_push(CXLHybridTransferQueue *queue,
                                     CXLHybridTransferClass klass,
                                     const CXLHybridPageDescriptor *desc)
 {
-    CXLHybridPageDescriptor *copy;
+    cxl_hybrid_transfer_queue_push_batch(queue, klass, desc, 1);
+}
 
-    if (!queue || !queue->lock_ready || !desc || (int)klass < 0 ||
+uint32_t cxl_hybrid_transfer_queue_push_batch(
+    CXLHybridTransferQueue *queue,
+    CXLHybridTransferClass klass,
+    const CXLHybridPageDescriptor *descs,
+    uint32_t count)
+{
+    CXLHybridPageDescriptor **copies;
+
+    if (!queue || !queue->lock_ready || !descs || !count || (int)klass < 0 ||
         klass >= CXL_HYBRID_TRANSFER_CLASS_COUNT) {
-        return;
+        return 0;
     }
 
-    copy = g_new(CXLHybridPageDescriptor, 1);
-    *copy = *desc;
+    copies = g_new(CXLHybridPageDescriptor *, count);
+    for (uint32_t i = 0; i < count; i++) {
+        copies[i] = g_new(CXLHybridPageDescriptor, 1);
+        *copies[i] = descs[i];
+    }
+
     qemu_mutex_lock(&queue->lock);
-    g_queue_push_tail(&queue->classes[klass], copy);
+    for (uint32_t i = 0; i < count; i++) {
+        g_queue_push_tail(&queue->classes[klass], copies[i]);
+    }
     qemu_mutex_unlock(&queue->lock);
+
+    g_free(copies);
+    return count;
 }
 
 bool cxl_hybrid_transfer_queue_pop(CXLHybridTransferQueue *queue,

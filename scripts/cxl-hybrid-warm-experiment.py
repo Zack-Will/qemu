@@ -57,6 +57,144 @@ DEFAULT_MIGRATION_TIMEOUT_SECS = 60.0
 POSTCOPY_START_RETRY_TIMEOUT_SECS = 0.5
 DEFAULT_RDMA_HOST = "10.0.0.2"
 DEFAULT_RDMA_PORT = 4444
+FULL_TRACE_EVENTS = (
+    "cxl_hybrid_warm_page_skip_received",
+    "cxl_hybrid_warm_page_skip_unstaged",
+    "cxl_hybrid_warm_page_queued",
+    "cxl_hybrid_fault_hit",
+    "cxl_hybrid_fault_place",
+    "cxl_hybrid_fault_miss",
+    "cxl_hybrid_publish_request_send",
+    "cxl_hybrid_publish_request_recv",
+    "cxl_hybrid_completion_prepare_begin",
+    "cxl_hybrid_completion_prepare_end",
+    "cxl_hybrid_publish_wait_begin",
+    "cxl_hybrid_publish_wait_complete",
+    "cxl_hybrid_region_publish_complete",
+    "cxl_hybrid_rdma_bulk_region",
+    "cxl_hybrid_rdma_bulk_skip",
+    "cxl_rdma_sidecar_connect_start",
+    "cxl_rdma_sidecar_connect_complete",
+    "cxl_rdma_sidecar_register",
+    "cxl_rdma_sidecar_failed",
+    "cxl_rdma_sidecar_schedule",
+    "cxl_rdma_sidecar_post",
+    "cxl_rdma_sidecar_complete",
+    "cxl_rdma_sidecar_stale",
+    "cxl_hybrid_rdma_ready",
+    "cxl_hybrid_rdma_invalidate",
+    "cxl_hybrid_rdma_cxl_republish",
+    "cxl_hybrid_region_wait_begin",
+    "cxl_hybrid_region_wait_begin_ts",
+    "cxl_hybrid_region_wait_complete",
+    "cxl_hybrid_region_wait_complete_ts",
+    "cxl_hybrid_dst_region_remap",
+    "cxl_hybrid_dst_region_remap_ts",
+    "cxl_hybrid_ram_stream_publish_span",
+    "cxl_hybrid_page_state_snapshot_summary",
+    "cxl_hybrid_page_state_snapshot_state",
+    "cxl_hybrid_page_state_snapshot_runtime",
+    "cxl_hybrid_cxl_worker_enqueue",
+    "cxl_hybrid_cxl_worker_complete",
+    "cxl_hybrid_region_request_enqueue",
+    "cxl_hybrid_region_request_dequeue",
+    "postcopy_ram_fault_thread_request",
+    "postcopy_ram_fault_thread_request_ts",
+    "postcopy_page_req_add",
+    "postcopy_page_req_add_ts",
+    "postcopy_page_req_del",
+    "postcopy_page_req_del_ts",
+    "postcopy_discard_send_range",
+    "qemu_savevm_send_postcopy_ram_discard",
+    "loadvm_postcopy_ram_handle_discard_header",
+    "ram_discard_range",
+    "postcopy_request_shared_page",
+    "postcopy_request_shared_page_present",
+    "ram_save_queue_pages",
+    "get_queued_page",
+    "get_queued_page_not_dirty",
+    "cxl_hybrid_phase_transition",
+    "cxl_hybrid_iteration_profile",
+    "cxl_hybrid_iteration_profile_ts",
+    "cxl_hybrid_ram_iterate_profile_time",
+    "cxl_hybrid_ram_iterate_profile_count",
+    "cxl_hybrid_ram_iterate_profile_scan",
+    "cxl_hybrid_remap_drain_profile",
+    "cxl_hybrid_clean_remap_scan_summary_ts",
+    "cxl_hybrid_clean_remap_copy_begin_ts",
+    "cxl_hybrid_clean_remap_copy_end_ts",
+    "cxl_hybrid_clean_remap_throttle_begin",
+    "cxl_hybrid_clean_remap_throttle_end",
+    "memory_notdirty_write_access",
+    "memory_notdirty_set_dirty",
+    "cxl_hybrid_switch_policy",
+    "migrate_pending_estimate",
+    "migrate_pending_exact",
+    "migration_precopy_timeline",
+    "migration_postcopy_timeline",
+    "postcopy_start",
+    "postcopy_start_set_run",
+    "migration_completion_postcopy_end",
+    "migration_completion_postcopy_end_after_complete",
+)
+MINIMAL_TRACE_EVENTS = (
+    "cxl_hybrid_publish_request_send",
+    "cxl_hybrid_publish_request_recv",
+    "cxl_hybrid_completion_prepare_begin",
+    "cxl_hybrid_completion_prepare_end",
+    "cxl_hybrid_publish_wait_begin",
+    "cxl_hybrid_publish_wait_complete",
+    "cxl_hybrid_region_publish_complete",
+    "cxl_hybrid_rdma_bulk_region",
+    "cxl_hybrid_rdma_bulk_skip",
+    "cxl_rdma_sidecar_connect_start",
+    "cxl_rdma_sidecar_connect_complete",
+    "cxl_rdma_sidecar_register",
+    "cxl_rdma_sidecar_failed",
+    "cxl_rdma_sidecar_schedule",
+    "cxl_rdma_sidecar_post",
+    "cxl_rdma_sidecar_complete",
+    "cxl_rdma_sidecar_stale",
+    "cxl_hybrid_rdma_ready",
+    "cxl_hybrid_rdma_invalidate",
+    "cxl_hybrid_rdma_cxl_republish",
+    "cxl_hybrid_region_wait_begin",
+    "cxl_hybrid_region_wait_begin_ts",
+    "cxl_hybrid_region_wait_complete",
+    "cxl_hybrid_region_wait_complete_ts",
+    "cxl_hybrid_dst_region_remap",
+    "cxl_hybrid_dst_region_remap_ts",
+    "cxl_hybrid_page_state_snapshot_summary",
+    "cxl_hybrid_page_state_snapshot_runtime",
+    "postcopy_discard_send_range",
+    "qemu_savevm_send_postcopy_ram_discard",
+    "loadvm_postcopy_ram_handle_discard_header",
+    "ram_discard_range",
+    "cxl_hybrid_phase_transition",
+    "cxl_hybrid_iteration_profile",
+    "cxl_hybrid_iteration_profile_ts",
+    "cxl_hybrid_ram_iterate_profile_time",
+    "cxl_hybrid_ram_iterate_profile_count",
+    "cxl_hybrid_ram_iterate_profile_scan",
+    "cxl_hybrid_remap_drain_profile",
+    "cxl_hybrid_switch_policy",
+    "migrate_pending_estimate",
+    "migrate_pending_exact",
+    "migration_precopy_timeline",
+    "migration_postcopy_timeline",
+    "postcopy_start",
+    "postcopy_start_set_run",
+    "migration_completion_postcopy_end",
+    "migration_completion_postcopy_end_after_complete",
+    "migration_return_path_end_before",
+    "migration_return_path_end_after",
+    "source_return_path_thread_shut",
+    "source_return_path_thread_end",
+)
+TRACE_PROFILES = {
+    "full": FULL_TRACE_EVENTS,
+    "minimal": MINIMAL_TRACE_EVENTS,
+}
 PERF_RECORD_SECS = 8
 FAULT_HIT_TRACE_RE = re.compile(
     r"\blen=(?P<len>\d+)\b.*\bread_time_ns=(?P<read_time_ns>\d+)\b"
@@ -1091,6 +1229,13 @@ def trace_count_template():
         "get_queued_page": 0,
         "get_queued_page_not_dirty": 0,
     }
+
+
+def trace_events_for_profile(profile):
+    try:
+        return list(TRACE_PROFILES[profile])
+    except KeyError as exc:
+        raise ValueError(f"unsupported trace profile: {profile}") from exc
 
 
 def parse_trace_log(trace_file: Path):
@@ -3220,7 +3365,8 @@ def run_case(base: Path, mode: str, pressure: str,
              gdb_dst=False,
              in_memory_guest_latency=False,
              in_memory_guest_latency_source_first=False,
-             post_complete_guest_run_ms=0):
+             post_complete_guest_run_ms=0,
+             trace_profile="full"):
     profile = threshold_profile or resolve_threshold_profile("balanced")
     if mode_uses_cxl_hybrid(mode):
         case_name = f"{mode}-{profile['name']}-run{run_index:02d}"
@@ -3265,86 +3411,7 @@ def run_case(base: Path, mode: str, pressure: str,
 
     trace_events = case_dir / "trace-events"
     trace_events.write_text(
-        "\n".join([
-            "cxl_hybrid_warm_page_skip_received",
-            "cxl_hybrid_warm_page_skip_unstaged",
-            "cxl_hybrid_warm_page_queued",
-            "cxl_hybrid_fault_hit",
-            "cxl_hybrid_fault_place",
-            "cxl_hybrid_fault_miss",
-            "cxl_hybrid_publish_request_send",
-            "cxl_hybrid_publish_request_recv",
-            "cxl_hybrid_completion_prepare_begin",
-            "cxl_hybrid_completion_prepare_end",
-            "cxl_hybrid_publish_wait_begin",
-            "cxl_hybrid_publish_wait_complete",
-            "cxl_hybrid_region_publish_complete",
-            "cxl_hybrid_rdma_bulk_region",
-            "cxl_hybrid_rdma_bulk_skip",
-            "cxl_rdma_sidecar_connect_start",
-            "cxl_rdma_sidecar_connect_complete",
-            "cxl_rdma_sidecar_register",
-            "cxl_rdma_sidecar_failed",
-            "cxl_rdma_sidecar_schedule",
-            "cxl_rdma_sidecar_post",
-            "cxl_rdma_sidecar_complete",
-            "cxl_rdma_sidecar_stale",
-            "cxl_hybrid_rdma_ready",
-            "cxl_hybrid_rdma_invalidate",
-            "cxl_hybrid_rdma_cxl_republish",
-            "cxl_hybrid_region_wait_begin",
-            "cxl_hybrid_region_wait_begin_ts",
-            "cxl_hybrid_region_wait_complete",
-            "cxl_hybrid_region_wait_complete_ts",
-            "cxl_hybrid_dst_region_remap",
-            "cxl_hybrid_dst_region_remap_ts",
-            "cxl_hybrid_ram_stream_publish_span",
-            "cxl_hybrid_page_state_snapshot_summary",
-            "cxl_hybrid_page_state_snapshot_state",
-            "cxl_hybrid_page_state_snapshot_runtime",
-            "cxl_hybrid_cxl_worker_enqueue",
-            "cxl_hybrid_cxl_worker_complete",
-            "cxl_hybrid_region_request_enqueue",
-            "cxl_hybrid_region_request_dequeue",
-            "postcopy_ram_fault_thread_request",
-            "postcopy_ram_fault_thread_request_ts",
-            "postcopy_page_req_add",
-            "postcopy_page_req_add_ts",
-            "postcopy_page_req_del",
-            "postcopy_page_req_del_ts",
-            "postcopy_discard_send_range",
-            "qemu_savevm_send_postcopy_ram_discard",
-            "loadvm_postcopy_ram_handle_discard_header",
-            "ram_discard_range",
-            "postcopy_request_shared_page",
-            "postcopy_request_shared_page_present",
-            "ram_save_queue_pages",
-            "get_queued_page",
-            "get_queued_page_not_dirty",
-            "cxl_hybrid_phase_transition",
-            "cxl_hybrid_iteration_profile",
-            "cxl_hybrid_iteration_profile_ts",
-            "cxl_hybrid_ram_iterate_profile_time",
-            "cxl_hybrid_ram_iterate_profile_count",
-            "cxl_hybrid_ram_iterate_profile_scan",
-            "cxl_hybrid_remap_drain_profile",
-            "cxl_hybrid_clean_remap_scan_summary_ts",
-            "cxl_hybrid_clean_remap_copy_begin_ts",
-            "cxl_hybrid_clean_remap_copy_end_ts",
-            "cxl_hybrid_clean_remap_throttle_begin",
-            "cxl_hybrid_clean_remap_throttle_end",
-            "memory_notdirty_write_access",
-            "memory_notdirty_set_dirty",
-            "cxl_hybrid_switch_policy",
-            "migrate_pending_estimate",
-            "migrate_pending_exact",
-            "migration_precopy_timeline",
-            "migration_postcopy_timeline",
-            "postcopy_start",
-            "postcopy_start_set_run",
-            "migration_completion_postcopy_end",
-            "migration_completion_postcopy_end_after_complete",
-        ]) + "\n",
+        "\n".join(trace_events_for_profile(trace_profile)) + "\n",
         encoding="ascii",
     )
 
@@ -4711,7 +4778,8 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                         gdb_dst=False,
                         in_memory_guest_latency=False,
                         in_memory_guest_latency_source_first=False,
-                        post_complete_guest_run_ms=0):
+                        post_complete_guest_run_ms=0,
+                        trace_profile="full"):
     results = {}
     summary = []
     summary_grouped = []
@@ -4761,6 +4829,8 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                     kwargs["post_complete_guest_run_ms"] = (
                         post_complete_guest_run_ms
                     )
+                if trace_profile != "full":
+                    kwargs["trace_profile"] = trace_profile
                 if switch_remap_coverage is not None:
                     kwargs["switch_remap_coverage"] = switch_remap_coverage
                 if clean_remap_enable:
@@ -4917,6 +4987,9 @@ def parse_args(argv=None):
                         help="Dump the in-memory latency log from source QMP first; source-side windows only")
     parser.add_argument("--post-complete-guest-run-ms", type=int, default=0,
                         help="Diagnostic delay before stopping the destination to dump guest logs")
+    parser.add_argument("--trace-profile", choices=tuple(TRACE_PROFILES),
+                        default="full",
+                        help="Trace event profile; minimal omits per-page dataplane traces")
     return parser.parse_args(argv)
 
 
@@ -5012,7 +5085,8 @@ def main():
                                      in_memory_guest_latency_source_first=
                                      args.in_memory_guest_latency_source_first,
                                      post_complete_guest_run_ms=
-                                     args.post_complete_guest_run_ms)
+                                     args.post_complete_guest_run_ms,
+                                     trace_profile=args.trace_profile)
         result = {
             "base_dir": str(base),
             **matrix,

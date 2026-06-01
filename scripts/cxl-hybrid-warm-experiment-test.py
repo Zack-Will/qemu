@@ -281,6 +281,147 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn(enqueue, fn_body)
         self.assertLess(fn_body.index(enqueue), fn_body.index(cxl_copy))
 
+    def test_postcopy_bulk_dirty_pages_route_to_cxl_worker_not_stream(self):
+        ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        helper_start = ram_source.index(
+            "static int cxl_hybrid_cxl_enqueue_bulk_page(")
+        helper_end = ram_source.index(
+            "static int cxl_hybrid_rdma_enqueue_bulk_region(",
+            helper_start)
+        helper_body = ram_source[helper_start:helper_end]
+
+        self.assertIn("postcopy = migration_in_postcopy();", helper_body)
+        self.assertNotIn(
+            "postcopy_preempt_active() || migration_in_postcopy()",
+            helper_body,
+        )
+        self.assertIn(
+            "if (!postcopy &&\n"
+            "        cxl_hybrid_scheduler_choose_bulk_lane(",
+            helper_body,
+        )
+
+    def test_cxl_bulk_scheduler_uses_batched_worker_enqueue(self):
+        ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
+        control_source = (
+            REPO_ROOT / "migration" / "cxl-hybrid-control.c").read_text()
+
+        helper_start = ram_source.index(
+            "static int cxl_hybrid_cxl_enqueue_bulk_page(")
+        helper_end = ram_source.index(
+            "static int cxl_hybrid_rdma_enqueue_bulk_region(",
+            helper_start)
+        helper_body = ram_source[helper_start:helper_end]
+
+        enqueue_start = control_source.index(
+            "uint32_t cxl_hybrid_ctrl_enqueue_cxl_pages(")
+        enqueue_end = control_source.index(
+            "bool cxl_hybrid_ctrl_claim_rdma_pages(",
+            enqueue_start)
+        enqueue_body = control_source[enqueue_start:enqueue_end]
+
+        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_pages(", helper_body)
+        self.assertNotIn("cxl_hybrid_ctrl_enqueue_cxl_page(", helper_body)
+        self.assertIn("cxl_hybrid_transfer_queue_push_batch(", enqueue_body)
+
+    def test_completion_remaining_pages_skip_page_state_visible_workers(self):
+        cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        helper_start = cxl_source.index(
+            "static int cxl_hybrid_completion_publish_remaining_page(")
+        helper_end = cxl_source.index(
+            "static size_t cxl_hybrid_pick_recent_miss_page(",
+            helper_start)
+        helper_body = cxl_source[helper_start:helper_end]
+
+        self.assertIn("cxl_hybrid_ctrl_page_location(", helper_body)
+        self.assertLess(
+            helper_body.index("cxl_hybrid_ctrl_page_location("),
+            helper_body.index("cxl_hybrid_ctrl_enqueue_cxl_page("),
+        )
+        self.assertIn("cxl_hybrid_ctrl_page_requires_postcopy_discard(",
+                      helper_body)
+        self.assertLess(
+            helper_body.index(
+                "cxl_hybrid_ctrl_page_requires_postcopy_discard("),
+            helper_body.index("cxl_hybrid_ctrl_enqueue_cxl_page("),
+        )
+        self.assertIn("cxl_hybrid_mark_page_not_remaining(page_idx);",
+                      helper_body)
+
+    def test_cxl_worker_completion_updates_local_remaining_bitmap(self):
+        control_source = (
+            REPO_ROOT / "migration" / "cxl-hybrid-control.c").read_text()
+
+        batch_start = control_source.index(
+            "static void cxl_hybrid_ctrl_process_cxl_batch(")
+        batch_end = control_source.index(
+            "static void *cxl_hybrid_ctrl_cxl_worker_thread(",
+            batch_start)
+        batch_body = control_source[batch_start:batch_end]
+
+        self.assertIn("cxl_hybrid_note_cxl_worker_page_visible(",
+                      batch_body)
+        self.assertLess(
+            batch_body.index("completed[i] ="),
+            batch_body.index("cxl_hybrid_note_cxl_worker_page_visible("),
+        )
+
+    def test_cxl_worker_batch_size_matches_bulk_pipeline(self):
+        control_source = (
+            REPO_ROOT / "migration" / "cxl-hybrid-control.c").read_text()
+        match = re.search(
+            r"#define CXL_HYBRID_CXL_WORKER_MAX_BATCH\s+(\d+)",
+            control_source,
+        )
+
+        self.assertIsNotNone(match)
+        self.assertGreaterEqual(int(match.group(1)), 1024)
+
+    def test_fault_region_prefetch_uses_batched_worker_enqueue(self):
+        control_source = (
+            REPO_ROOT / "migration" / "cxl-hybrid-control.c").read_text()
+
+        helper_start = control_source.index(
+            "static void cxl_hybrid_ctrl_enqueue_fault_region_prefetch(")
+        helper_end = control_source.index(
+            "static void *cxl_hybrid_ctrl_request_worker_thread(",
+            helper_start)
+        helper_body = control_source[helper_start:helper_end]
+
+        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_pages(", helper_body)
+        self.assertNotIn("cxl_hybrid_ctrl_enqueue_cxl_page(", helper_body)
+
+    def test_postcopy_completion_does_not_wait_for_cxl_dataplane_idle(self):
+        migration_source = (REPO_ROOT / "migration" / "migration.c").read_text()
+
+        fn_start = migration_source.index(
+            "static MigIterateState migration_iteration_run(")
+        fn_end = migration_source.index(
+            "static void migration_iteration_finish(", fn_start)
+        fn_body = migration_source[fn_start:fn_end]
+
+        self.assertNotIn("postcopy_cxl_wait_dataplane", fn_body)
+        self.assertNotIn("cxl_hybrid_control_source_dataplane_idle()", fn_body)
+
+    def test_postcopy_warm_push_runs_without_cxl_idle_gate(self):
+        migration_source = (REPO_ROOT / "migration" / "migration.c").read_text()
+
+        fn_start = migration_source.index(
+            "static MigIterateState migration_iteration_run(")
+        fn_end = migration_source.index(
+            "static void migration_iteration_finish(", fn_start)
+        fn_body = migration_source[fn_start:fn_end]
+
+        self.assertIn(
+            "if (in_postcopy && migrate_cxl_hybrid() &&\n"
+            "        cxl_hybrid_phase() == CXL_HYBRID_PHASE_POSTCOPY_WARM)",
+            fn_body,
+        )
+        self.assertIn("cxl_hybrid_warm_push_iteration(s, &local_err)",
+                      fn_body)
+
     def test_rdma_bulk_enqueue_aligns_current_dirty_page_to_region(self):
         ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
 
@@ -1208,6 +1349,33 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertTrue(default_args.x_cxl_brake_enable)
         self.assertFalse(disabled_args.x_cxl_brake_enable)
+
+    def test_trace_profile_cli_accepts_minimal(self):
+        default_args = self.mod.parse_args([])
+        minimal_args = self.mod.parse_args([
+            "--pressure", "remap_xlarge_random_rw",
+            "--mode", "hybrid_parallel_rdma_cxl",
+            "--trace-profile", "minimal",
+        ])
+
+        self.assertEqual(default_args.trace_profile, "full")
+        self.assertEqual(minimal_args.trace_profile, "minimal")
+
+    def test_minimal_trace_profile_omits_per_page_worker_events(self):
+        events = self.mod.trace_events_for_profile("minimal")
+
+        self.assertIn("migration_precopy_timeline", events)
+        self.assertIn("migration_postcopy_timeline", events)
+        self.assertIn("cxl_hybrid_page_state_snapshot_summary", events)
+        self.assertIn("cxl_hybrid_page_state_snapshot_runtime", events)
+        self.assertIn("cxl_rdma_sidecar_complete", events)
+        self.assertIn("postcopy_discard_send_range", events)
+        self.assertIn("migration_return_path_end_before", events)
+        self.assertIn("source_return_path_thread_shut", events)
+        self.assertNotIn("cxl_hybrid_cxl_worker_enqueue", events)
+        self.assertNotIn("cxl_hybrid_cxl_worker_complete", events)
+        self.assertNotIn("cxl_hybrid_fault_hit", events)
+        self.assertNotIn("postcopy_ram_fault_thread_request", events)
 
     def test_main_accepts_parallel_rdma_cxl_and_forwards_disable_brake(self):
         calls = []
@@ -3161,6 +3329,77 @@ class WarmExperimentScriptTest(unittest.TestCase):
             completion.index("migration_trace_postcopy_timeline(s, \"completion-prepare-done\"")
         )
 
+    def test_postcopy_completion_traces_return_path_stop_window(self):
+        migration_source = (SCRIPT_PATH.parent.parent / "migration" /
+                            "migration.c").resolve()
+        text = migration_source.read_text(encoding="utf-8")
+
+        completion_start = text.index("static void migration_completion(MigrationState *s)")
+        completion_end = text.index("static void bg_migration_completion(",
+                                    completion_start)
+        completion = text[completion_start:completion_end]
+
+        self.assertIn(
+            "migration_trace_postcopy_timeline(s, \"return-path-stop-begin\"",
+            completion,
+        )
+        self.assertIn(
+            "migration_trace_postcopy_timeline(s, \"return-path-stop-end\"",
+            completion,
+        )
+        self.assertLess(
+            completion.index('"return-path-stop-begin"'),
+            completion.index("stop_return_path_thread_on_source(s)"),
+        )
+        self.assertLess(
+            completion.index("stop_return_path_thread_on_source(s)"),
+            completion.index('"return-path-stop-end"'),
+        )
+        self.assertLess(
+            completion.index('"return-path-stop-end"'),
+            completion.index("migration_completion_end(s)"),
+        )
+
+    def test_postcopy_listen_thread_sends_return_path_shut_before_cleanup(self):
+        migration_header = (SCRIPT_PATH.parent.parent / "migration" /
+                            "migration.h").resolve()
+        migration_source = (SCRIPT_PATH.parent.parent / "migration" /
+                            "migration.c").resolve()
+        postcopy_source = (SCRIPT_PATH.parent.parent / "migration" /
+                           "postcopy-ram.c").resolve()
+        header = migration_header.read_text(encoding="utf-8")
+        migration = migration_source.read_text(encoding="utf-8")
+        postcopy = postcopy_source.read_text(encoding="utf-8")
+
+        self.assertIn("bool           rp_shut_sent;", header)
+        self.assertIn(
+            "void migration_incoming_send_rp_shut_once(",
+            header,
+        )
+        self.assertIn(
+            "migration_incoming_send_rp_shut_once(mis);",
+            migration,
+        )
+
+        listen_start = postcopy.index(
+            "static void *postcopy_listen_thread(void *opaque)")
+        listen_end = postcopy.index("int postcopy_incoming_setup(",
+                                    listen_start)
+        listen = postcopy[listen_start:listen_end]
+
+        self.assertIn(
+            "migration_incoming_send_rp_shut_once(mis);",
+            listen,
+        )
+        self.assertLess(
+            listen.index("MIGRATION_STATUS_COMPLETED"),
+            listen.index("migration_incoming_send_rp_shut_once(mis);"),
+        )
+        self.assertLess(
+            listen.index("migration_incoming_send_rp_shut_once(mis);"),
+            listen.index("migration_bh_schedule(postcopy_listen_thread_bh"),
+        )
+
     def test_postcopy_start_initializes_cxl_fault_control_source_workers(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
@@ -3272,7 +3511,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
                       helper)
         self.assertNotIn("qemu_fflush(ms->to_dst_file)", helper)
 
-    def test_warm_push_publishes_directly_without_warm_descriptor_transport(self):
+    def test_warm_push_enqueues_worker_without_warm_descriptor_transport(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
 
@@ -3280,7 +3519,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
         cleanup_start = text.index("static int cxl_hybrid_completion_publish_remaining_page(")
         send = text[send_start:cleanup_start]
 
-        self.assertIn("cxl_hybrid_publish_page_to_cxl(", send)
+        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_page(", send)
+        self.assertNotIn("cxl_hybrid_publish_page_to_cxl(", send)
         self.assertNotIn("cxl_hybrid_send_warm_descriptor(", send)
         self.assertIn("set_bit_atomic(page_idx, cxl_state.warm_sent_bmap);", send)
         self.assertIn("clear_bit_atomic(page_idx, cxl_state.warm_dirty_bmap);", send)
@@ -3291,14 +3531,17 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         callback_start = text.index(
             "static int cxl_hybrid_completion_publish_remaining_page")
+        callback_end = text.index(
+            "static size_t cxl_hybrid_pick_recent_miss_page", callback_start)
         helper_start = text.index(
             "int cxl_hybrid_completion_publish_remaining_pages")
         next_start = text.index("void cxl_account_dirty_sync_ns")
-        callback = text[callback_start:helper_start]
+        callback = text[callback_start:callback_end]
         helper = text[helper_start:next_start]
 
         self.assertNotIn("ram_cxl_hybrid_walk_unsent", helper)
-        self.assertIn("cxl_hybrid_publish_page_to_cxl", callback)
+        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_page", callback)
+        self.assertNotIn("cxl_hybrid_publish_page_to_cxl", callback)
         self.assertNotIn("cxl_hybrid_build_warm_desc_range", callback)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_append", callback)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_flush", helper)
@@ -3334,23 +3577,40 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("cxl_hybrid_ctrl_region_bit_visible(", helper)
         self.assertIn("cxl_hybrid_publish_fault_region_request_core(", helper)
 
+    def test_page_state_completion_skips_legacy_region_publish(self):
+        cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
+        text = cxl_source.read_text(encoding="utf-8")
+
+        helper_start = text.index(
+            "int cxl_hybrid_completion_publish_remaining_regions")
+        next_start = text.index("void cxl_account_dirty_sync_ns")
+        helper = text[helper_start:next_start]
+
+        self.assertIn("cxl_hybrid_source_control_run_active()", helper)
+        self.assertLess(
+            helper.index("cxl_hybrid_source_control_run_active()"),
+            helper.index("RAMBLOCK_FOREACH_NOT_IGNORED(block)"),
+        )
+
     def test_completion_publish_remaining_pages_uses_publish_only_callback(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
 
         callback_start = text.index(
             "static int cxl_hybrid_completion_publish_remaining_page")
+        callback_end = text.index(
+            "static size_t cxl_hybrid_pick_recent_miss_page", callback_start)
         helper_start = text.index(
             "int cxl_hybrid_completion_publish_remaining_pages")
         next_start = text.index("void cxl_account_dirty_sync_ns")
-        callback = text[callback_start:helper_start]
+        callback = text[callback_start:callback_end]
         helper = text[helper_start:next_start]
 
         self.assertNotIn("CXLHybridWarmDescBatchBuilder", callback)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_append", callback)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_flush", helper)
-        self.assertIn("cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,",
-                      callback)
+        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_page(", callback)
+        self.assertNotIn("cxl_hybrid_publish_page_to_cxl(", callback)
         self.assertNotIn("cxl_hybrid_send_warm_descriptor", callback)
 
     def test_completion_publish_remaining_pages_filters_on_cxl_visibility(self):
@@ -3468,7 +3728,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertNotIn("qemu_savevm_send_cxl_hybrid_warm_desc_batch",
                          savevm_header_text)
 
-    def test_warm_push_marks_page_visible_through_shared_control(self):
+    def test_warm_push_marks_page_scheduled_after_worker_enqueue(self):
         cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
         text = cxl_source.read_text(encoding="utf-8")
 
@@ -3476,10 +3736,37 @@ class WarmExperimentScriptTest(unittest.TestCase):
         next_start = text.index("static int cxl_hybrid_completion_publish_remaining_page(")
         send = text[send_start:next_start]
 
-        self.assertIn("cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,",
+        self.assertIn("cxl_hybrid_source_page_cxl_offset(block->idstr, block_offset,",
                       send)
+        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_page(block, block_offset,",
+                      send)
+        enqueue_pos = send.index(
+            "cxl_hybrid_ctrl_enqueue_cxl_page(block, block_offset,")
+        self.assertLess(
+            enqueue_pos,
+            send.index("set_bit_atomic(page_idx, cxl_state.warm_sent_bmap);",
+                       enqueue_pos),
+        )
         self.assertIn("CXL_HYBRID_PUBLISH_SOURCE_WARM_PUSH", send)
         self.assertNotIn("qemu_savevm_send_cxl_hybrid_warm_desc", send)
+
+    def test_warm_push_syncs_local_bitmaps_for_page_state_visible_pages(self):
+        cxl_source = (SCRIPT_PATH.parent.parent / "migration" / "cxl.c").resolve()
+        text = cxl_source.read_text(encoding="utf-8")
+
+        send_start = text.index("static int cxl_hybrid_send_selected_page(")
+        next_start = text.index("static int cxl_hybrid_completion_publish_remaining_page(")
+        send = text[send_start:next_start]
+
+        self.assertIn("cxl_hybrid_ctrl_page_location(page_idx, generation, &location)",
+                      send)
+        self.assertLess(
+            send.index("cxl_hybrid_ctrl_page_location(page_idx, generation, &location)"),
+            send.index("cxl_hybrid_ctrl_enqueue_cxl_page(block, block_offset,"),
+        )
+        self.assertIn("location == CXL_HYBRID_PAGE_LOCATION_CXL", send)
+        self.assertIn("cxl_hybrid_mark_page_cxl_visible(page_idx);", send)
+        self.assertIn("cxl_hybrid_mark_page_not_remaining(page_idx);", send)
 
     def test_publish_request_uses_shared_control_ring_not_return_path(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
@@ -3614,13 +3901,15 @@ class WarmExperimentScriptTest(unittest.TestCase):
         helper = migration_text[helper_start:postcopy_start]
         completion_start = cxl_text.index(
             "static int cxl_hybrid_completion_publish_remaining_page")
-        next_start = cxl_text.index("void cxl_account_dirty_sync_ns")
+        next_start = cxl_text.index(
+            "static size_t cxl_hybrid_pick_recent_miss_page",
+            completion_start)
         completion = cxl_text[completion_start:next_start]
 
         self.assertIn("cxl_hybrid_completion_publish_remaining_pages(ms, errp)", helper)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_builder_flush", completion)
-        self.assertIn("cxl_hybrid_publish_page_to_cxl(block->idstr, block_offset,",
-                      completion)
+        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_page(", completion)
+        self.assertNotIn("cxl_hybrid_publish_page_to_cxl(", completion)
         self.assertNotIn("cxl_hybrid_send_warm_descriptor", completion)
 
     def test_loadvm_has_only_current_cxl_metadata_visibility_command(self):
@@ -7491,6 +7780,40 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertEqual(calls, [
             ("hybrid_postcopy_auto", "remap_heavy", False),
+        ])
+
+    def test_run_pressure_matrix_forwards_minimal_trace_profile(self):
+        calls = []
+
+        def fake_run_case(_base, mode, pressure, **kwargs):
+            calls.append((mode, pressure, kwargs.get("trace_profile")))
+            return {
+                "mode": mode,
+                "pressure": pressure,
+                "final_status": "completed",
+                "latency": {
+                    "total_time_ms": 45,
+                    "downtime_ms": 2,
+                    "setup_time_ms": 1,
+                },
+                "summary": {},
+                "trace": {"combined": self.mod.trace_count_template()},
+                "stage_population_observed": 0,
+                "guest_latency": {},
+            }
+
+        self.mod.run_case = fake_run_case
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.mod.run_pressure_matrix(
+                Path(tmpdir),
+                ["remap_heavy"],
+                ["hybrid_parallel_rdma_cxl"],
+                trace_profile="minimal",
+            )
+
+        self.assertEqual(calls, [
+            ("hybrid_parallel_rdma_cxl", "remap_heavy", "minimal"),
         ])
 
     def test_run_pressure_matrix_forwards_qemu_perf_option(self):

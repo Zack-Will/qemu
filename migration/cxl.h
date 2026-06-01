@@ -494,6 +494,11 @@ void cxl_hybrid_transfer_queue_destroy_for_test(CXLHybridTransferQueue *queue);
 void cxl_hybrid_transfer_queue_push(CXLHybridTransferQueue *queue,
                                     CXLHybridTransferClass klass,
                                     const CXLHybridPageDescriptor *desc);
+uint32_t cxl_hybrid_transfer_queue_push_batch(
+    CXLHybridTransferQueue *queue,
+    CXLHybridTransferClass klass,
+    const CXLHybridPageDescriptor *descs,
+    uint32_t count);
 bool cxl_hybrid_transfer_queue_pop(CXLHybridTransferQueue *queue,
                                    CXLHybridPageDescriptor *desc);
 bool cxl_hybrid_transfer_queue_pop_cxl(CXLHybridTransferQueue *queue,
@@ -797,6 +802,7 @@ int cxl_hybrid_publish_page_to_cxl(const char *ramblock,
                                    CXLHybridPublishSource source,
                                    uint64_t *cxl_offsetp,
                                    Error **errp);
+void cxl_hybrid_note_cxl_worker_page_visible(uint64_t page_index);
 int cxl_hybrid_begin_source_run_with_precopy_remaps(Error **errp);
 int cxl_hybrid_publish_staged_pages_for_postcopy(Error **errp);
 void cxl_hybrid_iteration_snapshot_begin(uint64_t ram_pages);
@@ -1075,6 +1081,13 @@ bool cxl_hybrid_ctrl_enqueue_cxl_page(RAMBlock *block,
                                       uint64_t cxl_offset,
                                       uint32_t generation,
                                       CXLHybridTransferClass klass);
+uint32_t cxl_hybrid_ctrl_enqueue_cxl_pages(RAMBlock *block,
+                                           ram_addr_t block_offset,
+                                           uint64_t first_page_index,
+                                           uint64_t cxl_offset,
+                                           uint32_t generation,
+                                           CXLHybridTransferClass klass,
+                                           uint32_t nr_pages);
 bool cxl_hybrid_ctrl_claim_rdma_pages(CXLHybridRDMAPageDescriptor *desc,
                                       RAMBlock *block,
                                       ram_addr_t block_offset,
