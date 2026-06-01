@@ -70,6 +70,29 @@ static void anemoi_cache_bump_lruk(AnemoiCache *cache,
     line->lruk_ts[0] = anemoi_cache_next_clock(cache);
 }
 
+/*
+ * Seed the full LRU-K history of a freshly fetched line.  A line's eviction
+ * key is lruk_ts[ANEMOI_LRU_K - 1] (the K-th-back reference).  Because a line
+ * is memset() to zero when its way is reused, a newly installed page would
+ * otherwise have lruk_ts[K-1] == 0 -- the minimum possible key -- and so be
+ * selected as the very next victim.  When the guest needs two pages mapped to
+ * the same full set (e.g. an instruction's code page plus its data page),
+ * those two pages then evict each other on every fault and the vCPU can never
+ * retire the instruction: a livelock with zero forward progress.  Seeding all
+ * K slots with the install clock makes a fetched page enter as recently
+ * referenced, so genuinely cold lines are evicted instead and the working set
+ * stays resident.
+ */
+static void anemoi_cache_seed_lruk(AnemoiCache *cache,
+                                   AnemoiCacheLine *line)
+{
+    uint64_t now = anemoi_cache_next_clock(cache);
+
+    for (uint32_t i = 0; i < ANEMOI_LRU_K; i++) {
+        line->lruk_ts[i] = now;
+    }
+}
+
 static AnemoiCacheSet *anemoi_cache_set_for_gfn(AnemoiCache *cache,
                                                 uint64_t gfn)
 {
@@ -545,7 +568,7 @@ int anemoi_cache_install_page(AnemoiCache *cache, uint64_t gfn, void *hva_4k,
     line->valid = true;
     line->hva = hva_4k;
     anemoi_cache_set_line_dirty(cache, line, is_write);
-    anemoi_cache_bump_lruk(cache, line);
+    anemoi_cache_seed_lruk(cache, line);
     qemu_mutex_unlock(&set->lock);
     return 0;
 }
