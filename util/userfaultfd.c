@@ -248,8 +248,9 @@ int uffd_change_protection(int uffd_fd, void *addr, uint64_t length,
  * @length: length of the range to copy
  * @dont_wake: do not wake threads waiting on missing page
  */
-int uffd_copy_page(int uffd_fd, void *dst_addr, void *src_addr,
-        uint64_t length, bool dont_wake)
+int uffd_copy_page_suppress_errno(int uffd_fd, void *dst_addr,
+        void *src_addr, uint64_t length, bool dont_wake,
+        int suppressed_errno)
 {
     struct uffdio_copy uffd_copy;
 
@@ -260,13 +261,22 @@ int uffd_copy_page(int uffd_fd, void *dst_addr, void *src_addr,
 
     if (ioctl(uffd_fd, UFFDIO_COPY, &uffd_copy)) {
         int e = errno;
-        error_report("uffd_copy_page() failed: dst_addr=%p src_addr=%p length=%" PRIu64
-                " mode=%" PRIx64 " errno=%i", dst_addr, src_addr,
-                length, (uint64_t) uffd_copy.mode, e);
+        if (e != suppressed_errno) {
+            error_report("uffd_copy_page() failed: dst_addr=%p src_addr=%p length=%" PRIu64
+                    " mode=%" PRIx64 " errno=%i", dst_addr, src_addr,
+                    length, (uint64_t) uffd_copy.mode, e);
+        }
         return -e;
     }
 
     return 0;
+}
+
+int uffd_copy_page(int uffd_fd, void *dst_addr, void *src_addr,
+        uint64_t length, bool dont_wake)
+{
+    return uffd_copy_page_suppress_errno(uffd_fd, dst_addr, src_addr,
+                                         length, dont_wake, 0);
 }
 
 /**

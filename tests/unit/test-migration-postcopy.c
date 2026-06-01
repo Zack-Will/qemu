@@ -72,11 +72,36 @@ static void test_destination_owned_visible_ram_stream_skips_backing_write(void)
                     MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_VISIBLE);
 }
 
+static void test_plain_visible_ram_stream_skips_backing_write(void)
+{
+    g_assert_cmpint(migration_postcopy_cxl_ram_stream_write_action(
+                        false, false, true), ==,
+                    MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_ALREADY_VISIBLE);
+}
+
 static void test_destination_owned_invisible_ram_stream_errors(void)
 {
     g_assert_cmpint(migration_postcopy_cxl_ram_stream_write_action(
                         true, false, false), ==,
                     MIGRATION_POSTCOPY_CXL_RAM_STREAM_ERROR);
+}
+
+static void test_hybrid_fault_uses_cxl_when_supported(void)
+{
+    g_assert_cmpint(migration_postcopy_cxl_hybrid_fault_action(true, true), ==,
+                    MIGRATION_POSTCOPY_CXL_HYBRID_FAULT_HANDLE_CXL);
+}
+
+static void test_hybrid_fault_falls_back_when_cxl_unhandled(void)
+{
+    g_assert_cmpint(migration_postcopy_cxl_hybrid_fault_action(true, false), ==,
+                    MIGRATION_POSTCOPY_CXL_HYBRID_FAULT_FALLBACK_RAM);
+}
+
+static void test_native_fault_uses_ram_request(void)
+{
+    g_assert_cmpint(migration_postcopy_cxl_hybrid_fault_action(false, true), ==,
+                    MIGRATION_POSTCOPY_CXL_HYBRID_FAULT_FALLBACK_RAM);
 }
 
 static void test_hybrid_cxl_source_completion_waits_for_final_ram_flush(void)
@@ -141,6 +166,37 @@ static void test_brake_switch_still_drains_source_remaps(void)
                       true, CXL_HYBRID_PHASE_PRECOPY_BRAKE, true));
 }
 
+static void test_hybrid_rdma_drains_before_precopy_completion(void)
+{
+    g_assert_true(migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
+                      true, true, MIGRATION_STATUS_ACTIVE));
+}
+
+static void test_native_or_postcopy_skips_rdma_precopy_completion_drain(void)
+{
+    g_assert_false(
+        migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
+            false, true, MIGRATION_STATUS_ACTIVE));
+    g_assert_false(
+        migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
+            true, false, MIGRATION_STATUS_ACTIVE));
+    g_assert_false(
+        migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
+            true, true, MIGRATION_STATUS_POSTCOPY_ACTIVE));
+}
+
+static void test_uffd_copy_result_allows_existing_only_when_requested(void)
+{
+    g_assert_true(migration_postcopy_uffd_copy_result_satisfied(0, false));
+    g_assert_true(migration_postcopy_uffd_copy_result_satisfied(0, true));
+    g_assert_false(
+        migration_postcopy_uffd_copy_result_satisfied(-EEXIST, false));
+    g_assert_true(
+        migration_postcopy_uffd_copy_result_satisfied(-EEXIST, true));
+    g_assert_false(
+        migration_postcopy_uffd_copy_result_satisfied(-EIO, true));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -164,8 +220,16 @@ int main(int argc, char **argv)
                     test_source_remapped_visible_ram_stream_skips_without_publish);
     g_test_add_func("/migration/postcopy/destination-owned-visible-ram-stream-skips-backing-write",
                     test_destination_owned_visible_ram_stream_skips_backing_write);
+    g_test_add_func("/migration/postcopy/plain-visible-ram-stream-skips-backing-write",
+                    test_plain_visible_ram_stream_skips_backing_write);
     g_test_add_func("/migration/postcopy/destination-owned-invisible-ram-stream-errors",
                     test_destination_owned_invisible_ram_stream_errors);
+    g_test_add_func("/migration/postcopy/hybrid-fault-uses-cxl-when-supported",
+                    test_hybrid_fault_uses_cxl_when_supported);
+    g_test_add_func("/migration/postcopy/hybrid-fault-falls-back-when-cxl-unhandled",
+                    test_hybrid_fault_falls_back_when_cxl_unhandled);
+    g_test_add_func("/migration/postcopy/native-fault-uses-ram-request",
+                    test_native_fault_uses_ram_request);
     g_test_add_func("/migration/postcopy/hybrid-cxl-source-completion-waits-for-final-ram-flush",
                     test_hybrid_cxl_source_completion_waits_for_final_ram_flush);
     g_test_add_func("/migration/postcopy/cxl-source-completion-ignores-non-hybrid-or-wrong-phase",
@@ -180,5 +244,11 @@ int main(int argc, char **argv)
                     test_no_brake_switch_does_not_drain_source_remaps);
     g_test_add_func("/migration/postcopy/brake-switch-drains-source-remaps",
                     test_brake_switch_still_drains_source_remaps);
+    g_test_add_func("/migration/postcopy/hybrid-rdma-drains-before-precopy-completion",
+                    test_hybrid_rdma_drains_before_precopy_completion);
+    g_test_add_func("/migration/postcopy/native-or-postcopy-skips-rdma-precopy-completion-drain",
+                    test_native_or_postcopy_skips_rdma_precopy_completion_drain);
+    g_test_add_func("/migration/postcopy/uffd-copy-result-allows-existing-only-when-requested",
+                    test_uffd_copy_result_allows_existing_only_when_requested);
     return g_test_run();
 }

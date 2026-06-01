@@ -666,6 +666,26 @@
 #
 # @rdma-bulk-bytes: bytes covered by @rdma-bulk-regions.  (Since 11.0)
 #
+# @page-state-cxl-worker-bytes: bytes copied by the page-state CXL
+#     lane.  During the transitional worker rollout this is backed by
+#     the stable CXL memcpy accounting.  (Since 11.0)
+#
+# @page-state-cxl-worker-time-ns: nanoseconds spent copying bytes for
+#     @page-state-cxl-worker-bytes.  (Since 11.0)
+#
+# @page-state-rdma-completed-bytes: bytes completed by RDMA
+#     descriptors and published through page-state.  (Since 11.0)
+#
+# @page-state-rdma-completed-time-ns: nanoseconds from RDMA descriptor
+#     post to completion for completed page-state RDMA descriptors.
+#     (Since 11.0)
+#
+# @page-state-rdma-stale-pages: pages whose RDMA descriptor completion
+#     did not match the captured page-state claim.  (Since 11.0)
+#
+# @page-state-cas-failures: page-state CAS failures observed by active
+#     CXL/RDMA lane completion.  (Since 11.0)
+#
 # @rdma-sidecar-connect-time-ns: cumulative nanoseconds spent
 #     establishing the RDMA sidecar connection.  (Since 11.0)
 #
@@ -1045,6 +1065,18 @@
                                    'features': [ 'unstable' ] },
             'rdma-bulk-bytes': { 'type': 'uint64',
                                  'features': [ 'unstable' ] },
+            'page-state-cxl-worker-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-stale-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cas-failures': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
             'rdma-sidecar-connect-time-ns': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'rdma-sidecar-registered-bytes': {

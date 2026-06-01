@@ -772,6 +772,80 @@ int cxl_hybrid_dst_staging_register_external_page(const char *ramblock,
     return rc;
 }
 
+int cxl_hybrid_dst_staging_read_external(uint64_t cxl_offset, void *buf,
+                                         size_t len, Error **errp)
+{
+    ssize_t ret;
+
+    if (!buf || !len) {
+        error_setg(errp, "CXL hybrid destination external read missing buffer");
+        return -EINVAL;
+    }
+    if (len > SSIZE_MAX) {
+        error_setg(errp, "CXL hybrid destination external read is too large");
+        return -EOVERFLOW;
+    }
+
+    if (cxl_dst_staging.sync_ready) {
+        qemu_mutex_lock(&cxl_dst_staging.lock);
+    }
+
+    if (!cxl_hybrid_dst_staging_is_active_locked()) {
+        if (cxl_dst_staging.sync_ready) {
+            qemu_mutex_unlock(&cxl_dst_staging.lock);
+        }
+        error_setg(errp, "CXL hybrid destination staging is not initialized");
+        return -EINVAL;
+    }
+
+    if (cxl_offset > cxl_dst_staging.file_limit ||
+        len > cxl_dst_staging.file_limit - cxl_offset) {
+        if (cxl_dst_staging.sync_ready) {
+            qemu_mutex_unlock(&cxl_dst_staging.lock);
+        }
+        error_setg(errp,
+                   "CXL hybrid destination external read overruns backing: "
+                   "offset=0x%" PRIx64 " len=%zu limit=%zu",
+                   cxl_offset, len, cxl_dst_staging.file_limit);
+        return -ERANGE;
+    }
+
+    if (cxl_dst_staging.shared_map) {
+        if (!cxl_dst_staging.map_base) {
+            if (cxl_dst_staging.sync_ready) {
+                qemu_mutex_unlock(&cxl_dst_staging.lock);
+            }
+            error_setg(errp, "CXL hybrid destination external read missing map");
+            return -EINVAL;
+        }
+        memcpy(buf, (uint8_t *)cxl_dst_staging.map_base + cxl_offset, len);
+        ret = len;
+    } else {
+        ret = pread(cxl_dst_staging.fd, buf, len, cxl_offset);
+    }
+
+    if (cxl_dst_staging.sync_ready) {
+        qemu_mutex_unlock(&cxl_dst_staging.lock);
+    }
+
+    if (ret < 0) {
+        int saved_errno = errno;
+
+        error_setg_errno(errp, saved_errno,
+                         "Failed to read CXL hybrid destination external page");
+        return -saved_errno;
+    }
+    if (ret != len) {
+        error_setg(errp,
+                   "Short read from CXL hybrid destination external page: "
+                   "%zd/%zu",
+                   ret, len);
+        return -EIO;
+    }
+
+    return 0;
+}
+
 bool cxl_hybrid_dst_staging_page_present(const char *ramblock, uint64_t offset)
 {
     return cxl_hybrid_dst_staging_range_present(ramblock, offset,

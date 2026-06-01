@@ -113,6 +113,20 @@ static void test_region_geometry_rejects_partial_tail(void)
     error_free(err);
 }
 
+static void test_region_geometry_can_cover_whole_aligned_region(void)
+{
+    g_assert_true(cxl_hybrid_fault_region_can_cover(0, 4 * MiB, 64 * MiB,
+                                                    0x1234, 2 * MiB,
+                                                    TEST_TARGET_PAGE_SIZE));
+}
+
+static void test_region_geometry_cannot_cover_small_ramblock(void)
+{
+    g_assert_false(cxl_hybrid_fault_region_can_cover(0, 1 * MiB, 64 * MiB,
+                                                     0, 2 * MiB,
+                                                     TEST_TARGET_PAGE_SIZE));
+}
+
 static void test_region_geometry_rejects_unaligned_cxl_offset(void)
 {
     CXLHybridFaultRegionGeometry g = { 0 };
@@ -557,6 +571,21 @@ static void test_rdma_descriptor_completion_consumes_claims_once(void)
     cxl_hybrid_rdma_descriptor_destroy(&desc);
 }
 
+static void test_rdma_posted_page_blocks_cxl_publish_until_completion(void)
+{
+    uint64_t slot = cxl_hybrid_page_state_make_dirty(8, 1);
+    CXLHybridPageClaim rdma_claim = { 0 };
+    CXLHybridPageClaim cxl_claim = { 0 };
+
+    g_assert_true(cxl_hybrid_page_state_claim_for_rdma(&slot, 8,
+                                                       &rdma_claim));
+    g_assert_false(cxl_hybrid_page_state_claim_for_cxl(&slot, 8,
+                                                       &cxl_claim));
+    g_assert_true(cxl_hybrid_page_state_complete_rdma(&slot, &rdma_claim));
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        slot, 8, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL));
+}
+
 static void test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish(void)
 {
     CXLHybridRDMASidecarState state = { 0 };
@@ -665,11 +694,38 @@ static void test_rdma_sidecar_budget_limits_accepted_regions(void)
     CXLHybridRDMASidecarState state = { 0 };
 
     cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 8, 512);
-    cxl_hybrid_rdma_sidecar_configure_budget_for_test(&state, 8, 25);
+    cxl_hybrid_rdma_sidecar_configure_budget_for_test(&state, 1, 25);
 
     g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, 0));
     g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, 1));
     g_assert_false(cxl_hybrid_rdma_sidecar_try_start_region(&state, 2));
+
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
+}
+
+static void test_rdma_sidecar_global_budget_limits_accepted_regions(void)
+{
+    cxl_hybrid_rdma_sidecar_global_init(8, 512);
+    cxl_hybrid_rdma_sidecar_global_configure_budget(1, 25);
+
+    g_assert_true(cxl_hybrid_region_try_own_rdma(0));
+    g_assert_true(cxl_hybrid_region_try_own_rdma(1));
+    g_assert_false(cxl_hybrid_region_try_own_rdma(2));
+
+    cxl_hybrid_rdma_sidecar_global_destroy();
+}
+
+static void test_rdma_sidecar_inflight_does_not_cap_total_coverage(void)
+{
+    CXLHybridRDMASidecarState state = { 0 };
+
+    cxl_hybrid_rdma_sidecar_state_init_for_test(&state, 33, 512);
+    cxl_hybrid_rdma_sidecar_configure_budget_for_test(&state, 8, 50);
+
+    for (uint64_t i = 0; i < 17; i++) {
+        g_assert_true(cxl_hybrid_rdma_sidecar_try_start_region(&state, i));
+    }
+    g_assert_false(cxl_hybrid_rdma_sidecar_try_start_region(&state, 17));
 
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(&state);
 }
@@ -910,10 +966,27 @@ static void test_scheduler_prefers_rdma_bulk_when_budget_available(void)
 {
     CXLHybridSchedulerPolicy policy = {
         .rdma_budget_pages = 512,
-        .cxl_background_pages = 512,
+        .cxl_background_pages = 0,
     };
 
     g_assert_cmpuint(cxl_hybrid_scheduler_choose_bulk_lane(&policy, 12), ==,
+                     CXL_HYBRID_TRANSFER_RDMA_BULK);
+}
+
+static void test_scheduler_balances_bulk_pages_between_cxl_and_rdma(void)
+{
+    CXLHybridSchedulerPolicy policy = {
+        .rdma_budget_pages = 4,
+        .cxl_background_pages = 4,
+    };
+
+    g_assert_cmpuint(cxl_hybrid_scheduler_choose_bulk_lane(&policy, 0), ==,
+                     CXL_HYBRID_TRANSFER_CXL_LOW);
+    g_assert_cmpuint(cxl_hybrid_scheduler_choose_bulk_lane(&policy, 1), ==,
+                     CXL_HYBRID_TRANSFER_RDMA_BULK);
+    g_assert_cmpuint(cxl_hybrid_scheduler_choose_bulk_lane(&policy, 2), ==,
+                     CXL_HYBRID_TRANSFER_CXL_LOW);
+    g_assert_cmpuint(cxl_hybrid_scheduler_choose_bulk_lane(&policy, 3), ==,
                      CXL_HYBRID_TRANSFER_RDMA_BULK);
 }
 
@@ -945,6 +1018,10 @@ int main(int argc, char **argv)
                     test_region_geometry_rejects_region_crossing_ramblock_start);
     g_test_add_func("/cxl/region/reject-partial-tail",
                     test_region_geometry_rejects_partial_tail);
+    g_test_add_func("/cxl/region/can-cover-whole-aligned-region",
+                    test_region_geometry_can_cover_whole_aligned_region);
+    g_test_add_func("/cxl/region/cannot-cover-small-ramblock",
+                    test_region_geometry_cannot_cover_small_ramblock);
     g_test_add_func("/cxl/region/reject-unaligned-cxl",
                     test_region_geometry_rejects_unaligned_cxl_offset);
     g_test_add_func("/cxl/region/reject-invalid-granule-page",
@@ -999,6 +1076,8 @@ int main(int argc, char **argv)
                     test_rdma_descriptor_no_claims_clears_descriptor);
     g_test_add_func("/cxl/region/rdma-descriptor-completion-consumes-once",
                     test_rdma_descriptor_completion_consumes_claims_once);
+    g_test_add_func("/cxl/region/rdma-posted-page-blocks-cxl-publish",
+                    test_rdma_posted_page_blocks_cxl_publish_until_completion);
     g_test_add_func("/cxl/region/rdma-sidecar-accounting",
                     test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish);
     g_test_add_func("/cxl/region/rdma-sidecar-inflight-does-not-block-cxl",
@@ -1011,6 +1090,10 @@ int main(int argc, char **argv)
                     test_rdma_sidecar_selector_skips_budgeted_regions);
     g_test_add_func("/cxl/region/rdma-sidecar-budget-limits-accepted-regions",
                     test_rdma_sidecar_budget_limits_accepted_regions);
+    g_test_add_func("/cxl/region/rdma-sidecar-global-budget-limits-accepted-regions",
+                    test_rdma_sidecar_global_budget_limits_accepted_regions);
+    g_test_add_func("/cxl/region/rdma-sidecar-inflight-does-not-cap-total-coverage",
+                    test_rdma_sidecar_inflight_does_not_cap_total_coverage);
     g_test_add_func("/cxl/region/rdma-sidecar-dirty-invalidation-clears-ready",
                     test_rdma_sidecar_dirty_invalidation_clears_ready);
     g_test_add_func("/cxl/region/rdma-sidecar-commit-current-ready",
@@ -1035,6 +1118,8 @@ int main(int argc, char **argv)
                     test_scheduler_prefers_cxl_low_when_rdma_budget_exhausted);
     g_test_add_func("/cxl/region/scheduler-rdma-budget-available",
                     test_scheduler_prefers_rdma_bulk_when_budget_available);
+    g_test_add_func("/cxl/region/scheduler-balances-cxl-rdma-bulk",
+                    test_scheduler_balances_bulk_pages_between_cxl_and_rdma);
     g_test_add_func("/cxl/region/scheduler-null-policy-cxl",
                     test_scheduler_prefers_cxl_low_without_policy);
     g_test_add_func("/cxl/region/scheduler-zero-page-cxl",

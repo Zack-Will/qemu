@@ -46,6 +46,10 @@ migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
                                                bool source_remapped,
                                                bool page_visible)
 {
+    if (page_visible && !destination_owned && !source_remapped) {
+        return MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_ALREADY_VISIBLE;
+    }
+
     if (source_remapped) {
         return page_visible ?
             MIGRATION_POSTCOPY_CXL_RAM_STREAM_SKIP_ALREADY_VISIBLE :
@@ -59,6 +63,15 @@ migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
     }
 
     return MIGRATION_POSTCOPY_CXL_RAM_STREAM_ALLOW;
+}
+
+MigrationPostcopyCXLHybridFaultAction
+migration_postcopy_cxl_hybrid_fault_action(bool hybrid_mode,
+                                           bool cxl_fault_supported)
+{
+    return hybrid_mode && cxl_fault_supported ?
+        MIGRATION_POSTCOPY_CXL_HYBRID_FAULT_HANDLE_CXL :
+        MIGRATION_POSTCOPY_CXL_HYBRID_FAULT_FALLBACK_RAM;
 }
 
 MigrationPostcopyIncomingListenPlan
@@ -81,4 +94,20 @@ bool migration_postcopy_cxl_should_drain_source_remaps(
 {
     return hybrid_mode &&
            phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE;
+}
+
+bool migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
+    bool hybrid_mode,
+    bool rdma_sidecar_enabled,
+    MigrationStatus state)
+{
+    return hybrid_mode &&
+           rdma_sidecar_enabled &&
+           state == MIGRATION_STATUS_ACTIVE;
+}
+
+bool migration_postcopy_uffd_copy_result_satisfied(int ret,
+                                                   bool allow_existing)
+{
+    return ret == 0 || (allow_existing && ret == -EEXIST);
 }

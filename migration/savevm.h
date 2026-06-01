@@ -30,6 +30,7 @@
 #define QEMU_VM_SECTION_FOOTER       0x7e
 
 #define QEMU_VM_PING_PACKAGED_LOADED 0x42
+#define QEMU_VM_PING_CXL_RDMA_SIDECAR_ADVISE_READY 0x52444d41
 
 bool qemu_savevm_state_blocked(Error **errp);
 void qemu_savevm_non_migratable_list(strList **reasons);

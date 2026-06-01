@@ -19,6 +19,7 @@
 #include "qemu/main-loop.h"
 #include "migration/blocker.h"
 #include "cxl.h"
+#include "cxl-rdma.h"
 #include "exec.h"
 #include "file.h"
 #include "system/runstate.h"
@@ -72,6 +73,7 @@
 
 #define INMIGRATE_DEFAULT_EXIT_ON_ERROR true
 #define POSTCOPY_PACKAGE_WAIT_POLL_MS 1
+#define CXL_RDMA_SIDECAR_ADVISE_SYNC_TIMEOUT_MS 10000
 #define CXL_GUEST_TIMELINE_ENV "QEMU_CXL_GUEST_TIMELINE_MARKER_ADDR"
 
 static GSList *migration_state_notifiers[MIG_MODE__MAX];
@@ -2830,17 +2832,21 @@ static int migration_completion_finish_cxl_postcopy(MigrationState *ms,
         return 0;
     }
 
+    cxl_hybrid_ctrl_trace_page_state_snapshot("completion-prepare-begin");
     trace_cxl_hybrid_completion_prepare_begin();
     remaining_sent = cxl_hybrid_completion_publish_remaining_pages(ms, errp);
     if (remaining_sent < 0) {
         trace_cxl_hybrid_completion_prepare_end(remaining_sent,
                                                 remaining_sent);
+        cxl_hybrid_ctrl_trace_page_state_snapshot("completion-prepare-error");
         return remaining_sent;
     }
     if (migrate_cxl_fault_resolve_uses_region()) {
         ret = cxl_hybrid_completion_publish_remaining_regions(errp);
         if (ret < 0) {
             trace_cxl_hybrid_completion_prepare_end(remaining_sent, ret);
+            cxl_hybrid_ctrl_trace_page_state_snapshot(
+                "completion-prepare-error");
             return ret;
         }
     }
@@ -2848,10 +2854,12 @@ static int migration_completion_finish_cxl_postcopy(MigrationState *ms,
     ret = cxl_hybrid_control_complete_source_run(errp);
     if (ret < 0) {
         trace_cxl_hybrid_completion_prepare_end(remaining_sent, ret);
+        cxl_hybrid_ctrl_trace_page_state_snapshot("completion-prepare-error");
         return ret;
     }
 
     trace_cxl_hybrid_completion_prepare_end(remaining_sent, 0);
+    cxl_hybrid_ctrl_trace_page_state_snapshot("completion-prepare-end");
     return 0;
 }
 
@@ -2860,6 +2868,18 @@ migration_wait_main_channel(MigrationState *ms)
 {
     /* Wait until one PONG message received */
     qemu_sem_wait(&ms->rp_state.rp_pong_acks);
+}
+
+static int migration_wait_main_channel_pong(MigrationState *ms, Error **errp)
+{
+    if (qemu_sem_timedwait(&ms->rp_state.rp_pong_acks,
+                           CXL_RDMA_SIDECAR_ADVISE_SYNC_TIMEOUT_MS) == 0) {
+        return 0;
+    }
+
+    error_setg(errp,
+               "timed out waiting for destination postcopy advise sync");
+    return -ETIMEDOUT;
 }
 
 /*
@@ -2898,6 +2918,10 @@ static int postcopy_start(MigrationState *ms, Error **errp)
     }
 
     if (migrate_cxl_hybrid()) {
+        cxl_rdma_sidecar_drain_bulk_claims();
+    }
+
+    if (migrate_cxl_hybrid()) {
         cxl_hybrid_prefault_wait_before_postcopy();
         if (!cxl_hybrid_init_source()) {
             error_setg(errp,
@@ -2914,9 +2938,13 @@ static int postcopy_start(MigrationState *ms, Error **errp)
                           "Failed to publish CXL hybrid source run state: ");
             return -1;
         }
+        cxl_hybrid_ctrl_trace_page_state_snapshot("postcopy-before-start");
     }
 
     trace_postcopy_start();
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_ctrl_trace_page_state_snapshot("postcopy-start");
+    }
     cxl_guest_timeline_mark("postcopy-start",
                             CXL_GUEST_TIMELINE_EVENT_POSTCOPY_START);
     migration_trace_postcopy_timeline(ms, "start", UINT64_MAX);
@@ -2964,6 +2992,8 @@ static int postcopy_start(MigrationState *ms, Error **errp)
                           "CXL hybrid staged page publish failed: ");
             goto fail;
         }
+        cxl_hybrid_ctrl_trace_page_state_snapshot(
+            "postcopy-after-staged-publish");
 
         ret = cxl_hybrid_metadata_send(ms->to_dst_file, errp);
         if (ret) {
@@ -3050,11 +3080,15 @@ static int postcopy_start(MigrationState *ms, Error **errp)
                                CXL_MIGRATION_SWITCH_REASON_NONE,
                                ms->cxl_hybrid_iteration);
         cxl_hybrid_start_warm_push(ms);
+        cxl_hybrid_ctrl_trace_page_state_snapshot("postcopy-warm-enter");
     }
 
     migration_downtime_end(ms);
     cxl_guest_timeline_mark("downtime-end",
                             CXL_GUEST_TIMELINE_EVENT_DOWNTIME_END);
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_ctrl_trace_page_state_snapshot("downtime-end");
+    }
     migration_trace_postcopy_timeline(ms, "downtime-end", UINT64_MAX);
 
     if (migrate_postcopy_ram()) {
@@ -3095,6 +3129,11 @@ static int postcopy_start(MigrationState *ms, Error **errp)
         ms->rp_state.rp_thread_created ? "state-postcopy-device" :
                                          "state-postcopy-active",
         UINT64_MAX);
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_ctrl_trace_page_state_snapshot(
+            ms->rp_state.rp_thread_created ? "postcopy-device" :
+                                             "postcopy-active");
+    }
     if (!ms->rp_state.rp_thread_created) {
         cxl_guest_timeline_mark("postcopy-active",
                                 CXL_GUEST_TIMELINE_EVENT_POSTCOPY_ACTIVE);
@@ -3223,6 +3262,11 @@ static int migration_completion_precopy(MigrationState *s)
         goto out_unlock;
     }
 
+    if (migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
+            migrate_cxl_hybrid(), migrate_cxl_rdma_sidecar(), s->state)) {
+        cxl_rdma_sidecar_drain_bulk_claims();
+    }
+
     ret = qemu_savevm_state_complete_precopy(s);
 out_unlock:
     bql_unlock();
@@ -3270,6 +3314,9 @@ static void migration_completion(MigrationState *s)
                                 CXL_GUEST_TIMELINE_EVENT_COMPLETION_ENTER);
         migration_trace_postcopy_timeline(s, "completion-enter",
                                           UINT64_MAX);
+        if (migrate_cxl_hybrid()) {
+            cxl_hybrid_ctrl_trace_page_state_snapshot("completion-enter");
+        }
         migration_completion_postcopy(s);
         if (qemu_file_get_error(s->to_dst_file)) {
             goto fail;
@@ -3715,6 +3762,9 @@ static MigIterateState migration_wait_for_postcopy_package_loaded(
                       MIGRATION_STATUS_POSTCOPY_ACTIVE);
     migration_trace_postcopy_timeline(s, "state-postcopy-active",
                                       pending_size);
+    if (migrate_cxl_hybrid()) {
+        cxl_hybrid_ctrl_trace_page_state_snapshot("postcopy-active");
+    }
     cxl_guest_timeline_mark("postcopy-active",
                             CXL_GUEST_TIMELINE_EVENT_POSTCOPY_ACTIVE);
     return MIG_ITERATE_SKIP;
@@ -3785,6 +3835,9 @@ static MigIterateState migration_iteration_run(MigrationState *s)
                               MIGRATION_STATUS_POSTCOPY_ACTIVE);
             migration_trace_postcopy_timeline(s, "state-postcopy-active",
                                               pending_size);
+            if (migrate_cxl_hybrid()) {
+                cxl_hybrid_ctrl_trace_page_state_snapshot("postcopy-active");
+            }
             cxl_guest_timeline_mark("postcopy-active",
                                     CXL_GUEST_TIMELINE_EVENT_POSTCOPY_ACTIVE);
         }
@@ -4203,6 +4256,11 @@ static void *migration_thread(void *opaque)
 
         /* And do a ping that will make stuff easier to debug */
         qemu_savevm_send_ping(s->to_dst_file, 1);
+        if (migrate_cxl_rdma_sidecar() &&
+            migration_wait_main_channel_pong(s, &local_err)) {
+            migrate_error_propagate(s, local_err);
+            goto out;
+        }
     }
 
     if (migrate_postcopy()) {
@@ -4212,8 +4270,28 @@ static void *migration_thread(void *opaque)
          * early.
          */
         qemu_savevm_send_postcopy_advise(s->to_dst_file);
+        if (migrate_cxl_rdma_sidecar()) {
+            if (!s->rp_state.rp_thread_created) {
+                error_setg(&local_err,
+                           "CXL RDMA sidecar requires a return path for setup synchronization");
+                migrate_error_propagate(s, local_err);
+                goto out;
+            }
+            qemu_savevm_send_ping(
+                s->to_dst_file,
+                QEMU_VM_PING_CXL_RDMA_SIDECAR_ADVISE_READY);
+            if (migration_wait_main_channel_pong(s, &local_err)) {
+                migrate_error_propagate(s, local_err);
+                goto out;
+            }
+        }
         if (migrate_cxl_rdma_sidecar() &&
-            !cxl_hybrid_start_rdma_sidecar(false, false, &local_err)) {
+            !cxl_hybrid_start_rdma_sidecar(false, true, &local_err)) {
+            migrate_error_propagate(s, local_err);
+            goto out;
+        }
+        if (migrate_cxl_rdma_sidecar() &&
+            cxl_hybrid_begin_source_control_run(&local_err)) {
             migrate_error_propagate(s, local_err);
             goto out;
         }

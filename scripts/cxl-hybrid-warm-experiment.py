@@ -85,9 +85,25 @@ RDMA_BULK_TRACE_RE = re.compile(
 RDMA_SIDECAR_BYTES_TRACE_RE = re.compile(
     r"\bregion=(?P<region>\d+)\b.*\bbytes=(?P<bytes>\d+)\b"
 )
+RDMA_SIDECAR_REGISTER_TRACE_RE = re.compile(
+    r"\bbytes=(?P<bytes>\d+)\b"
+)
+RDMA_SIDECAR_CONNECT_TRACE_RE = re.compile(
+    r"\btime_ns=(?P<time_ns>\d+)\b"
+)
+RDMA_SIDECAR_FAILED_TRACE_RE = re.compile(
+    r"\bregion=(?P<region>\d+)\b"
+)
 RDMA_SIDECAR_STALE_TRACE_RE = re.compile(
     r"\bregion=(?P<region>\d+)\b.*\bbytes=(?P<bytes>\d+)\b"
     r".*\bcxl_race_lost=(?P<cxl_race_lost>[01])\b"
+)
+CXL_WORKER_CLASS_TRACE_RE = re.compile(
+    r"\bclass=(?P<class>\d+)\b"
+)
+CXL_WORKER_COMPLETE_TRACE_RE = re.compile(
+    r"\bbytes=(?P<bytes>\d+)\b.*\belapsed_ns=(?P<elapsed_ns>\d+)\b"
+    r".*\bret=(?P<ret>-?\d+)\b.*\bcompleted=(?P<completed>[01])\b"
 )
 PUBLISH_SPAN_TRACE_RE = re.compile(
     r"\blen=0x(?P<len>[0-9a-fA-F]+)\b"
@@ -201,6 +217,13 @@ RDMA_SIDECAR_METRICS = [
     "rdma_sidecar_max_cover_percent",
     "rdma_sidecar_failed",
 ]
+
+
+def mib_s(bytes_value: int, time_ns: int) -> float:
+    return 0.0 if time_ns <= 0 else (
+        bytes_value / (1024 * 1024)) / (time_ns / 1e9)
+
+
 THRESHOLD_PROFILES = {
     "conservative": {
         "name": "conservative",
@@ -512,7 +535,8 @@ def build_rdma_sidecar_address(args, run_index: int) -> dict[str, object]:
     port = str(int(rdma_port) + run_index)
     return {
         "transport": "rdma",
-        "rdma": {"host": rdma_host, "port": port},
+        "host": rdma_host,
+        "port": port,
     }
 
 
@@ -520,8 +544,8 @@ def format_rdma_sidecar_endpoint(addr):
     if not addr or addr.get("transport") != "rdma":
         return None
     rdma = addr.get("rdma") or {}
-    host = rdma.get("host")
-    port = rdma.get("port")
+    host = addr.get("host") or rdma.get("host")
+    port = addr.get("port") or rdma.get("port")
     if host is None or port is None:
         return None
     return f"rdma:{host}:{port}"
@@ -902,11 +926,35 @@ def build_heartbeat_args(chardev_id: str, sock_path: Path):
     ]
 
 
-def start_vm(common, qmp_sock, extra_args, stderr_path: Path, env=None):
+def wrap_qemu_with_gdb_batch(qemu_argv, gdb_log_path: Path):
+    return [
+        "gdb", "-q",
+        "--batch",
+        "-ex", "set pagination off",
+        "-ex", "handle SIGUSR1 nostop noprint pass",
+        "-ex", "handle SIGUSR2 nostop noprint pass",
+        "-ex", "run",
+        "-ex", "thread apply all bt full",
+        "-ex", "quit",
+        "--args",
+        *qemu_argv,
+    ]
+
+
+def start_vm(common, qmp_sock, extra_args, stderr_path: Path, env=None,
+             gdb_log_path: Path = None):
+    argv = common + extra_args + ["-qmp", f"unix:{qmp_sock},server=on,wait=off"]
+    stdout = subprocess.DEVNULL
+    if gdb_log_path is not None:
+        argv = wrap_qemu_with_gdb_batch(argv, gdb_log_path)
+        stderr_path = gdb_log_path
+
     with open(stderr_path, "w", encoding="utf-8") as stderr:
+        if gdb_log_path is not None:
+            stdout = stderr
         return subprocess.Popen(
-            common + extra_args + ["-qmp", f"unix:{qmp_sock},server=on,wait=off"],
-            stdout=subprocess.DEVNULL,
+            argv,
+            stdout=stdout,
             stderr=stderr,
             text=True,
             env=env,
@@ -1023,6 +1071,17 @@ def trace_count_template():
         "ram_stream_publish_span_already_visible_pages": 0,
         "ram_stream_publish_span_unknown_reason": 0,
         "ram_stream_publish_span_unknown_reason_pages": 0,
+        "cxl_worker_enqueue_pages": 0,
+        "cxl_worker_enqueue_high_pages": 0,
+        "cxl_worker_enqueue_low_pages": 0,
+        "cxl_worker_complete_events": 0,
+        "cxl_worker_copied_pages": 0,
+        "cxl_worker_copied_bytes": 0,
+        "cxl_worker_copy_time_ns": 0,
+        "max_cxl_worker_copy_time_ns": 0,
+        "cxl_worker_published_pages": 0,
+        "cxl_worker_stale_pages": 0,
+        "cxl_worker_failed_pages": 0,
         "postcopy_fault_request": 0,
         "postcopy_page_req_add": 0,
         "postcopy_page_req_del": 0,
@@ -1138,6 +1197,20 @@ def parse_trace_log(trace_file: Path):
             if match:
                 counts["rdma_bulk_regions"] += 1
                 counts["rdma_bulk_bytes"] += int(match.group("bytes"))
+        elif "cxl_rdma_sidecar_connect_complete " in line:
+            match = RDMA_SIDECAR_CONNECT_TRACE_RE.search(line)
+            if match:
+                counts["rdma_sidecar_connect_time_ns"] += int(
+                    match.group("time_ns"))
+        elif "cxl_rdma_sidecar_register " in line:
+            match = RDMA_SIDECAR_REGISTER_TRACE_RE.search(line)
+            if match:
+                counts["rdma_sidecar_registered_bytes"] += int(
+                    match.group("bytes"))
+        elif "cxl_rdma_sidecar_failed " in line:
+            if RDMA_SIDECAR_FAILED_TRACE_RE.search(line):
+                counts["rdma_sidecar_failed_regions"] += 1
+                counts["rdma_sidecar_failed"] = True
         elif "cxl_rdma_sidecar_post " in line:
             match = RDMA_SIDECAR_BYTES_TRACE_RE.search(line)
             if match:
@@ -1221,6 +1294,39 @@ def parse_trace_log(trace_file: Path):
                     counts[
                         "ram_stream_publish_span_unknown_reason_pages"
                     ] += pages
+        elif "cxl_hybrid_cxl_worker_enqueue " in line:
+            counts["cxl_worker_enqueue_pages"] += 1
+            match = CXL_WORKER_CLASS_TRACE_RE.search(line)
+            if match:
+                klass = int(match.group("class"))
+                if klass == 0:
+                    counts["cxl_worker_enqueue_high_pages"] += 1
+                elif klass == 1:
+                    counts["cxl_worker_enqueue_low_pages"] += 1
+        elif "cxl_hybrid_cxl_worker_complete " in line:
+            counts["cxl_worker_complete_events"] += 1
+            match = CXL_WORKER_COMPLETE_TRACE_RE.search(line)
+            if match:
+                bytes_ = int(match.group("bytes"))
+                elapsed_ns = int(match.group("elapsed_ns"))
+                ret = int(match.group("ret"))
+                completed = int(match.group("completed"))
+                if ret:
+                    counts["cxl_worker_failed_pages"] += 1
+                else:
+                    if bytes_:
+                        pages = max(
+                            (bytes_ + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+                        counts["cxl_worker_copied_pages"] += pages
+                        counts["cxl_worker_copied_bytes"] += bytes_
+                        counts["cxl_worker_copy_time_ns"] += elapsed_ns
+                        counts["max_cxl_worker_copy_time_ns"] = max(
+                            counts["max_cxl_worker_copy_time_ns"],
+                            elapsed_ns)
+                    if completed:
+                        counts["cxl_worker_published_pages"] += 1
+                    else:
+                        counts["cxl_worker_stale_pages"] += 1
         elif "postcopy_ram_fault_thread_request " in line:
             counts["postcopy_fault_request"] += 1
         elif "postcopy_page_req_add " in line:
@@ -1729,6 +1835,11 @@ def dump_guest_physical_memory_chunked(conn, addr, size, path: Path):
             tmp_path.unlink()
 
 
+def parse_hmp_register_u32(registers: str, name: str):
+    match = re.search(rf"\b{name}=([0-9a-fA-F]+)\b", registers or "")
+    return int(match.group(1), 16) if match else None
+
+
 def in_memory_ring_dump_size(path: Path, magic, version, header_bytes,
                              count_index, capacity_index):
     if not path.exists() or path.stat().st_size < header_bytes:
@@ -1853,7 +1964,22 @@ def collect_in_memory_guest_latency(conn, path: Path, pressure, **kwargs):
         return report
 
     try:
-        return collect_from(conn, path, marker_path, primary_dump_source)
+        report = collect_from(conn, path, marker_path, primary_dump_source)
+        if not report.get("valid") and fallback_conn is not None:
+            primary_error = (
+                report.get("error") or
+                "primary in-memory latency dump is invalid"
+            )
+            try:
+                fallback = fallback_report(primary_error)
+                if fallback is not None:
+                    fallback["primary_invalid_magic"] = report.get("magic")
+                    fallback["primary_invalid_version"] = report.get("version")
+                    fallback["primary_invalid_bytes"] = report.get("bytes")
+                    return fallback
+            except Exception as fallback_exc:
+                report["fallback_dump_error"] = str(fallback_exc)
+        return report
     except Exception as exc:
         primary_error = str(exc)
         partial = parse_partial_primary(exc)
@@ -2168,6 +2294,12 @@ def extract_summary(samples):
     region_publish_time_ns = 0
     rdma_bulk_regions = 0
     rdma_bulk_bytes = 0
+    page_state_cxl_worker_bytes = 0
+    page_state_cxl_worker_time_ns = 0
+    page_state_rdma_completed_bytes = 0
+    page_state_rdma_completed_time_ns = 0
+    page_state_rdma_stale_pages = 0
+    page_state_cas_failures = 0
     rdma_sidecar_metrics = {key: 0 for key in RDMA_SIDECAR_METRICS}
     rdma_ready_regions = 0
     rdma_ready_pages = 0
@@ -2348,6 +2480,30 @@ def extract_summary(samples):
             rdma_bulk_bytes,
             src_xcxl.get("rdma-bulk-bytes", 0),
             dst_xcxl.get("rdma-bulk-bytes", 0))
+        page_state_cxl_worker_bytes = max(
+            page_state_cxl_worker_bytes,
+            src_xcxl.get("page-state-cxl-worker-bytes", 0),
+            dst_xcxl.get("page-state-cxl-worker-bytes", 0))
+        page_state_cxl_worker_time_ns = max(
+            page_state_cxl_worker_time_ns,
+            src_xcxl.get("page-state-cxl-worker-time-ns", 0),
+            dst_xcxl.get("page-state-cxl-worker-time-ns", 0))
+        page_state_rdma_completed_bytes = max(
+            page_state_rdma_completed_bytes,
+            src_xcxl.get("page-state-rdma-completed-bytes", 0),
+            dst_xcxl.get("page-state-rdma-completed-bytes", 0))
+        page_state_rdma_completed_time_ns = max(
+            page_state_rdma_completed_time_ns,
+            src_xcxl.get("page-state-rdma-completed-time-ns", 0),
+            dst_xcxl.get("page-state-rdma-completed-time-ns", 0))
+        page_state_rdma_stale_pages = max(
+            page_state_rdma_stale_pages,
+            src_xcxl.get("page-state-rdma-stale-pages", 0),
+            dst_xcxl.get("page-state-rdma-stale-pages", 0))
+        page_state_cas_failures = max(
+            page_state_cas_failures,
+            src_xcxl.get("page-state-cas-failures", 0),
+            dst_xcxl.get("page-state-cas-failures", 0))
         for key in RDMA_SIDECAR_METRICS:
             qmp_key = key.replace("_", "-")
             rdma_sidecar_metrics[key] = max(
@@ -2593,6 +2749,13 @@ def extract_summary(samples):
         "region_publish_time_ns": region_publish_time_ns,
         "rdma_bulk_regions": rdma_bulk_regions,
         "rdma_bulk_bytes": rdma_bulk_bytes,
+        "page_state_cxl_worker_bytes": page_state_cxl_worker_bytes,
+        "page_state_cxl_worker_time_ns": page_state_cxl_worker_time_ns,
+        "page_state_rdma_completed_bytes": page_state_rdma_completed_bytes,
+        "page_state_rdma_completed_time_ns":
+            page_state_rdma_completed_time_ns,
+        "page_state_rdma_stale_pages": page_state_rdma_stale_pages,
+        "page_state_cas_failures": page_state_cas_failures,
         **rdma_sidecar_metrics,
         "rdma_ready_regions": rdma_ready_regions,
         "rdma_ready_pages": rdma_ready_pages,
@@ -3054,8 +3217,10 @@ def run_case(base: Path, mode: str, pressure: str,
              rdma_sidecar_region_bytes=0,
              accel="tcg",
              qemu_perf=False,
+             gdb_dst=False,
              in_memory_guest_latency=False,
-             in_memory_guest_latency_source_first=False):
+             in_memory_guest_latency_source_first=False,
+             post_complete_guest_run_ms=0):
     profile = threshold_profile or resolve_threshold_profile("balanced")
     if mode_uses_cxl_hybrid(mode):
         case_name = f"{mode}-{profile['name']}-run{run_index:02d}"
@@ -3083,6 +3248,7 @@ def run_case(base: Path, mode: str, pressure: str,
     in_memory_marker_file = case_dir / "guest-in-memory-marker.bin"
     in_memory_latency_src_file = case_dir / "guest-in-memory-latency-src.bin"
     in_memory_marker_src_file = case_dir / "guest-in-memory-marker-src.bin"
+    post_complete_diag_file = case_dir / "post-complete-diagnostics.json"
     src_heartbeat_sock = runtime_paths["src_heartbeat_sock"]
     dst_heartbeat_sock = runtime_paths["dst_heartbeat_sock"]
     if in_memory_guest_latency:
@@ -3114,6 +3280,11 @@ def run_case(base: Path, mode: str, pressure: str,
             "cxl_hybrid_publish_wait_complete",
             "cxl_hybrid_region_publish_complete",
             "cxl_hybrid_rdma_bulk_region",
+            "cxl_hybrid_rdma_bulk_skip",
+            "cxl_rdma_sidecar_connect_start",
+            "cxl_rdma_sidecar_connect_complete",
+            "cxl_rdma_sidecar_register",
+            "cxl_rdma_sidecar_failed",
             "cxl_rdma_sidecar_schedule",
             "cxl_rdma_sidecar_post",
             "cxl_rdma_sidecar_complete",
@@ -3128,6 +3299,11 @@ def run_case(base: Path, mode: str, pressure: str,
             "cxl_hybrid_dst_region_remap",
             "cxl_hybrid_dst_region_remap_ts",
             "cxl_hybrid_ram_stream_publish_span",
+            "cxl_hybrid_page_state_snapshot_summary",
+            "cxl_hybrid_page_state_snapshot_state",
+            "cxl_hybrid_page_state_snapshot_runtime",
+            "cxl_hybrid_cxl_worker_enqueue",
+            "cxl_hybrid_cxl_worker_complete",
             "cxl_hybrid_region_request_enqueue",
             "cxl_hybrid_region_request_dequeue",
             "postcopy_ram_fault_thread_request",
@@ -3136,6 +3312,10 @@ def run_case(base: Path, mode: str, pressure: str,
             "postcopy_page_req_add_ts",
             "postcopy_page_req_del",
             "postcopy_page_req_del_ts",
+            "postcopy_discard_send_range",
+            "qemu_savevm_send_postcopy_ram_discard",
+            "loadvm_postcopy_ram_handle_discard_header",
+            "ram_discard_range",
             "postcopy_request_shared_page",
             "postcopy_request_shared_page_present",
             "ram_save_queue_pages",
@@ -3204,8 +3384,11 @@ def run_case(base: Path, mode: str, pressure: str,
     dst_env = with_guest_timeline_env(dst_env, in_memory_guest_latency)
     src = start_vm(common, str(src_sock), src_vm_args, src_stderr_file,
                    env=src_env)
+    dst_start_kwargs = {"env": dst_env}
+    if gdb_dst:
+        dst_start_kwargs["gdb_log_path"] = case_dir / "dst-gdb.txt"
     dst = start_vm(common, str(dst_sock), dst_vm_args, dst_stderr_file,
-                   env=dst_env)
+                   **dst_start_kwargs)
     proc_list = [src, dst]
     procs = {
         "src": src,
@@ -3347,6 +3530,46 @@ def run_case(base: Path, mode: str, pressure: str,
                 migration_start_ts, migration_complete_ts, last
             )
         )
+        if post_complete_guest_run_ms > 0:
+            time.sleep(post_complete_guest_run_ms / 1000.0)
+            diag = {}
+            for label, conn in (("src", src_qmp), ("dst", dst_qmp)):
+                diag[label] = {}
+                for command, arguments in (
+                    ("query-status", {}),
+                    ("query-cpus-fast", {}),
+                    ("human-monitor-command",
+                     {"command-line": "info registers"}),
+                ):
+                    value, err = qmp_probe(conn, command, arguments)
+                    diag[label][command] = value
+                    if err:
+                        diag[label][f"{command}-error"] = err
+                if label == "dst":
+                    registers = diag[label].get("human-monitor-command")
+                    eip = parse_hmp_register_u32(registers, "EIP")
+                    dumps = {}
+                    for dump_name, addr, size in (
+                        ("boot_page", 0x7000, 0x2000),
+                        ("eip_page", (eip or 0) & ~0xfff, 0x1000),
+                    ):
+                        dump_path = case_dir / f"post-complete-{dump_name}.bin"
+                        try:
+                            dump_guest_physical_memory(conn, addr, size,
+                                                       dump_path)
+                            dumps[dump_name] = {
+                                "addr": addr,
+                                "size": size,
+                                "path": str(dump_path),
+                            }
+                        except Exception as exc:
+                            dumps[dump_name] = {
+                                "addr": addr,
+                                "size": size,
+                                "error": str(exc),
+                            }
+                    diag[label]["memory-dumps"] = dumps
+            write_json(post_complete_diag_file, diag)
         if in_memory_guest_latency:
             heartbeat_events_for_in_memory = (
                 heartbeat_collector.snapshot() if heartbeat_collector else []
@@ -3727,6 +3950,24 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
         "rdma_bulk_bytes":
             max(summary.get("rdma_bulk_bytes", 0),
                 trace.get("rdma_bulk_bytes", 0)),
+        "cxl_worker_bytes":
+            summary.get("page_state_cxl_worker_bytes", 0),
+        "cxl_worker_time_ms":
+            summary.get("page_state_cxl_worker_time_ns", 0) / 1e6,
+        "cxl_worker_bw_mib_s":
+            mib_s(summary.get("page_state_cxl_worker_bytes", 0),
+                  summary.get("page_state_cxl_worker_time_ns", 0)),
+        "rdma_completed_bytes":
+            summary.get("page_state_rdma_completed_bytes", 0),
+        "rdma_completed_time_ms":
+            summary.get("page_state_rdma_completed_time_ns", 0) / 1e6,
+        "rdma_completed_bw_mib_s":
+            mib_s(summary.get("page_state_rdma_completed_bytes", 0),
+                  summary.get("page_state_rdma_completed_time_ns", 0)),
+        "page_state_rdma_stale_pages":
+            summary.get("page_state_rdma_stale_pages", 0),
+        "page_state_cas_failures":
+            summary.get("page_state_cas_failures", 0),
         **rdma_sidecar_metrics,
         "rdma_ready_regions":
             max(summary.get("rdma_ready_regions", 0),
@@ -4134,6 +4375,28 @@ def summarize_single_result(pressure, mode, threshold_profile, run_index, result
             trace.get("ram_stream_publish_span_already_visible_pages", 0),
         "ram_stream_publish_span_unknown_reason_pages":
             trace.get("ram_stream_publish_span_unknown_reason_pages", 0),
+        "cxl_worker_enqueue_pages":
+            trace.get("cxl_worker_enqueue_pages", 0),
+        "cxl_worker_enqueue_high_pages":
+            trace.get("cxl_worker_enqueue_high_pages", 0),
+        "cxl_worker_enqueue_low_pages":
+            trace.get("cxl_worker_enqueue_low_pages", 0),
+        "cxl_worker_complete_events":
+            trace.get("cxl_worker_complete_events", 0),
+        "cxl_worker_copied_pages":
+            trace.get("cxl_worker_copied_pages", 0),
+        "cxl_worker_copied_bytes":
+            trace.get("cxl_worker_copied_bytes", 0),
+        "cxl_worker_copy_time_ns":
+            trace.get("cxl_worker_copy_time_ns", 0),
+        "max_cxl_worker_copy_time_ns":
+            trace.get("max_cxl_worker_copy_time_ns", 0),
+        "cxl_worker_published_pages":
+            trace.get("cxl_worker_published_pages", 0),
+        "cxl_worker_stale_pages":
+            trace.get("cxl_worker_stale_pages", 0),
+        "cxl_worker_failed_pages":
+            trace.get("cxl_worker_failed_pages", 0),
         "final_status": (result or {}).get("final_status"),
     }
 
@@ -4261,6 +4524,17 @@ def summarize_grouped_runs(pressure, mode, threshold_profile, run_results, rows)
         "ram_stream_publish_span_destination_owned_pages",
         "ram_stream_publish_span_already_visible_pages",
         "ram_stream_publish_span_unknown_reason_pages",
+        "cxl_worker_enqueue_pages",
+        "cxl_worker_enqueue_high_pages",
+        "cxl_worker_enqueue_low_pages",
+        "cxl_worker_complete_events",
+        "cxl_worker_copied_pages",
+        "cxl_worker_copied_bytes",
+        "cxl_worker_copy_time_ns",
+        "max_cxl_worker_copy_time_ns",
+        "cxl_worker_published_pages",
+        "cxl_worker_stale_pages",
+        "cxl_worker_failed_pages",
         "max_fault_publish_waits",
         "max_fault_publish_wait_time_ns",
         "max_dst_fault_read_time_ns",
@@ -4285,6 +4559,14 @@ def summarize_grouped_runs(pressure, mode, threshold_profile, run_results, rows)
         "cxl_publish_time_ns",
         "rdma_bulk_regions",
         "rdma_bulk_bytes",
+        "cxl_worker_bytes",
+        "cxl_worker_time_ms",
+        "cxl_worker_bw_mib_s",
+        "rdma_completed_bytes",
+        "rdma_completed_time_ms",
+        "rdma_completed_bw_mib_s",
+        "page_state_rdma_stale_pages",
+        "page_state_cas_failures",
         *RDMA_SIDECAR_METRICS,
         "rdma_ready_regions",
         "rdma_ready_pages",
@@ -4426,8 +4708,10 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                         rdma_sidecar_region_bytes=0,
                         accel="tcg",
                         qemu_perf=False,
+                        gdb_dst=False,
                         in_memory_guest_latency=False,
-                        in_memory_guest_latency_source_first=False):
+                        in_memory_guest_latency_source_first=False,
+                        post_complete_guest_run_ms=0):
     results = {}
     summary = []
     summary_grouped = []
@@ -4467,10 +4751,16 @@ def run_pressure_matrix(base: Path, pressures, modes, threshold_profile=None,
                     kwargs["accel"] = accel
                 if qemu_perf:
                     kwargs["qemu_perf"] = qemu_perf
+                if gdb_dst:
+                    kwargs["gdb_dst"] = True
                 if in_memory_guest_latency:
                     kwargs["in_memory_guest_latency"] = True
                 if in_memory_guest_latency_source_first:
                     kwargs["in_memory_guest_latency_source_first"] = True
+                if post_complete_guest_run_ms:
+                    kwargs["post_complete_guest_run_ms"] = (
+                        post_complete_guest_run_ms
+                    )
                 if switch_remap_coverage is not None:
                     kwargs["switch_remap_coverage"] = switch_remap_coverage
                 if clean_remap_enable:
@@ -4618,11 +4908,15 @@ def parse_args(argv=None):
                         help="QEMU accelerator for source and destination VMs")
     parser.add_argument("--qemu-perf", action="store_true",
                         help="Record perf data for source and destination QEMU PIDs")
+    parser.add_argument("--gdb-dst", action="store_true",
+                        help="Run destination QEMU under gdb batch and save dst-gdb.txt")
     parser.add_argument("--in-memory-guest-latency", action="store_true",
                         help="Record per-sample guest TSC deltas in RAM and dump them after migration")
     parser.add_argument("--in-memory-guest-latency-source-first",
                         action="store_true",
                         help="Dump the in-memory latency log from source QMP first; source-side windows only")
+    parser.add_argument("--post-complete-guest-run-ms", type=int, default=0,
+                        help="Diagnostic delay before stopping the destination to dump guest logs")
     return parser.parse_args(argv)
 
 
@@ -4712,10 +5006,13 @@ def main():
                                      args.x_cxl_rdma_sidecar_region_bytes,
                                      accel=args.accel,
                                      qemu_perf=args.qemu_perf,
+                                     gdb_dst=args.gdb_dst,
                                      in_memory_guest_latency=
                                      args.in_memory_guest_latency,
                                      in_memory_guest_latency_source_first=
-                                     args.in_memory_guest_latency_source_first)
+                                     args.in_memory_guest_latency_source_first,
+                                     post_complete_guest_run_ms=
+                                     args.post_complete_guest_run_ms)
         result = {
             "base_dir": str(base),
             **matrix,

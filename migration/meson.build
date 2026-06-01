@@ -24,8 +24,6 @@ system_ss.add(files(
   'channel-block.c',
   'cpr.c',
   'cxl-hybrid-control.c',
-  'cxl-page-state.c',
-  'cxl-page-transfer.c',
   'cxl.c',
   'cpr-transfer.c',
   'cpr-exec.c',

@@ -9,6 +9,7 @@
 #include "qemu/osdep.h"
 #include "migration/cxl.h"
 #include "qemu/atomic.h"
+#include "qemu/bitmap.h"
 
 #define CXL_PAGE_KIND_SHIFT       0
 #define CXL_PAGE_OWNER_SHIFT      3
@@ -183,6 +184,21 @@ bool cxl_hybrid_page_state_complete_rdma(uint64_t *slot,
                slot, claim, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL);
 }
 
+bool cxl_hybrid_page_state_drop_claim(uint64_t *slot,
+                                      const CXLHybridPageClaim *claim)
+{
+    uint64_t dirty;
+
+    if (!slot || !claim ||
+        claim->owner == CXL_HYBRID_PAGE_OWNER_NONE) {
+        return false;
+    }
+
+    dirty = cxl_hybrid_page_state_make_dirty(claim->generation,
+                                             claim->dirty_seq);
+    return qatomic_cmpxchg(slot, claim->observed, dirty) == claim->observed;
+}
+
 void cxl_hybrid_page_state_mark_dirty(uint64_t *slot,
                                       uint32_t generation,
                                       uint32_t dirty_seq)
@@ -291,4 +307,82 @@ bool cxl_hybrid_page_state_longest_cxl_span(const uint64_t *page_state,
     span->first_page = first;
     span->nr_pages = span_len;
     return true;
+}
+
+void cxl_hybrid_page_state_snapshot(const uint64_t *page_state,
+                                    const unsigned long *visible_bitmap,
+                                    uint64_t total_pages,
+                                    uint32_t generation,
+                                    CXLHybridPageStateSnapshot *snapshot)
+{
+    uint32_t encoded_generation = cxl_hybrid_page_state_encoded_generation(
+        generation);
+
+    if (!snapshot) {
+        return;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    if (!page_state) {
+        return;
+    }
+
+    snapshot->total_pages = total_pages;
+    for (uint64_t page = 0; page < total_pages; page++) {
+        uint64_t word = qatomic_load_acquire(&page_state[page]);
+        CXLHybridPageStateKind kind = cxl_hybrid_page_state_kind(word);
+        bool visible = visible_bitmap && test_bit(page, visible_bitmap);
+
+        if (visible) {
+            snapshot->visible++;
+        }
+        if (cxl_hybrid_page_state_generation(word) != encoded_generation) {
+            snapshot->generation_mismatch++;
+            continue;
+        }
+
+        switch (kind) {
+        case CXL_HYBRID_PAGE_STATE_NOT_SENT:
+            snapshot->not_sent++;
+            break;
+        case CXL_HYBRID_PAGE_STATE_DIRTY:
+            snapshot->dirty++;
+            break;
+        case CXL_HYBRID_PAGE_STATE_IN_FLIGHT:
+            snapshot->in_flight++;
+            switch (cxl_hybrid_page_state_owner(word)) {
+            case CXL_HYBRID_PAGE_OWNER_CXL:
+                snapshot->in_flight_cxl++;
+                break;
+            case CXL_HYBRID_PAGE_OWNER_RDMA:
+                snapshot->in_flight_rdma++;
+                break;
+            default:
+                break;
+            }
+            break;
+        case CXL_HYBRID_PAGE_STATE_PUBLISHED:
+            snapshot->published++;
+            if (!visible) {
+                snapshot->published_invisible++;
+            }
+            switch (cxl_hybrid_page_state_location(word)) {
+            case CXL_HYBRID_PAGE_LOCATION_CXL:
+                snapshot->published_cxl++;
+                break;
+            case CXL_HYBRID_PAGE_LOCATION_DST_LOCAL:
+                snapshot->published_dst_local++;
+                break;
+            case CXL_HYBRID_PAGE_LOCATION_ZERO:
+                snapshot->published_zero++;
+                break;
+            default:
+                break;
+            }
+            break;
+        default:
+            snapshot->other++;
+            break;
+        }
+    }
 }

@@ -19,6 +19,11 @@ typedef enum MigrationPostcopyCXLRAMStreamWriteAction {
     MIGRATION_POSTCOPY_CXL_RAM_STREAM_ERROR,
 } MigrationPostcopyCXLRAMStreamWriteAction;
 
+typedef enum MigrationPostcopyCXLHybridFaultAction {
+    MIGRATION_POSTCOPY_CXL_HYBRID_FAULT_HANDLE_CXL,
+    MIGRATION_POSTCOPY_CXL_HYBRID_FAULT_FALLBACK_RAM,
+} MigrationPostcopyCXLHybridFaultAction;
+
 typedef struct MigrationPostcopyIncomingListenPlan {
     bool valid;
     bool prepare_discard;
@@ -43,11 +48,20 @@ MigrationPostcopyCXLRAMStreamWriteAction
 migration_postcopy_cxl_ram_stream_write_action(bool destination_owned,
                                                bool source_remapped,
                                                bool page_visible);
+MigrationPostcopyCXLHybridFaultAction
+migration_postcopy_cxl_hybrid_fault_action(bool hybrid_mode,
+                                           bool cxl_fault_supported);
 MigrationPostcopyIncomingListenPlan
 migration_postcopy_incoming_listen_plan(PostcopyState old_state);
 bool migration_postcopy_cxl_should_drain_source_remaps(
     bool hybrid_mode,
     CXLHybridPhase phase,
     bool clean_remap_enabled);
+bool migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
+    bool hybrid_mode,
+    bool rdma_sidecar_enabled,
+    MigrationStatus state);
+bool migration_postcopy_uffd_copy_result_satisfied(int ret,
+                                                   bool allow_existing);
 
 #endif /* QEMU_MIGRATION_POSTCOPY_H */

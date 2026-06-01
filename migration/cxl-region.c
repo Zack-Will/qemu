@@ -433,16 +433,11 @@ void cxl_hybrid_rdma_sidecar_configure_budget_for_test(
         return;
     }
 
-    state->max_accepted_regions = max_inflight_regions;
+    state->max_accepted_regions = 0;
     if (max_cover_percent && state->total_regions) {
         cover_regions = DIV_ROUND_UP(state->total_regions * max_cover_percent,
                                      100);
-        if (state->max_accepted_regions) {
-            state->max_accepted_regions = MIN(state->max_accepted_regions,
-                                              cover_regions);
-        } else {
-            state->max_accepted_regions = cover_regions;
-        }
+        state->max_accepted_regions = cover_regions;
     }
 }
 
@@ -918,6 +913,15 @@ void cxl_hybrid_rdma_sidecar_global_init(uint64_t total_regions,
                                                 pages_per_region);
 }
 
+void cxl_hybrid_rdma_sidecar_global_configure_budget(
+    uint32_t max_inflight,
+    uint8_t max_cover_percent)
+{
+    cxl_hybrid_rdma_sidecar_configure_budget_for_test(
+        &cxl_hybrid_rdma_sidecar_state, max_inflight, max_cover_percent);
+    cxl_hybrid_set_rdma_sidecar_budget_stats(max_inflight, max_cover_percent);
+}
+
 void cxl_hybrid_rdma_sidecar_global_destroy(void)
 {
     cxl_hybrid_rdma_sidecar_state_destroy_for_test(
@@ -1301,4 +1305,19 @@ int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
         .region_index = region_global / granule,
     };
     return 0;
+}
+
+bool cxl_hybrid_fault_region_can_cover(uint64_t block_global_base,
+                                       uint64_t block_used_len,
+                                       uint64_t block_cxl_pages_offset,
+                                       uint64_t fault_block_offset,
+                                       uint64_t granule,
+                                       uint64_t target_page_size)
+{
+    CXLHybridFaultRegionGeometry g = { 0 };
+
+    return cxl_hybrid_fault_region_compute(block_global_base, block_used_len,
+                                           block_cxl_pages_offset,
+                                           fault_block_offset, granule,
+                                           target_page_size, &g, NULL) == 0;
 }

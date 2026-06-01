@@ -40,6 +40,315 @@ class WarmExperimentScriptTest(unittest.TestCase):
         )
         self.assertNotIn("trace_cxl_rdma_sidecar_post(", fn_body)
 
+    def test_rdma_sidecar_cleanup_disconnects_before_destroying_verbs(self):
+        source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+
+        self.assertIn("bool connected;", source)
+        fn_start = source.index("static void cxl_rdma_sidecar_cleanup(")
+        fn_end = source.index("static void *cxl_rdma_sidecar_thread(", fn_start)
+        fn_body = source[fn_start:fn_end]
+
+        disconnect_index = fn_body.index("rdma_disconnect(ctx->cm_id);")
+        qp_index = fn_body.index("rdma_destroy_qp(ctx->cm_id);")
+        cq_index = fn_body.index("ibv_destroy_cq(ctx->cq);")
+        self.assertLess(disconnect_index, qp_index)
+        self.assertLess(disconnect_index, cq_index)
+
+    def test_rdma_sidecar_does_not_overwrite_cm_id_cq_fields(self):
+        source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+
+        fn_start = source.index(
+            "static int cxl_rdma_sidecar_alloc_pd_cq_qp(")
+        fn_end = source.index(
+            "static int cxl_rdma_sidecar_fill_hello(", fn_start)
+        fn_body = source[fn_start:fn_end]
+
+        self.assertIn("attr.send_cq = ctx->cq;", fn_body)
+        self.assertIn("attr.recv_cq = ctx->cq;", fn_body)
+        self.assertNotIn("ctx->cm_id->send_cq =", fn_body)
+        self.assertNotIn("ctx->cm_id->recv_cq =", fn_body)
+        self.assertNotIn("ctx->cm_id->send_cq_channel =", fn_body)
+        self.assertNotIn("ctx->cm_id->recv_cq_channel =", fn_body)
+
+    def test_rdma_sidecar_startups_wait_for_setup(self):
+        cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        self.assertIn("cxl_hybrid_start_rdma_sidecar(true, true, errp)",
+                      cxl_source)
+
+        migration_source = (REPO_ROOT / "migration" / "migration.c").read_text()
+        self.assertIn(
+            "cxl_hybrid_start_rdma_sidecar(false, true, &local_err)",
+            migration_source,
+        )
+
+    def test_rdma_sidecar_source_ready_before_ram_setup_bulk(self):
+        migration_source = (REPO_ROOT / "migration" / "migration.c").read_text()
+        start = migration_source.index(
+            "cxl_hybrid_start_rdma_sidecar(false, true, &local_err)")
+        ram_setup = migration_source.index(
+            "qemu_savevm_state_do_setup(s->to_dst_file", start)
+
+        self.assertLess(start, ram_setup)
+
+    def test_rdma_sidecar_source_control_run_starts_before_ram_setup_bulk(self):
+        migration_source = (REPO_ROOT / "migration" / "migration.c").read_text()
+        cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        helper = "int cxl_hybrid_begin_source_control_run(Error **errp)"
+        self.assertIn(helper, cxl_source)
+
+        sidecar_start = migration_source.index(
+            "cxl_hybrid_start_rdma_sidecar(false, true, &local_err)")
+        control_start = migration_source.index(
+            "cxl_hybrid_begin_source_control_run(&local_err)", sidecar_start)
+        ram_setup = migration_source.index(
+            "qemu_savevm_state_do_setup(s->to_dst_file", sidecar_start)
+
+        self.assertLess(control_start, ram_setup)
+
+    def test_rdma_sidecar_source_waits_for_postcopy_advise_ack_before_connect(self):
+        migration_source = (REPO_ROOT / "migration" / "migration.c").read_text()
+
+        advise = migration_source.index(
+            "qemu_savevm_send_postcopy_advise(s->to_dst_file)")
+        sync_ping = migration_source.index(
+            "QEMU_VM_PING_CXL_RDMA_SIDECAR_ADVISE_READY)",
+            advise)
+        sync_wait = migration_source.index(
+            "migration_wait_main_channel_pong(s, &local_err)",
+            sync_ping)
+        sidecar_start = migration_source.index(
+            "cxl_hybrid_start_rdma_sidecar(false, true, &local_err)",
+            sync_wait)
+
+        self.assertLess(advise, sync_ping)
+        self.assertLess(sync_ping, sync_wait)
+        self.assertLess(sync_wait, sidecar_start)
+
+    def test_rdma_sidecar_worker_waits_for_bulk_active_before_claiming(self):
+        header = (REPO_ROOT / "migration" / "cxl-rdma.h").read_text()
+        source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+        cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        self.assertIn("bool (*bulk_active)(void *opaque);", header)
+        self.assertIn(".bulk_active = cxl_hybrid_rdma_sidecar_bulk_active",
+                      cxl_source)
+
+        loop_start = source.index(
+            "static void cxl_rdma_sidecar_source_loop(")
+        loop_end = source.index(
+            "static void cxl_rdma_sidecar_cleanup(", loop_start)
+        loop_body = source[loop_start:loop_end]
+
+        bulk_check = "ctx->ops.bulk_active"
+        claim = "cxl_rdma_sidecar_dequeue_bulk_claim(ctx, &claim)"
+        self.assertIn(bulk_check, loop_body)
+        self.assertLess(loop_body.index(bulk_check), loop_body.index(claim))
+
+    def test_rdma_sidecar_bulk_active_follows_cxl_phase_not_migration_active(self):
+        cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        fn_start = cxl_source.index(
+            "static bool cxl_hybrid_rdma_sidecar_bulk_active(")
+        fn_end = cxl_source.index(
+            "static void cxl_hybrid_rdma_sidecar_complete_bulk_claim(",
+            fn_start,
+        )
+        fn_body = cxl_source[fn_start:fn_end]
+
+        self.assertIn("cxl_hybrid_phase() == CXL_HYBRID_PHASE_PRECOPY_BULK",
+                      fn_body)
+        self.assertNotIn("MIGRATION_STATUS_ACTIVE", fn_body)
+
+    def test_rdma_sidecar_source_loop_consumes_enqueued_bulk_claims(self):
+        header = (REPO_ROOT / "migration" / "cxl-rdma.h").read_text()
+        source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+
+        self.assertIn(
+            "bool cxl_rdma_sidecar_enqueue_bulk_claim(",
+            header,
+        )
+
+        loop_start = source.index(
+            "static void cxl_rdma_sidecar_source_loop(")
+        loop_end = source.index(
+            "static void cxl_rdma_sidecar_cleanup(", loop_start)
+        loop_body = source[loop_start:loop_end]
+
+        self.assertIn("cxl_rdma_sidecar_dequeue_bulk_claim(ctx, &claim)",
+                      loop_body)
+        self.assertNotIn("ctx->ops.claim_bulk_region", loop_body)
+
+    def test_rdma_sidecar_destination_registers_guest_ram_not_cxl_backing(self):
+        source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+        cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        fn_start = source.index(
+            "static int cxl_rdma_sidecar_register_destination(")
+        fn_end = source.index(
+            "static int cxl_rdma_sidecar_register_source_region(", fn_start)
+        fn_body = source[fn_start:fn_end]
+
+        self.assertIn("cxl_rdma_sidecar_register_destination_ramblock",
+                      source)
+        self.assertIn("ctx->ops.foreach_ramblock", fn_body)
+        self.assertNotIn("cxl_hybrid_rdma_sidecar_get_backing", fn_body)
+        self.assertNotIn("destination CXL", fn_body)
+
+        claim_start = cxl_source.index("bool cxl_hybrid_rdma_bulk_claim_init(")
+        claim_end = cxl_source.index(
+            "void cxl_hybrid_account_shadow_bulk_candidate", claim_start)
+        claim_body = cxl_source[claim_start:claim_end]
+
+        self.assertIn(".cxl_offset = block_offset,", claim_body)
+        self.assertNotIn("block->pages_offset + block_offset", claim_body)
+        self.assertNotIn("cxl_state.mmap_base + cxl_offset", claim_body)
+
+    def test_rdma_sidecar_destination_mr_size_uses_claim_bound_not_total_regions(self):
+        source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+
+        validate_start = source.index(
+            "static int cxl_rdma_sidecar_validate_hello(")
+        validate_end = source.index(
+            "static int cxl_rdma_sidecar_post_hello_recv(", validate_start)
+        validate_body = source[validate_start:validate_end]
+
+        register_start = source.index(
+            "static int cxl_rdma_sidecar_register_destination(")
+        register_end = source.index(
+            "static int cxl_rdma_sidecar_register_source_region(",
+            register_start)
+        register_body = source[register_start:register_end]
+
+        self.assertIn("remote_len < ctx->bytes_per_region", validate_body)
+        self.assertIn("reg.length < ctx->bytes_per_region", register_body)
+        self.assertNotIn("ctx->total_regions * ctx->bytes_per_region",
+                         validate_body)
+        self.assertNotIn("ctx->total_regions * ctx->bytes_per_region",
+                         register_body)
+
+    def test_rdma_sidecar_source_loop_keeps_multiple_writes_in_flight(self):
+        source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+
+        loop_start = source.index(
+            "static void cxl_rdma_sidecar_source_loop(")
+        loop_end = source.index(
+            "static void cxl_rdma_sidecar_cleanup(", loop_start)
+        loop_body = source[loop_start:loop_end]
+
+        self.assertIn("inflight_claims", source)
+        self.assertIn("ctx->inflight_len <",
+                      source)
+        self.assertIn("cxl_rdma_sidecar_can_schedule_more(ctx)",
+                      loop_body)
+        self.assertNotIn("cxl_rdma_sidecar_wait_one_completion",
+                         loop_body)
+
+    def test_rdma_sidecar_removes_worker_dirty_bitmap_claim_ops(self):
+        header = (REPO_ROOT / "migration" / "cxl-rdma.h").read_text()
+        cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
+        ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        self.assertNotIn("claim_bulk_region", header)
+        self.assertNotIn("cxl_hybrid_rdma_sidecar_claim_bulk_region",
+                         cxl_source)
+        self.assertNotIn("cxl_hybrid_rdma_try_claim_bulk_region", ram_source)
+
+    def test_rdma_sidecar_ram_bulk_scan_enqueues_claim_before_cxl_copy(self):
+        ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        helper_start = ram_source.index(
+            "static int cxl_hybrid_rdma_enqueue_bulk_region(")
+        helper_end = ram_source.index(
+            "void cxl_hybrid_rdma_drop_bulk_claim(",
+            helper_start)
+        helper_body = ram_source[helper_start:helper_end]
+        self.assertIn("cxl_hybrid_ctrl_claim_rdma_pages", helper_body)
+        self.assertIn("cxl_rdma_sidecar_enqueue_bulk_claim", helper_body)
+        self.assertNotIn("cxl_hybrid_region_try_own_rdma", helper_body)
+        self.assertLess(
+            helper_body.index("cxl_hybrid_ctrl_claim_rdma_pages"),
+            helper_body.index("cxl_rdma_sidecar_enqueue_bulk_claim"),
+        )
+
+        fn_start = ram_source.index("static int ram_save_host_page(")
+        fn_end = ram_source.index("static bool ram_page_hint_valid(",
+                                  fn_start)
+        fn_body = ram_source[fn_start:fn_end]
+        enqueue = "cxl_hybrid_rdma_enqueue_bulk_region(rs, pss)"
+        cxl_copy = "ram_save_target_page(rs, pss)"
+        self.assertIn(enqueue, fn_body)
+        self.assertLess(fn_body.index(enqueue), fn_body.index(cxl_copy))
+
+    def test_rdma_bulk_enqueue_aligns_current_dirty_page_to_region(self):
+        ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        helper_start = ram_source.index(
+            "static int cxl_hybrid_rdma_enqueue_bulk_region(")
+        helper_end = ram_source.index(
+            "void cxl_hybrid_rdma_drop_bulk_claim(",
+            helper_start)
+        helper_body = ram_source[helper_start:helper_end]
+
+        self.assertIn(
+            "region_offset = QEMU_ALIGN_DOWN(block_offset, region_len);",
+            helper_body,
+        )
+        self.assertIn(
+            "cxl_hybrid_rdma_bulk_claim_init(&claim, pss->block, "
+            "region_offset)",
+            helper_body,
+        )
+        self.assertNotIn("claim.page_desc->claimed_pages != claim.pages",
+                         helper_body)
+
+    def test_rdma_sidecar_postcopy_transition_drains_active_claims(self):
+        migration_source = (
+            REPO_ROOT / "migration" / "migration.c").read_text()
+        rdma_source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+
+        start = migration_source.index("static int postcopy_start(")
+        end = migration_source.index("static void migration_completion_postcopy(",
+                                     start)
+        postcopy_start = migration_source[start:end]
+        drain = "cxl_rdma_sidecar_drain_bulk_claims();"
+        switch = "cxl_hybrid_enter_phase(CXL_HYBRID_PHASE_SWITCHING"
+        self.assertIn(drain, postcopy_start)
+        self.assertLess(postcopy_start.index(drain),
+                        postcopy_start.index(switch))
+
+        drain_start = rdma_source.index(
+            "void cxl_rdma_sidecar_drain_bulk_claims(void)")
+        drain_end = rdma_source.index(
+            "static void cxl_rdma_sidecar_cleanup(", drain_start)
+        drain_body = rdma_source[drain_start:drain_end]
+        self.assertIn("ctx->draining = true;", drain_body)
+        self.assertIn("ctx->inflight_len", drain_body)
+        self.assertIn("qemu_cond_timedwait", drain_body)
+
+    def test_rdma_sidecar_pin_all_source_registration_runs_before_bulk_loop(self):
+        source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+
+        fn_start = source.index("static void *cxl_rdma_sidecar_thread(")
+        fn_end = source.index(
+            "static int cxl_rdma_sidecar_start_internal(", fn_start)
+        fn_body = source[fn_start:fn_end]
+
+        registration = "cxl_rdma_sidecar_register_source_pin_all(ctx, &local_err)"
+        running = "ctx->running = true;"
+        self.assertIn(registration, fn_body)
+        self.assertLess(fn_body.index(registration), fn_body.index(running))
+
+        post_write_start = source.index(
+            "static int G_GNUC_UNUSED cxl_rdma_sidecar_post_write(")
+        post_write_end = source.index(
+            "static int G_GNUC_UNUSED cxl_rdma_sidecar_poll_completion(",
+            post_write_start)
+        post_write_body = source[post_write_start:post_write_end]
+        self.assertNotIn("cxl_rdma_sidecar_register_source_pin_all(ctx, errp)",
+                         post_write_body)
+
     def test_cxl_source_visibility_producers_drive_shared_bitmap(self):
         source = (REPO_ROOT / "migration" / "cxl.c").read_text()
 
@@ -54,7 +363,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         invalidate_start = source.index(
             "static void cxl_hybrid_invalidate_published_page(")
         invalidate_end = source.index(
-            "static int cxl_hybrid_copy_page_to_stable_cxl(")
+            "int cxl_hybrid_copy_page_to_stable_cxl(")
         invalidate_body = source[invalidate_start:invalidate_end]
         self.assertIn("cxl_hybrid_ctrl_clear_page_visible(page_idx)",
                       invalidate_body)
@@ -697,7 +1006,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("x-cxl-rdma-sidecar-address", params)
         self.assertEqual(params["x-cxl-rdma-sidecar-address"], {
             "transport": "rdma",
-            "rdma": {"host": "192.0.2.10", "port": "7474"},
+            "host": "192.0.2.10",
+            "port": "7474",
         })
         self.assertEqual(
             params["x-cxl-rdma-sidecar-max-inflight-regions"], 1)
@@ -739,6 +1049,12 @@ class WarmExperimentScriptTest(unittest.TestCase):
                     "rdma_sidecar_completed_bytes": 2 * 1024 * 1024,
                     "rdma_sidecar_stale_regions": 1,
                     "rdma_sidecar_cxl_race_lost_regions": 1,
+                    "page_state_cxl_worker_bytes": 33554432,
+                    "page_state_cxl_worker_time_ns": 4000000,
+                    "page_state_rdma_completed_bytes": 33554432,
+                    "page_state_rdma_completed_time_ns": 3000000,
+                    "page_state_rdma_stale_pages": 2,
+                    "page_state_cas_failures": 5,
                     "cxl_republish_regions_due_to_rdma_invalidate": 1,
                     "cxl_republish_pages_due_to_rdma_invalidate": 512,
                 },
@@ -769,6 +1085,13 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(row["rdma_sidecar_completed_bytes"], 2 * 1024 * 1024)
         self.assertEqual(row["rdma_sidecar_stale_regions"], 1)
         self.assertEqual(row["rdma_sidecar_cxl_race_lost_regions"], 1)
+        self.assertEqual(row["cxl_worker_bytes"], 33554432)
+        self.assertAlmostEqual(row["cxl_worker_bw_mib_s"], 8000.0)
+        self.assertEqual(row["rdma_completed_bytes"], 33554432)
+        self.assertAlmostEqual(row["rdma_completed_bw_mib_s"],
+                               10666.666666666666, places=3)
+        self.assertEqual(row["page_state_rdma_stale_pages"], 2)
+        self.assertEqual(row["page_state_cas_failures"], 5)
         self.assertEqual(row["cxl_publish_pages"], 256)
         self.assertEqual(row["cxl_publish_time_ns"], 9000)
         self.assertEqual(row["guest_stall_ms"], 6.5)
@@ -955,6 +1278,69 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["modes"], ["hybrid_parallel_rdma_cxl"])
         self.assertFalse(calls[0]["brake_enable"])
+
+    def test_main_forwards_gdb_dst_diagnostic_flag(self):
+        calls = []
+
+        def fake_run_pressure_matrix(base, pressures, modes, threshold_profile=None,
+                                    repeat=1, migration_timeout=60.0,
+                                    **kwargs):
+            calls.append(kwargs)
+            return {
+                "pressures": list(pressures),
+                "modes": list(modes),
+                "results": {},
+                "summary": [],
+                "summary_grouped": [],
+            }
+
+        argv = [
+            "cxl-hybrid-warm-experiment.py",
+            "--pressure", "remap_xlarge_random_rw",
+            "--mode", "hybrid_parallel_rdma_cxl",
+            "--gdb-dst",
+        ]
+        original_maybe_reexec = self.mod.maybe_reexec_with_sudo
+        original_qemu = self.mod.QEMU
+        original_trace_events = self.mod.TRACE_EVENTS
+        original_boot_asm = self.mod.BOOT_ASM
+        original_mkdtemp = self.mod.tempfile.mkdtemp
+        original_rmtree = self.mod.shutil.rmtree
+        had_print = hasattr(self.mod, "print")
+        original_print = getattr(self.mod, "print", None)
+        original_run_pressure_matrix = self.mod.run_pressure_matrix
+        original_argv = self.mod.sys.argv
+        try:
+            self.mod.maybe_reexec_with_sudo = lambda: None
+            self.mod.QEMU = Path("/tmp/qemu-system-x86_64")
+            self.mod.TRACE_EVENTS = Path("/tmp/trace-events")
+            self.mod.BOOT_ASM = Path("/tmp/boot.asm")
+            self.mod.QEMU.write_text("", encoding="utf-8")
+            self.mod.TRACE_EVENTS.write_text("", encoding="utf-8")
+            self.mod.BOOT_ASM.write_text("", encoding="utf-8")
+            self.mod.tempfile.mkdtemp = lambda prefix: "/tmp/cxl-test-gdb"
+            self.mod.shutil.rmtree = lambda _path: None
+            self.mod.print = lambda *_args, **_kwargs: None
+            self.mod.run_pressure_matrix = fake_run_pressure_matrix
+            self.mod.sys.argv = argv
+
+            self.mod.main()
+        finally:
+            self.mod.maybe_reexec_with_sudo = original_maybe_reexec
+            self.mod.QEMU = original_qemu
+            self.mod.TRACE_EVENTS = original_trace_events
+            self.mod.BOOT_ASM = original_boot_asm
+            self.mod.tempfile.mkdtemp = original_mkdtemp
+            self.mod.shutil.rmtree = original_rmtree
+            if had_print:
+                self.mod.print = original_print
+            else:
+                delattr(self.mod, "print")
+            self.mod.run_pressure_matrix = original_run_pressure_matrix
+            self.mod.sys.argv = original_argv
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["gdb_dst"])
 
     def test_rdma_cxl_smoke_style_args_keep_no_brake(self):
         calls = []
@@ -1223,6 +1609,61 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         machine_index = args.index("-machine")
         self.assertEqual(args[machine_index + 1], "pc,accel=kvm")
+
+    def test_wrap_qemu_with_gdb_batch_preserves_qemu_argv(self):
+        qemu_argv = [
+            "build/qemu-system-x86_64",
+            "-machine", "pc,accel=kvm",
+            "-qmp", "unix:/tmp/qmp.sock,server=on,wait=off",
+        ]
+        wrapped = self.mod.wrap_qemu_with_gdb_batch(
+            qemu_argv, Path("/tmp/dst-gdb.txt")
+        )
+
+        self.assertEqual(wrapped[:2], ["gdb", "-q"])
+        self.assertIn("--batch", wrapped)
+        self.assertIn("handle SIGUSR1 nostop noprint pass", wrapped)
+        self.assertIn("handle SIGUSR2 nostop noprint pass", wrapped)
+        self.assertIn("run", wrapped)
+        self.assertIn("thread apply all bt full", wrapped)
+        self.assertIn("quit", wrapped)
+        self.assertIn("--args", wrapped)
+        self.assertEqual(wrapped[wrapped.index("--args") + 1:], qemu_argv)
+
+    def test_start_vm_routes_gdb_stdout_to_log(self):
+        calls = []
+
+        class FakeProc:
+            pass
+
+        def fake_popen(argv, stdout=None, stderr=None, text=None, env=None):
+            calls.append({
+                "argv": argv,
+                "stdout": stdout,
+                "stderr": stderr,
+                "text": text,
+                "env": env,
+            })
+            return FakeProc()
+
+        original_popen = self.mod.subprocess.Popen
+        self.mod.subprocess.Popen = fake_popen
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                self.mod.start_vm(
+                    ["qemu"],
+                    "/tmp/qmp.sock",
+                    ["-S"],
+                    Path(tmpdir) / "dst.stderr",
+                    gdb_log_path=Path(tmpdir) / "dst-gdb.txt",
+                )
+        finally:
+            self.mod.subprocess.Popen = original_popen
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["argv"][:2], ["gdb", "-q"])
+        self.assertIs(calls[0]["stdout"], calls[0]["stderr"])
+        self.assertEqual(Path(calls[0]["stderr"].name).name, "dst-gdb.txt")
 
     def test_clean_remap_drain_uses_short_bql_windows(self):
         ram_text = (REPO_ROOT / "migration" / "ram.c").read_text(
@@ -1686,12 +2127,17 @@ class WarmExperimentScriptTest(unittest.TestCase):
             "dst-region-wait-samples",
             "dst-region-wait-time-ns",
             "region-publish-requests",
+            "page-state-cxl-worker-bytes",
+            "page-state-rdma-completed-bytes",
         ):
             self.assertIn(f"'{field}'", qapi_text)
 
         self.assertIn("info->x_cxl->dst_region_map_successes", cxl_text)
         self.assertIn("info->x_cxl->dst_region_fallback_copies", cxl_text)
         self.assertIn("info->x_cxl->region_publish_requests", cxl_text)
+        self.assertIn("info->x_cxl->page_state_cxl_worker_bytes", cxl_text)
+        self.assertIn("info->x_cxl->page_state_rdma_completed_bytes",
+                      cxl_text)
 
         summary = self.mod.extract_summary([
             {
@@ -1700,6 +2146,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
                     "dst-region-wait-samples": 1,
                     "dst-region-wait-time-ns": 2000,
                     "region-publish-requests": 1,
+                    "page-state-cxl-worker-bytes": 33554432,
+                    "page-state-cxl-worker-time-ns": 4000000,
+                    "page-state-cas-failures": 5,
                 },
                 "dst-query-migrate": {
                     "x-cxl": {
@@ -1711,6 +2160,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
                         "region-publish-requests": 5,
                         "region-publish-pages": 512,
                         "region-publish-time-ns": 9000,
+                        "page-state-rdma-completed-bytes": 33554432,
+                        "page-state-rdma-completed-time-ns": 3000000,
+                        "page-state-rdma-stale-pages": 2,
                     }
                 },
             }
@@ -1724,6 +2176,12 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(summary["region_publish_requests"], 5)
         self.assertEqual(summary["region_publish_pages"], 512)
         self.assertEqual(summary["region_publish_time_ns"], 9000)
+        self.assertEqual(summary["page_state_cxl_worker_bytes"], 33554432)
+        self.assertEqual(summary["page_state_cxl_worker_time_ns"], 4000000)
+        self.assertEqual(summary["page_state_rdma_completed_bytes"], 33554432)
+        self.assertEqual(summary["page_state_rdma_completed_time_ns"], 3000000)
+        self.assertEqual(summary["page_state_rdma_stale_pages"], 2)
+        self.assertEqual(summary["page_state_cas_failures"], 5)
 
     def test_region_remap_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1908,17 +2366,22 @@ class WarmExperimentScriptTest(unittest.TestCase):
             trace = Path(tmpdir) / "trace.log"
             trace.write_text(
                 "\n".join([
+                    "cxl_rdma_sidecar_connect_complete time_ns=12345",
+                    "cxl_rdma_sidecar_register bytes=67108864",
                     "cxl_rdma_sidecar_post region=2 local=0x1000 "
                     "remote=0x2000 bytes=2097152",
                     "cxl_rdma_sidecar_complete region=2 bytes=2097152",
                     "cxl_rdma_sidecar_stale region=3 bytes=1048576 "
                     "cxl_race_lost=1",
+                    "cxl_rdma_sidecar_failed region=18446744073709551615",
                 ]) + "\n",
                 encoding="ascii",
             )
 
             counts = self.mod.parse_trace_log(trace)
 
+        self.assertEqual(counts["rdma_sidecar_connect_time_ns"], 12345)
+        self.assertEqual(counts["rdma_sidecar_registered_bytes"], 64 * 1024 * 1024)
         self.assertEqual(counts["rdma_sidecar_posted_regions"], 1)
         self.assertEqual(counts["rdma_sidecar_posted_bytes"], 2 * 1024 * 1024)
         self.assertEqual(counts["rdma_sidecar_completed_regions"], 1)
@@ -1927,6 +2390,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
         )
         self.assertEqual(counts["rdma_sidecar_stale_regions"], 1)
         self.assertEqual(counts["rdma_sidecar_cxl_race_lost_regions"], 1)
+        self.assertEqual(counts["rdma_sidecar_failed_regions"], 1)
+        self.assertEqual(counts["rdma_sidecar_failed"], True)
 
     def test_rdma_sidecar_schedule_trace_is_posted_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1982,6 +2447,10 @@ class WarmExperimentScriptTest(unittest.TestCase):
         source = SCRIPT_PATH.read_text(encoding="utf-8")
 
         for event in (
+            '"cxl_rdma_sidecar_connect_start"',
+            '"cxl_rdma_sidecar_connect_complete"',
+            '"cxl_rdma_sidecar_register"',
+            '"cxl_rdma_sidecar_failed"',
             '"cxl_rdma_sidecar_schedule"',
             '"cxl_rdma_sidecar_post"',
             '"cxl_rdma_sidecar_complete"',
@@ -2014,6 +2483,42 @@ class WarmExperimentScriptTest(unittest.TestCase):
             counts["cxl_republish_pages_due_to_rdma_invalidate"], 1024
         )
         self.assertEqual(counts["rdma_invalidate_publish_amplification"], 2.0)
+
+    def test_cxl_worker_trace_events_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace = Path(tmpdir) / "trace.log"
+            trace.write_text(
+                "\n".join([
+                    "cxl_hybrid_cxl_worker_enqueue now_ns=100 page=4 "
+                    "gen=7 class=0",
+                    "cxl_hybrid_cxl_worker_enqueue now_ns=101 page=5 "
+                    "gen=7 class=1",
+                    "cxl_hybrid_cxl_worker_complete now_ns=120 page=4 "
+                    "gen=7 class=0 bytes=4096 elapsed_ns=300 ret=0 "
+                    "completed=1",
+                    "cxl_hybrid_cxl_worker_complete now_ns=130 page=5 "
+                    "gen=7 class=1 bytes=4096 elapsed_ns=400 ret=0 "
+                    "completed=0",
+                    "cxl_hybrid_cxl_worker_complete now_ns=140 page=6 "
+                    "gen=7 class=1 bytes=0 elapsed_ns=50 ret=-5 "
+                    "completed=0",
+                ]) + "\n",
+                encoding="ascii",
+            )
+
+            counts = self.mod.parse_trace_log(trace)
+
+        self.assertEqual(counts["cxl_worker_enqueue_pages"], 2)
+        self.assertEqual(counts["cxl_worker_enqueue_high_pages"], 1)
+        self.assertEqual(counts["cxl_worker_enqueue_low_pages"], 1)
+        self.assertEqual(counts["cxl_worker_complete_events"], 3)
+        self.assertEqual(counts["cxl_worker_copied_pages"], 2)
+        self.assertEqual(counts["cxl_worker_copied_bytes"], 8192)
+        self.assertEqual(counts["cxl_worker_copy_time_ns"], 700)
+        self.assertEqual(counts["max_cxl_worker_copy_time_ns"], 400)
+        self.assertEqual(counts["cxl_worker_published_pages"], 1)
+        self.assertEqual(counts["cxl_worker_stale_pages"], 1)
+        self.assertEqual(counts["cxl_worker_failed_pages"], 1)
 
     def test_fault_control_plane_option_is_removed_from_qapi(self):
         qapi_source = (SCRIPT_PATH.parent.parent / "qapi" /
@@ -2210,8 +2715,10 @@ class WarmExperimentScriptTest(unittest.TestCase):
 
         self.assertIn("record.flags & CXL_HYBRID_FAULT_REQUEST_F_REGION",
                       worker)
-        self.assertIn("cxl_hybrid_publish_fault_region_request_core(",
-                      worker)
+        self.assertIn("cxl_hybrid_fault_region_plan(", worker)
+        self.assertIn("cxl_hybrid_publish_fault_request_core(", worker)
+        self.assertNotIn("cxl_hybrid_publish_fault_region_request_core(",
+                         worker)
         self.assertNotIn("cxl_hybrid_ctrl_dequeue_fault_ready", worker)
 
     def test_control_region_maps_shared_visible_bitmap(self):
@@ -2672,6 +3179,47 @@ class WarmExperimentScriptTest(unittest.TestCase):
                         body.index("cxl_hybrid_enter_phase(CXL_HYBRID_PHASE_SWITCHING,"))
         self.assertIn("bool cxl_hybrid_init_source(void)", cxl_text)
 
+    def test_postcopy_page_state_snapshots_cover_guest_resume_window(self):
+        migration_source = (SCRIPT_PATH.parent.parent / "migration" /
+                            "migration.c").resolve()
+        text = migration_source.read_text(encoding="utf-8")
+
+        start = text.index("static int postcopy_start(MigrationState *ms, Error **errp)")
+        end = text.index("static bool migration_switchover_prepare(", start)
+        postcopy = text[start:end]
+
+        for tag in (
+            "postcopy-before-start",
+            "postcopy-start",
+            "postcopy-after-staged-publish",
+            "postcopy-warm-enter",
+            "downtime-end",
+        ):
+            self.assertIn("cxl_hybrid_ctrl_trace_page_state_snapshot",
+                          postcopy)
+            self.assertIn(f'"{tag}"', postcopy)
+        self.assertLess(
+            postcopy.index('"postcopy-before-start"'),
+            postcopy.index("trace_postcopy_start();"))
+        self.assertLess(
+            postcopy.index('"postcopy-warm-enter"'),
+            postcopy.index('migration_trace_postcopy_timeline(ms, "downtime-end"'))
+
+        wait_start = text.index(
+            "static MigIterateState migration_wait_for_postcopy_package_loaded(")
+        wait_end = text.index("static MigIterateState migration_iteration_run(",
+                              wait_start)
+        wait = text[wait_start:wait_end]
+        self.assertIn("cxl_hybrid_ctrl_trace_page_state_snapshot", wait)
+        self.assertIn('"postcopy-active"', wait)
+
+        completion_start = text.index("static void migration_completion(MigrationState *s)")
+        completion_end = text.index("static void bg_migration_completion(",
+                                    completion_start)
+        completion = text[completion_start:completion_end]
+        self.assertIn("cxl_hybrid_ctrl_trace_page_state_snapshot", completion)
+        self.assertIn('"completion-enter"', completion)
+
     def test_pre_eof_cxl_prepare_publishes_remaining_pages_without_publish_ready_drain(self):
         migration_source = (SCRIPT_PATH.parent.parent / "migration" /
                             "migration.c").resolve()
@@ -3047,6 +3595,9 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("savevm_send_cxl_hybrid_metadata", text)
         self.assertIn("cxl_hybrid_publish_request_send", text)
         self.assertIn("cxl_hybrid_region_publish_complete", text)
+        self.assertIn("cxl_hybrid_page_state_snapshot_summary", text)
+        self.assertIn("cxl_hybrid_page_state_snapshot_state", text)
+        self.assertIn("cxl_hybrid_page_state_snapshot_runtime", text)
         self.assertNotIn("cxl_hybrid_warm_desc_batch_send", text)
 
     def test_pre_eof_cxl_prepare_uses_publish_only_completion(self):
@@ -4272,6 +4823,76 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(report["precopy_brake_window_sample_end"], 3)
         self.assertTrue(any(call[0] == "src" for call in calls))
 
+    def test_collect_in_memory_guest_latency_falls_back_after_invalid_primary_header(self):
+        records = [100, 105, 500, 95]
+        latency_payload = struct.pack(
+            "<8I",
+            self.mod.IN_MEMORY_LATENCY_MAGIC,
+            self.mod.IN_MEMORY_LATENCY_VERSION,
+            64,
+            16,
+            len(records),
+            0,
+            0,
+            0,
+        ) + struct.pack("<4I", *records)
+        marker_payload = struct.pack(
+            "<8I",
+            self.mod.IN_MEMORY_MARKER_MAGIC,
+            self.mod.IN_MEMORY_MARKER_VERSION,
+            0,
+            16,
+            0,
+            0,
+            0,
+            0,
+        )
+
+        class FakeConn:
+            def __init__(self, name):
+                self.name = name
+
+        def fake_dump(conn, addr, size, path):
+            if conn.name == "dst":
+                path.write_bytes(b"\0" * size)
+                return
+
+            if addr == self.mod.IN_MEMORY_LATENCY_ADDR:
+                path.write_bytes(
+                    latency_payload[:self.mod.IN_MEMORY_LATENCY_HEADER_BYTES]
+                    if size == self.mod.IN_MEMORY_LATENCY_HEADER_BYTES
+                    else latency_payload[:size]
+                )
+            elif addr == self.mod.IN_MEMORY_MARKER_ADDR:
+                path.write_bytes(
+                    marker_payload[:self.mod.IN_MEMORY_MARKER_HEADER_BYTES]
+                    if size == self.mod.IN_MEMORY_MARKER_HEADER_BYTES
+                    else marker_payload[:size]
+                )
+            else:
+                raise AssertionError(addr)
+
+        self.mod.dump_guest_physical_memory = fake_dump
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            report = self.mod.collect_in_memory_guest_latency(
+                FakeConn("dst"), base / "latency.bin",
+                "remap_xlarge_random_rw",
+                marker_path=base / "marker.bin",
+                fallback_conn=FakeConn("src"),
+                fallback_path=base / "latency-src.bin",
+                fallback_marker_path=base / "marker-src.bin",
+                tsc_khz=1_000_000,
+            )
+
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["dump_source"], "fallback")
+        self.assertIn("invalid in-memory latency header",
+                      report["primary_dump_error"])
+        self.assertEqual(report["primary_invalid_magic"], 0)
+        self.assertEqual(report["samples_read"], len(records))
+
     def test_dump_guest_physical_memory_chunked_appends_chunks(self):
         calls = []
 
@@ -5102,8 +5723,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertNotIn("cxl_hybrid_handle_publish_ready", cxl_text)
         self.assertNotIn("ready_poller", control_text)
         self.assertIn("cxl_hybrid_publish_fault_request_core(", control_text)
-        self.assertIn("cxl_hybrid_publish_fault_region_request_core(",
-                      control_text)
+        self.assertIn("cxl_hybrid_fault_region_plan(", control_text)
 
     def test_destination_postcopy_timeline_instrumentation_present(self):
         savevm = (REPO_ROOT / "migration" / "savevm.c").read_text(
@@ -5602,11 +6222,18 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("cxl_hybrid_publish_wait_complete", contents)
         self.assertIn("cxl_hybrid_region_publish_complete", contents)
         self.assertIn("cxl_hybrid_rdma_bulk_region", contents)
+        self.assertIn("cxl_rdma_sidecar_connect_start", contents)
+        self.assertIn("cxl_rdma_sidecar_connect_complete", contents)
+        self.assertIn("cxl_rdma_sidecar_register", contents)
+        self.assertIn("cxl_rdma_sidecar_failed", contents)
         self.assertIn("cxl_hybrid_rdma_ready", contents)
         self.assertIn("cxl_hybrid_rdma_invalidate", contents)
         self.assertIn("cxl_hybrid_rdma_cxl_republish", contents)
         self.assertIn("cxl_hybrid_region_request_enqueue", contents)
         self.assertIn("cxl_hybrid_region_request_dequeue", contents)
+        self.assertIn("cxl_hybrid_page_state_snapshot_summary", contents)
+        self.assertIn("cxl_hybrid_page_state_snapshot_state", contents)
+        self.assertIn("cxl_hybrid_page_state_snapshot_runtime", contents)
         self.assertNotIn("cxl_hybrid_warm_desc_send", contents)
         self.assertNotIn("cxl_hybrid_warm_desc_recv", contents)
         self.assertNotIn("cxl_hybrid_publish_ready_send", contents)
