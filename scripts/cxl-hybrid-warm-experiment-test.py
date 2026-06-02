@@ -276,7 +276,7 @@ class WarmExperimentScriptTest(unittest.TestCase):
         fn_end = ram_source.index("static bool ram_page_hint_valid(",
                                   fn_start)
         fn_body = ram_source[fn_start:fn_end]
-        enqueue = "cxl_hybrid_rdma_enqueue_bulk_region(rs, pss)"
+        enqueue = "cxl_hybrid_rdma_enqueue_bulk_region("
         cxl_copy = "ram_save_target_page(rs, pss)"
         self.assertIn(enqueue, fn_body)
         self.assertLess(fn_body.index(enqueue), fn_body.index(cxl_copy))
@@ -338,6 +338,19 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn("cxl_hybrid_account_cxl_effective_zero_filtered_bytes",
                       helper)
         self.assertIn("!test_bit(page, zero_scan->dirty_zero_bmap)", helper)
+
+    def test_partial_zero_rdma_keeps_full_region_dst_local(self):
+        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        fn_start = ram_text.index("static int cxl_hybrid_rdma_enqueue_bulk_region(")
+        fn_end = ram_text.index("void cxl_hybrid_rdma_drop_bulk_claim(",
+                                fn_start)
+        helper = ram_text[fn_start:fn_end]
+
+        self.assertIn("const CXLHybridZeroRegionScan *zero_scan", helper)
+        self.assertIn("cxl_hybrid_account_rdma_partial_zero_bytes", helper)
+        self.assertIn("claim.bytes", helper)
+        self.assertNotIn("cxl_hybrid_ctrl_publish_zero_page", helper)
 
     def test_postcopy_bulk_dirty_pages_route_to_cxl_worker_not_stream(self):
         ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()

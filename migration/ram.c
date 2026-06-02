@@ -907,8 +907,10 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(
     return enqueued_pages;
 }
 
-static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,
-                                               PageSearchStatus *pss)
+static int cxl_hybrid_rdma_enqueue_bulk_region(
+    RAMState *rs,
+    PageSearchStatus *pss,
+    const CXLHybridZeroRegionScan *zero_scan)
 {
     CXLHybridRDMABulkClaim claim;
     ram_addr_t region_len = cxl_hybrid_fault_region_granule();
@@ -985,6 +987,10 @@ static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,
         return 0;
     }
 
+    if (zero_scan && zero_scan->valid && zero_scan->partial_zero &&
+        zero_scan->region_index == claim.region_index) {
+        cxl_hybrid_account_rdma_partial_zero_bytes(claim.bytes);
+    }
     trace_cxl_hybrid_rdma_bulk_region(claim.region_index, claim.bytes);
     pss->page = first_page + claim.pages;
     return claimed_pages;
@@ -3352,7 +3358,8 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     if (res) {
         return res;
     }
-    res = cxl_hybrid_rdma_enqueue_bulk_region(rs, pss);
+    res = cxl_hybrid_rdma_enqueue_bulk_region(
+        rs, pss, have_zero_scan ? &zero_scan : NULL);
     if (res) {
         return res;
     }
