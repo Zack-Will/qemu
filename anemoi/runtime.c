@@ -12,6 +12,7 @@ typedef struct AnemoiRuntimeBlock {
     uint64_t length;
     uint64_t gfn_base;
     const char *idstr;
+    bool migratable_disabled;
 } AnemoiRuntimeBlock;
 
 struct AnemoiRuntime {
@@ -244,6 +245,30 @@ static int anemoi_runtime_discard_ramblocks(AnemoiRuntime *runtime,
     return 0;
 }
 
+static void anemoi_runtime_disable_ram_migration(AnemoiRuntime *runtime)
+{
+    for (uint32_t i = 0; i < runtime->nr_blocks; i++) {
+        AnemoiRuntimeBlock *block = &runtime->blocks[i];
+
+        if (block->rb && qemu_ram_is_migratable(block->rb)) {
+            qemu_ram_unset_migratable(block->rb);
+            block->migratable_disabled = true;
+        }
+    }
+}
+
+static void anemoi_runtime_restore_ram_migration(AnemoiRuntime *runtime)
+{
+    for (uint32_t i = 0; i < runtime->nr_blocks; i++) {
+        AnemoiRuntimeBlock *block = &runtime->blocks[i];
+
+        if (block->rb && block->migratable_disabled) {
+            qemu_ram_set_migratable(block->rb);
+            block->migratable_disabled = false;
+        }
+    }
+}
+
 static int anemoi_runtime_create_core(AnemoiRuntime *runtime, Error **errp)
 {
     bool rmap_initially_readonly =
@@ -331,6 +356,7 @@ AnemoiRuntime *anemoi_runtime_start(const AnemoiRuntimeConfig *cfg,
     }
 
     anemoi_runtime_build_ranges(runtime);
+    anemoi_runtime_disable_ram_migration(runtime);
 
     if (anemoi_runtime_create_backend(runtime, cfg, errp) != 0) {
         goto fail_resume;
@@ -365,6 +391,7 @@ void anemoi_runtime_stop(AnemoiRuntime *runtime)
     if (runtime->fault_service) {
         anemoi_fault_service_stop(runtime->fault_service);
     }
+    anemoi_runtime_restore_ram_migration(runtime);
     anemoi_lm_free(runtime->lm);
     anemoi_rmap_free(runtime->rmap);
     anemoi_cache_free(runtime->cache);

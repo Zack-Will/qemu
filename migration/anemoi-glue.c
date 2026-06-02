@@ -1,7 +1,15 @@
 #include "qemu/osdep.h"
 #include "anemoi/glue.h"
 #include "anemoi/runtime.h"
+#include "migration/register.h"
+#include "qemu-file.h"
+#include "qemu/error-report.h"
 #include "qapi/qapi-commands-migration.h"
+
+#define ANEMOI_MIGRATION_MAGIC 0x414e4d49 /* "ANMI" */
+#define ANEMOI_MIGRATION_STREAM_VERSION 1
+#define ANEMOI_MIGRATION_PHASE_SETUP 0
+#define ANEMOI_MIGRATION_PHASE_COMPLETE 1
 
 static AnemoiRuntime *anemoi_global_runtime;
 
@@ -59,6 +67,206 @@ int anemoi_migration_switchover_hook(Error **errp)
     return anemoi_runtime_prepare_switchover(anemoi_global_runtime,
                                              ANEMOI_LM_BRANCH_NO_REPLICA,
                                              errp);
+}
+
+static bool anemoi_mig_is_active(void *opaque)
+{
+    (void)opaque;
+    return anemoi_global_runtime != NULL;
+}
+
+static void anemoi_mig_put_metadata(QEMUFile *f,
+                                    const AnemoiCacheMetadata *metadata)
+{
+    qemu_put_be32(f, metadata->ways);
+    qemu_put_be64(f, metadata->num_sets);
+    qemu_put_be64(f, metadata->nr_lines);
+
+    for (uint64_t i = 0; i < metadata->nr_lines; i++) {
+        const AnemoiCacheLineSnapshot *line = &metadata->lines[i];
+
+        qemu_put_be64(f, line->gfn);
+        qemu_put_byte(f, line->valid);
+        qemu_put_byte(f, line->dirty);
+        qemu_put_byte(f, line->pinned);
+        qemu_put_be64(f, line->lruk_ts[0]);
+        qemu_put_be64(f, line->lruk_ts[1]);
+    }
+}
+
+static int anemoi_mig_get_metadata(QEMUFile *f,
+                                   AnemoiCacheMetadata *metadata)
+{
+    memset(metadata, 0, sizeof(*metadata));
+    metadata->ways = qemu_get_be32(f);
+    metadata->num_sets = qemu_get_be64(f);
+    metadata->nr_lines = qemu_get_be64(f);
+
+    if (metadata->nr_lines > SIZE_MAX / sizeof(*metadata->lines)) {
+        error_report("Anemoi migration metadata is too large: nr_lines=%" PRIu64,
+                     metadata->nr_lines);
+        return -EINVAL;
+    }
+    if (metadata->nr_lines) {
+        metadata->lines = g_new0(AnemoiCacheLineSnapshot,
+                                 metadata->nr_lines);
+    }
+
+    for (uint64_t i = 0; i < metadata->nr_lines; i++) {
+        AnemoiCacheLineSnapshot *line = &metadata->lines[i];
+
+        line->gfn = qemu_get_be64(f);
+        line->valid = qemu_get_byte(f);
+        line->dirty = qemu_get_byte(f);
+        line->pinned = qemu_get_byte(f);
+        line->lruk_ts[0] = qemu_get_be64(f);
+        line->lruk_ts[1] = qemu_get_be64(f);
+    }
+    return qemu_file_get_error(f);
+}
+
+static int anemoi_mig_save_complete(QEMUFile *f, void *opaque)
+{
+    AnemoiCacheMetadata metadata;
+    AnemoiRuntimeStats stats;
+    Error *local_err = NULL;
+    int ret = 0;
+
+    (void)opaque;
+
+    if (!anemoi_global_runtime) {
+        return 0;
+    }
+
+    if (anemoi_runtime_prepare_switchover(anemoi_global_runtime,
+                                          ANEMOI_LM_BRANCH_NO_REPLICA,
+                                          &local_err) != 0) {
+        error_report_err(local_err);
+        return -EFAULT;
+    }
+
+    if (anemoi_cache_export_metadata(
+            anemoi_runtime_cache(anemoi_global_runtime), &metadata,
+            &local_err) != 0) {
+        error_report_err(local_err);
+        return -EFAULT;
+    }
+
+    anemoi_runtime_get_stats(anemoi_global_runtime, &stats);
+    qemu_put_byte(f, ANEMOI_MIGRATION_PHASE_COMPLETE);
+    qemu_put_be32(f, ANEMOI_MIGRATION_MAGIC);
+    qemu_put_be32(f, ANEMOI_MIGRATION_STREAM_VERSION);
+    qemu_put_be32(f, stats.vmid);
+    qemu_put_be64(f, stats.guest_pages);
+    qemu_put_be64(f, stats.local_cache_pages);
+    anemoi_mig_put_metadata(f, &metadata);
+    ret = qemu_file_get_error(f);
+
+    anemoi_cache_metadata_destroy(&metadata);
+    return ret;
+}
+
+static int anemoi_mig_save_setup(QEMUFile *f, void *opaque, Error **errp)
+{
+    (void)opaque;
+    (void)errp;
+
+    qemu_put_byte(f, ANEMOI_MIGRATION_PHASE_SETUP);
+    return qemu_file_get_error(f);
+}
+
+static int anemoi_mig_load_state(QEMUFile *f, void *opaque, int version_id)
+{
+    AnemoiCacheMetadata metadata;
+    AnemoiRuntimeStats stats;
+    Error *local_err = NULL;
+    uint32_t magic;
+    uint32_t stream_version;
+    uint32_t vmid;
+    uint64_t guest_pages;
+    uint64_t local_cache_pages;
+    uint8_t phase;
+    int ret;
+
+    (void)opaque;
+
+    if (version_id != 1) {
+        error_report("unsupported Anemoi migration section version %d",
+                     version_id);
+        return -EINVAL;
+    }
+
+    phase = qemu_get_byte(f);
+    if (qemu_file_get_error(f)) {
+        return qemu_file_get_error(f);
+    }
+    if (phase == ANEMOI_MIGRATION_PHASE_SETUP) {
+        return 0;
+    }
+    if (phase != ANEMOI_MIGRATION_PHASE_COMPLETE) {
+        error_report("unsupported Anemoi migration phase %u", phase);
+        return -EINVAL;
+    }
+
+    magic = qemu_get_be32(f);
+    stream_version = qemu_get_be32(f);
+    vmid = qemu_get_be32(f);
+    guest_pages = qemu_get_be64(f);
+    local_cache_pages = qemu_get_be64(f);
+    if (qemu_file_get_error(f)) {
+        return qemu_file_get_error(f);
+    }
+    if (magic != ANEMOI_MIGRATION_MAGIC) {
+        error_report("bad Anemoi migration magic 0x%08x", magic);
+        return -EINVAL;
+    }
+    if (stream_version != ANEMOI_MIGRATION_STREAM_VERSION) {
+        error_report("unsupported Anemoi migration stream version %u",
+                     stream_version);
+        return -EINVAL;
+    }
+    if (!anemoi_global_runtime) {
+        error_report("Anemoi migration section requires x-anemoi-prepare-incoming before load");
+        return -EINVAL;
+    }
+
+    anemoi_runtime_get_stats(anemoi_global_runtime, &stats);
+    if (stats.vmid != vmid || stats.guest_pages != guest_pages ||
+        stats.local_cache_pages != local_cache_pages) {
+        error_report("Anemoi destination runtime mismatch: got vmid=%u pages=%"
+                     PRIu64 " cache=%" PRIu64 ", stream vmid=%u pages=%"
+                     PRIu64 " cache=%" PRIu64,
+                     stats.vmid, stats.guest_pages, stats.local_cache_pages,
+                     vmid, guest_pages, local_cache_pages);
+        return -EINVAL;
+    }
+
+    ret = anemoi_mig_get_metadata(f, &metadata);
+    if (ret < 0) {
+        anemoi_cache_metadata_destroy(&metadata);
+        return ret;
+    }
+
+    ret = anemoi_cache_import_metadata(
+        anemoi_runtime_cache(anemoi_global_runtime), &metadata, &local_err);
+    anemoi_cache_metadata_destroy(&metadata);
+    if (ret != 0) {
+        error_report_err(local_err);
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static SaveVMHandlers anemoi_savevm_handlers = {
+    .save_setup = anemoi_mig_save_setup,
+    .save_complete = anemoi_mig_save_complete,
+    .load_state = anemoi_mig_load_state,
+    .is_active = anemoi_mig_is_active,
+};
+
+void anemoi_mig_init(void)
+{
+    register_savevm_live("anemoi", 0, 1, &anemoi_savevm_handlers, NULL);
 }
 
 static void anemoi_qmp_start_runtime(AnemoiRuntimeBootMode boot_mode,

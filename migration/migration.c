@@ -325,6 +325,7 @@ void migration_object_init(void)
     migration_object_check(current_migration, &error_fatal);
 
     ram_mig_init();
+    anemoi_mig_init();
     dirty_bitmap_mig_init();
     cpr_exec_init();
 
