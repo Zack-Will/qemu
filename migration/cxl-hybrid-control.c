@@ -1479,6 +1479,19 @@ bool cxl_hybrid_ctrl_page_requires_postcopy_discard(uint64_t page_index,
         generation);
 }
 
+bool cxl_hybrid_ctrl_cxl_remap_span(uint64_t fault_page,
+                                    uint32_t generation,
+                                    uint32_t max_pages,
+                                    CXLHybridRemapSpan *span)
+{
+    CXLHybridControlState *state = cxl_hybrid_control_destination.hdr ?
+        &cxl_hybrid_control_destination : &cxl_hybrid_control_source;
+
+    return cxl_hybrid_control_cxl_remap_span(state->hdr, state->page_state,
+                                             fault_page, generation,
+                                             max_pages, span);
+}
+
 void cxl_hybrid_ctrl_set_page_visible(uint64_t page_index,
                                       uint32_t generation)
 {

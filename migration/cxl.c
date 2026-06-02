@@ -1241,6 +1241,192 @@ static int cxl_hybrid_dst_remap_region(MigrationIncomingState *mis,
     return 1;
 }
 
+static uint32_t cxl_hybrid_dst_remap_max_pages(void)
+{
+    uint64_t pages;
+
+    if (!cxl_state.remap_granule) {
+        return 1;
+    }
+
+    pages = cxl_state.remap_granule >> TARGET_PAGE_BITS;
+    if (!pages) {
+        return 1;
+    }
+
+    return MIN(pages, (uint64_t)UINT32_MAX);
+}
+
+static bool cxl_hybrid_remap_span_clip_to_block(
+    const CXLHybridRemapSpan *span,
+    RAMBlock *rb,
+    uint64_t demand_page,
+    CXLHybridRemapSpan *clipped)
+{
+    uint64_t block_first;
+    uint64_t block_pages;
+    uint64_t block_last;
+    uint64_t span_last;
+    uint64_t first;
+    uint64_t last;
+
+    if (!span || !rb || !clipped || !span->nr_pages ||
+        !QEMU_IS_ALIGNED(rb->offset, TARGET_PAGE_SIZE) ||
+        !QEMU_IS_ALIGNED(rb->used_length, TARGET_PAGE_SIZE)) {
+        return false;
+    }
+    if (span->first_page > UINT64_MAX - span->nr_pages) {
+        return false;
+    }
+
+    block_first = rb->offset >> TARGET_PAGE_BITS;
+    block_pages = rb->used_length >> TARGET_PAGE_BITS;
+    if (!block_pages || block_first > UINT64_MAX - block_pages) {
+        return false;
+    }
+
+    block_last = block_first + block_pages;
+    span_last = span->first_page + span->nr_pages;
+    first = MAX(span->first_page, block_first);
+    last = MIN(span_last, block_last);
+    if (first >= last || demand_page < first || demand_page >= last ||
+        last - first > UINT32_MAX) {
+        return false;
+    }
+
+    clipped->first_page = first;
+    clipped->nr_pages = last - first;
+    return true;
+}
+
+static int cxl_hybrid_dst_remap_span(MigrationIncomingState *mis,
+                                     RAMBlock *rb,
+                                     const CXLHybridRemapSpan *span,
+                                     void *fault_host_addr,
+                                     Error **errp)
+{
+    const char *ramblock;
+    ram_addr_t block_offset;
+    uint64_t cxl_offset;
+    uint64_t len64;
+    uint64_t region_index;
+    void *host_addr;
+    void *ret;
+    uint64_t start_ns;
+    uint64_t mmap_ns;
+    uint64_t wake_start_ns;
+    uint64_t wake_ns;
+    bool received = false;
+    int rc;
+
+    if (!mis || !rb || !span || !span->nr_pages) {
+        error_setg(errp, "CXL hybrid destination span remap missing arguments");
+        return -EINVAL;
+    }
+    if (cxl_state.fd < 0) {
+        error_setg(errp, "CXL hybrid destination span remap missing CXL fd");
+        return -ENODEV;
+    }
+    if (!QEMU_IS_ALIGNED(rb->offset, TARGET_PAGE_SIZE) ||
+        span->first_page < (rb->offset >> TARGET_PAGE_BITS)) {
+        error_setg(errp, "CXL hybrid destination span remap outside RAMBlock");
+        return -EINVAL;
+    }
+
+    len64 = (uint64_t)span->nr_pages << TARGET_PAGE_BITS;
+    block_offset = (span->first_page - (rb->offset >> TARGET_PAGE_BITS)) <<
+                   TARGET_PAGE_BITS;
+    if (!len64 || len64 > SIZE_MAX || !offset_in_ramblock(rb, block_offset) ||
+        len64 > rb->used_length - block_offset) {
+        error_setg(errp,
+                   "CXL hybrid destination span remap invalid range "
+                   "%s/0x%" PRIx64 " len=%" PRIu64,
+                   qemu_ram_get_idstr(rb), (uint64_t)block_offset, len64);
+        return -EINVAL;
+    }
+
+    ramblock = qemu_ram_get_idstr(rb);
+    if (!cxl_hybrid_source_page_cxl_offset(ramblock, block_offset,
+                                           &cxl_offset) ||
+        cxl_offset > UINT64_MAX - len64) {
+        error_setg(errp,
+                   "CXL hybrid destination span remap %s/0x%" PRIx64
+                   " has no stable CXL offset",
+                   ramblock, (uint64_t)block_offset);
+        return -EINVAL;
+    }
+
+    host_addr = rb->host + block_offset;
+    start_ns = cxl_now_ns();
+    ret = mmap(host_addr, (size_t)len64, PROT_READ | PROT_WRITE,
+               MAP_FIXED | MAP_SHARED, cxl_state.fd, cxl_offset);
+    mmap_ns = cxl_now_ns() - start_ns;
+    qatomic_add(&cxl_state.dst_region_map_time_ns, mmap_ns);
+    qatomic_inc(&cxl_state.dst_region_map_attempts);
+    if (ret == MAP_FAILED) {
+        rc = -errno;
+        qatomic_inc(&cxl_state.dst_region_map_failures);
+        error_setg_errno(errp, errno,
+                         "CXL hybrid destination span remap failed");
+        return rc;
+    }
+
+    wake_start_ns = cxl_now_ns();
+    rc = postcopy_mark_range_received_and_wake(mis, rb, host_addr,
+                                               (size_t)len64,
+                                               fault_host_addr, &received);
+    wake_ns = cxl_now_ns() - wake_start_ns;
+    if (rc) {
+        qatomic_inc(&cxl_state.dst_region_wake_failures);
+        return rc;
+    }
+
+    region_index = cxl_state.remap_granule ?
+        (rb->offset + block_offset) / cxl_state.remap_granule :
+        UINT64_MAX;
+    qatomic_inc(&cxl_state.dst_region_map_successes);
+    trace_cxl_hybrid_dst_region_remap(ramblock, block_offset, len64,
+                                      cxl_offset, region_index, mmap_ns,
+                                      wake_ns, received);
+    if (trace_event_get_state(TRACE_CXL_HYBRID_DST_REGION_REMAP_TS)) {
+        trace_cxl_hybrid_dst_region_remap_ts(
+            cxl_now_ns(), ramblock, block_offset, len64, cxl_offset,
+            region_index, mmap_ns, wake_ns, received);
+    }
+    return 1;
+}
+
+static int cxl_hybrid_dst_remap_visible_fault_span(MigrationIncomingState *mis,
+                                                   RAMBlock *rb,
+                                                   uint64_t demand_page,
+                                                   uint32_t generation,
+                                                   void *fault_host_addr,
+                                                   Error **errp)
+{
+    CXLHybridRemapSpan span = { 0 };
+    CXLHybridRemapSpan clipped = { 0 };
+
+    if (!cxl_hybrid_ctrl_cxl_remap_span(
+            demand_page, generation, cxl_hybrid_dst_remap_max_pages(),
+            &span)) {
+        error_setg(errp,
+                   "CXL hybrid visible fault page %" PRIu64
+                   " is not remappable from CXL",
+                   demand_page);
+        return -ENOENT;
+    }
+    if (!cxl_hybrid_remap_span_clip_to_block(&span, rb, demand_page,
+                                             &clipped)) {
+        error_setg(errp,
+                   "CXL hybrid visible fault page %" PRIu64
+                   " remap span does not fit RAMBlock %s",
+                   demand_page, qemu_ram_get_idstr(rb));
+        return -EINVAL;
+    }
+
+    return cxl_hybrid_dst_remap_span(mis, rb, &clipped, fault_host_addr, errp);
+}
+
 static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
                                                     RAMBlock *rb,
                                                     ram_addr_t offset,
@@ -1255,12 +1441,10 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
     CXLHybridFaultRegionGeometry g = { 0 };
     const char *ramblock;
     void *fault_host;
-    size_t pagesize;
     uint64_t demand_page;
-    uint64_t cxl_offset;
     uint32_t generation;
     uint64_t wait_start_ns;
-    bool dst_local_resolved = false;
+    CXLHybridPageLocation location = CXL_HYBRID_PAGE_LOCATION_NONE;
     int ret;
 
     ret = cxl_hybrid_fault_region_compute(rb->offset, rb->used_length,
@@ -1278,7 +1462,6 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
     }
 
     ramblock = qemu_ram_get_idstr(rb);
-    pagesize = qemu_ram_pagesize(rb);
     demand_page = cxl_global_page_index(rb, offset);
     generation = cxl_hybrid_fault_publish_generation();
     wait_start_ns = cxl_now_ns();
@@ -1296,34 +1479,13 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
     }
 
     ret = cxl_hybrid_ctrl_wait_page_visible(demand_page, generation, errp);
-    if (!ret) {
-        CXLHybridPageLocation location = CXL_HYBRID_PAGE_LOCATION_NONE;
-
-        if (cxl_hybrid_ctrl_page_location(demand_page, generation,
-                                          &location) &&
-            location == CXL_HYBRID_PAGE_LOCATION_DST_LOCAL) {
-            ret = cxl_hybrid_resolve_dst_local_fault(mis, rb, offset,
-                                                     fault_host, errp);
-            dst_local_resolved = !ret;
-        }
-    }
-    if (!ret && !dst_local_resolved &&
-        !cxl_hybrid_source_page_cxl_offset(ramblock, offset, &cxl_offset)) {
+    if (!ret &&
+        !cxl_hybrid_ctrl_page_location(demand_page, generation, &location)) {
         error_setg(errp,
                    "CXL hybrid fault page %s/0x%" PRIx64
-                   " has no stable CXL offset",
+                   " has no visible page location",
                    ramblock, (uint64_t)offset);
         ret = -EINVAL;
-    }
-    if (!ret && !dst_local_resolved) {
-        if (!cxl_hybrid_dst_staging_is_active()) {
-            error_setg(errp,
-                       "CXL hybrid region fault resolution requires destination staging");
-            ret = -EINVAL;
-        } else {
-            ret = cxl_hybrid_dst_staging_register_external_page(
-                ramblock, offset, cxl_offset, pagesize, errp);
-        }
     }
     cxl_hybrid_record_timing(&cxl_state.dst_region_wait_samples,
                              &cxl_state.dst_region_wait_time_ns,
@@ -1332,23 +1494,30 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
     if (ret) {
         return ret;
     }
-    if (dst_local_resolved) {
-        return 0;
+
+    if (location == CXL_HYBRID_PAGE_LOCATION_DST_LOCAL) {
+        return cxl_hybrid_resolve_dst_local_fault(mis, rb, offset,
+                                                  fault_host, errp);
+    }
+    if (location == CXL_HYBRID_PAGE_LOCATION_CXL) {
+        ret = cxl_hybrid_dst_remap_visible_fault_span(
+            mis, rb, demand_page, generation, fault_host, errp);
+        return ret < 0 ? ret : 0;
     }
 
-    ret = cxl_hybrid_try_resolve_fault(mis, rb, offset, place_page, errp);
-    if (ret < 0) {
-        return ret;
-    }
-    if (ret == 0) {
+    if (location == CXL_HYBRID_PAGE_LOCATION_ZERO) {
         error_setg(errp,
-                   "CXL hybrid visible region demand page did not make "
-                   "%s/0x%" PRIx64 " available",
+                   "CXL hybrid region remap fault page %s/0x%" PRIx64
+                   " resolved to unsupported zero location",
                    ramblock, (uint64_t)offset);
-        return -ENOENT;
+        return -EINVAL;
     }
 
-    return 0;
+    error_setg(errp,
+               "CXL hybrid region remap fault page %s/0x%" PRIx64
+               " resolved to unsupported location %d",
+               ramblock, (uint64_t)offset, location);
+    return -EINVAL;
 }
 
 static int cxl_hybrid_try_resolve_region_fault_fast(

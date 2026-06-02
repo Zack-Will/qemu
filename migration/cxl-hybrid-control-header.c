@@ -369,6 +369,27 @@ bool cxl_hybrid_control_page_requires_postcopy_discard(
     return false;
 }
 
+bool cxl_hybrid_control_cxl_remap_span(const CXLHybridControlHeader *hdr,
+                                       const uint64_t *page_state,
+                                       uint64_t fault_page,
+                                       uint32_t generation,
+                                       uint32_t max_pages,
+                                       CXLHybridRemapSpan *span)
+{
+    uint64_t total_pages;
+
+    if (!hdr || !page_state || !span ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_in_range(hdr, fault_page) ||
+        fault_page >= hdr->page_state_words) {
+        return false;
+    }
+
+    total_pages = MIN(hdr->total_pages, (uint64_t)hdr->page_state_words);
+    return cxl_hybrid_page_state_longest_cxl_span(
+        page_state, total_pages, fault_page, generation, max_pages, span);
+}
+
 bool cxl_hybrid_fault_place_result_satisfied(int ret, bool received)
 {
     return ret == 0 || (ret == -EEXIST && received);

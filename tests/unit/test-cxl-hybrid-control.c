@@ -915,6 +915,62 @@ static void test_remap_span_reuses_unused_right_cap(void)
     g_assert_cmpuint(span.nr_pages, ==, 5);
 }
 
+static void test_control_remap_span_uses_published_cxl_pages(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[1] = { 0 };
+    uint64_t page_state[8];
+    CXLHybridRemapSpan span = { 0 };
+    uint32_t generation = 17;
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible,
+                                       G_N_ELEMENTS(page_state),
+                                       page_state,
+                                       G_N_ELEMENTS(page_state),
+                                       NULL, 0, NULL, 0,
+                                       64 * 1024, 12, generation);
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_published(
+            generation, CXL_HYBRID_PAGE_LOCATION_CXL, 0);
+    }
+    page_state[1] = cxl_hybrid_page_state_make_dirty(generation, 1);
+    page_state[6] = cxl_hybrid_page_state_make_published(
+        generation, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL, 0);
+
+    g_assert_true(cxl_hybrid_control_cxl_remap_span(
+        &hdr, page_state, 4, generation, 0, &span));
+    g_assert_cmpuint(span.first_page, ==, 2);
+    g_assert_cmpuint(span.nr_pages, ==, 4);
+}
+
+static void test_control_remap_span_rejects_non_cxl_fault_page(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[1] = { 0 };
+    uint64_t page_state[4];
+    CXLHybridRemapSpan span = { 0 };
+    uint32_t generation = 18;
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible,
+                                       G_N_ELEMENTS(page_state),
+                                       page_state,
+                                       G_N_ELEMENTS(page_state),
+                                       NULL, 0, NULL, 0,
+                                       64 * 1024, 12, generation);
+    page_state[0] = cxl_hybrid_page_state_make_published(
+        generation, CXL_HYBRID_PAGE_LOCATION_CXL, 0);
+    page_state[1] = cxl_hybrid_page_state_make_published(
+        generation, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL, 0);
+    page_state[2] = cxl_hybrid_page_state_make_published(
+        generation, CXL_HYBRID_PAGE_LOCATION_CXL, 0);
+    page_state[3] = cxl_hybrid_page_state_make_dirty(generation, 1);
+
+    g_assert_false(cxl_hybrid_control_cxl_remap_span(
+        &hdr, page_state, 1, generation, 0, &span));
+    g_assert_false(cxl_hybrid_control_cxl_remap_span(
+        &hdr, page_state, 2, generation + 1, 0, &span));
+}
+
 static void test_visible_bitmap_bytes_round_up_by_ulong(void)
 {
     g_assert_cmpuint(cxl_hybrid_control_visible_bitmap_words(0), ==, 0);
@@ -2011,6 +2067,10 @@ int main(int argc, char **argv)
                     test_remap_span_reuses_unused_left_cap);
     g_test_add_func("/cxl-hybrid-control/remap-span-reuses-unused-right-cap",
                     test_remap_span_reuses_unused_right_cap);
+    g_test_add_func("/cxl-hybrid-control/control-remap-span-uses-published-cxl",
+                    test_control_remap_span_uses_published_cxl_pages);
+    g_test_add_func("/cxl-hybrid-control/control-remap-span-rejects-non-cxl",
+                    test_control_remap_span_rejects_non_cxl_fault_page);
     g_test_add_func("/cxl-hybrid-control/staging-shared-map-supports-fixed-extent-io",
                     test_staging_shared_map_supports_fixed_extent_io);
     g_test_add_func("/cxl-hybrid-control/staging-shared-map-reads-external-cxl-offset-without-slot",
