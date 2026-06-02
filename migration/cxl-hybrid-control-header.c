@@ -584,6 +584,30 @@ bool cxl_hybrid_control_complete_rdma_page_visible_generation(
     return true;
 }
 
+bool cxl_hybrid_control_complete_zero_page_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    const CXLHybridPageClaim *claim)
+{
+    if (!visible_bitmap || !page_state || !claim ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_in_range(hdr, page_index) ||
+        page_index >= hdr->page_state_words) {
+        return false;
+    }
+
+    if (!cxl_hybrid_page_state_complete_zero(&page_state[page_index], claim)) {
+        return false;
+    }
+
+    smp_mb_release();
+    set_bit_atomic(page_index, visible_bitmap);
+    return true;
+}
+
 void cxl_hybrid_control_mark_pages_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,

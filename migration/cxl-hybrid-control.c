@@ -1582,6 +1582,33 @@ bool cxl_hybrid_ctrl_complete_rdma_page_visible(
         generation, claim);
 }
 
+bool cxl_hybrid_ctrl_publish_zero_page(uint64_t page_index,
+                                       uint32_t generation)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_source;
+    CXLHybridPageClaim claim = { 0 };
+    bool completed;
+
+    if (!state->hdr || !state->visible_bitmap || !state->page_state ||
+        page_index >= state->hdr->total_pages ||
+        page_index >= state->page_state_words ||
+        !cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+        return false;
+    }
+    if (!cxl_hybrid_page_state_claim_for_zero(&state->page_state[page_index],
+                                              generation, &claim)) {
+        return false;
+    }
+    completed = cxl_hybrid_control_complete_zero_page_visible_generation(
+        state->hdr, state->visible_bitmap, state->page_state, page_index,
+        generation, &claim);
+    if (!completed) {
+        cxl_hybrid_page_state_drop_claim(&state->page_state[page_index],
+                                         &claim);
+    }
+    return completed;
+}
+
 bool cxl_hybrid_ctrl_enqueue_cxl_page(RAMBlock *block,
                                       ram_addr_t block_offset,
                                       uint64_t page_index,

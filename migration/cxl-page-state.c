@@ -152,6 +152,14 @@ bool cxl_hybrid_page_state_claim_for_rdma(uint64_t *slot,
         slot, CXL_HYBRID_PAGE_OWNER_RDMA, generation, claim);
 }
 
+bool cxl_hybrid_page_state_claim_for_zero(uint64_t *slot,
+                                          uint32_t generation,
+                                          CXLHybridPageClaim *claim)
+{
+    return cxl_hybrid_page_state_try_claim(
+        slot, CXL_HYBRID_PAGE_OWNER_ZERO, generation, claim);
+}
+
 bool cxl_hybrid_page_state_complete(uint64_t *slot,
                                     const CXLHybridPageClaim *claim,
                                     CXLHybridPageLocation location)
@@ -182,6 +190,14 @@ bool cxl_hybrid_page_state_complete_rdma(uint64_t *slot,
     return claim && claim->owner == CXL_HYBRID_PAGE_OWNER_RDMA &&
            cxl_hybrid_page_state_complete(
                slot, claim, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL);
+}
+
+bool cxl_hybrid_page_state_complete_zero(uint64_t *slot,
+                                         const CXLHybridPageClaim *claim)
+{
+    return claim && claim->owner == CXL_HYBRID_PAGE_OWNER_ZERO &&
+           cxl_hybrid_page_state_complete(
+               slot, claim, CXL_HYBRID_PAGE_LOCATION_ZERO);
 }
 
 bool cxl_hybrid_page_state_drop_claim(uint64_t *slot,
