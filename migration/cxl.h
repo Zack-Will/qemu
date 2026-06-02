@@ -629,6 +629,12 @@ CXLHybridTransferClass cxl_hybrid_scheduler_choose_zero_page_lane(
     const CXLHybridSchedulerPolicy *policy);
 void cxl_hybrid_account_shadow_bulk_candidate(RAMBlock *block,
                                                ram_addr_t block_offset);
+void cxl_hybrid_account_zero_scan(uint32_t zero_pages, bool partial_zero);
+void cxl_hybrid_account_full_zero_region_bypassed(uint32_t pages);
+void cxl_hybrid_account_zero_publish(bool success);
+void cxl_hybrid_account_cxl_zero_pages_skipped(uint32_t pages);
+void cxl_hybrid_account_cxl_effective_zero_filtered_bytes(uint64_t bytes);
+void cxl_hybrid_account_rdma_partial_zero_bytes(uint64_t bytes);
 void cxl_hybrid_account_rdma_ready(uint64_t region_index,
                                    uint64_t pages);
 void cxl_hybrid_account_rdma_invalidate(uint64_t region_index,

@@ -299,6 +299,46 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertLess(zero_scan, cxl_enqueue)
         self.assertLess(zero_scan, rdma_enqueue)
 
+    def test_full_zero_region_bypasses_cxl_and_rdma_work(self):
+        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        self.assertIn("static int cxl_hybrid_publish_full_zero_region(",
+                      ram_text)
+        helper_start = ram_text.index(
+            "static int cxl_hybrid_publish_full_zero_region(")
+        helper_end = ram_text.index(
+            "static int cxl_hybrid_cxl_enqueue_bulk_page(")
+        helper = ram_text[helper_start:helper_end]
+        self.assertIn("cxl_hybrid_ctrl_publish_zero_page", helper)
+        self.assertIn("migration_bitmap_clear_dirty", helper)
+        self.assertIn("cxl_hybrid_account_full_zero_region_bypassed", helper)
+
+        fn_start = ram_text.index("static int ram_save_host_page(")
+        fn_end = ram_text.index("/* Update host page boundary information */",
+                                fn_start)
+        prologue = ram_text[fn_start:fn_end]
+        zero_bypass = prologue.index("cxl_hybrid_publish_full_zero_region(")
+        cxl_enqueue = prologue.index("cxl_hybrid_cxl_enqueue_bulk_page(")
+        rdma_enqueue = prologue.index("cxl_hybrid_rdma_enqueue_bulk_region(")
+        self.assertLess(zero_bypass, cxl_enqueue)
+        self.assertLess(zero_bypass, rdma_enqueue)
+
+    def test_partial_zero_cxl_skips_zero_pages_and_enqueues_nonzero_runs(self):
+        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        fn_start = ram_text.index("static int cxl_hybrid_cxl_enqueue_bulk_page(")
+        fn_end = ram_text.index(
+            "static int cxl_hybrid_rdma_enqueue_bulk_region(", fn_start)
+        helper = ram_text[fn_start:fn_end]
+
+        self.assertIn("const CXLHybridZeroRegionScan *zero_scan", helper)
+        self.assertIn("cxl_hybrid_ctrl_publish_zero_page", helper)
+        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_pages", helper)
+        self.assertIn("cxl_hybrid_account_cxl_zero_pages_skipped", helper)
+        self.assertIn("cxl_hybrid_account_cxl_effective_zero_filtered_bytes",
+                      helper)
+        self.assertIn("!test_bit(page, zero_scan->dirty_zero_bmap)", helper)
+
     def test_postcopy_bulk_dirty_pages_route_to_cxl_worker_not_stream(self):
         ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
 

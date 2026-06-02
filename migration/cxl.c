@@ -275,6 +275,14 @@ static struct CXLMigrationState {
     uint64_t max_dst_region_wait_time_ns;
     uint64_t dst_region_fallback_copies;
     uint64_t dst_zero_faults_resolved;
+    uint64_t zero_pages_classified;
+    uint64_t zero_full_regions_bypassed;
+    uint64_t zero_partial_regions;
+    uint64_t zero_pages_published;
+    uint64_t zero_publish_cas_failures;
+    uint64_t cxl_zero_pages_skipped;
+    uint64_t cxl_effective_bytes_after_zero_filter;
+    uint64_t rdma_partial_zero_bytes_sent;
     CXLHybridLastPublishRequestInfo last_publish_request;
     CXLHybridLastPublishWaitInfo last_publish_wait_begin;
     CXLHybridLastPublishWaitInfo last_publish_wait_complete;
@@ -3290,6 +3298,54 @@ void cxl_hybrid_account_shadow_bulk_candidate(RAMBlock *block,
 {
     (void)block;
     (void)block_offset;
+}
+
+void cxl_hybrid_account_zero_scan(uint32_t zero_pages, bool partial_zero)
+{
+    if (zero_pages) {
+        qatomic_add(&cxl_state.zero_pages_classified, zero_pages);
+    }
+    if (partial_zero) {
+        qatomic_inc(&cxl_state.zero_partial_regions);
+    }
+}
+
+void cxl_hybrid_account_full_zero_region_bypassed(uint32_t pages)
+{
+    qatomic_inc(&cxl_state.zero_full_regions_bypassed);
+    if (pages) {
+        qatomic_add(&cxl_state.cxl_zero_pages_skipped, pages);
+    }
+}
+
+void cxl_hybrid_account_zero_publish(bool success)
+{
+    if (success) {
+        qatomic_inc(&cxl_state.zero_pages_published);
+    } else {
+        qatomic_inc(&cxl_state.zero_publish_cas_failures);
+    }
+}
+
+void cxl_hybrid_account_cxl_zero_pages_skipped(uint32_t pages)
+{
+    if (pages) {
+        qatomic_add(&cxl_state.cxl_zero_pages_skipped, pages);
+    }
+}
+
+void cxl_hybrid_account_cxl_effective_zero_filtered_bytes(uint64_t bytes)
+{
+    if (bytes) {
+        qatomic_add(&cxl_state.cxl_effective_bytes_after_zero_filter, bytes);
+    }
+}
+
+void cxl_hybrid_account_rdma_partial_zero_bytes(uint64_t bytes)
+{
+    if (bytes) {
+        qatomic_add(&cxl_state.rdma_partial_zero_bytes_sent, bytes);
+    }
 }
 
 bool cxl_hybrid_rdma_sidecar_get_backing(void **basep, size_t *sizep)
