@@ -2374,6 +2374,34 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(counts["region_wait_complete_failures"], 0)
         self.assertEqual(counts["dst_region_remap"], 1)
 
+    def test_region_remap_zero_location_uses_postcopy_zero_page(self):
+        cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        self.assertIn("static int cxl_hybrid_resolve_zero_fault(", cxl_text)
+        helper_start = cxl_text.index("static int cxl_hybrid_resolve_zero_fault(")
+        helper_end = cxl_text.index(
+            "static int cxl_hybrid_wait_and_resolve_region_fault(")
+        helper = cxl_text[helper_start:helper_end]
+        self.assertIn("postcopy_place_page_zero(mis, fault_host, rb)",
+                      helper)
+        self.assertIn("if (ret == -EEXIST)", helper)
+        self.assertIn("pagesize = qemu_ram_pagesize(rb)", helper)
+        self.assertIn("postcopy_mark_range_received_and_wake(mis, rb, fault_host",
+                      helper)
+        self.assertIn("dst_zero_faults_resolved", helper)
+
+        resolver_start = cxl_text.index(
+            "static int cxl_hybrid_wait_and_resolve_region_fault(")
+        resolver_end = cxl_text.index(
+            "static int cxl_hybrid_try_resolve_region_fault_fast(")
+        resolver = cxl_text[resolver_start:resolver_end]
+        zero_branch = resolver.index(
+            "location == CXL_HYBRID_PAGE_LOCATION_ZERO")
+        self.assertIn("return cxl_hybrid_resolve_zero_fault(",
+                      resolver[zero_branch:zero_branch + 400])
+        self.assertNotIn("unsupported zero location",
+                         resolver[zero_branch:zero_branch + 400])
+
     def test_rdma_fallback_stats_are_exported_to_qapi_and_summary(self):
         qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
         cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
