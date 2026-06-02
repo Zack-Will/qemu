@@ -686,6 +686,36 @@
 # @page-state-cas-failures: page-state CAS failures observed by active
 #     CXL/RDMA lane completion.  (Since 11.0)
 #
+# @zero-pages-classified: dirty pages observed as zero by source-side
+#     zero-page classification.  (Since 11.0)
+#
+# @zero-full-regions-bypassed: fault regions whose dirty pages were
+#     all published as zero without CXL/RDMA data transfer.  (Since
+#     11.0)
+#
+# @zero-partial-regions: fault regions that contained both zero and
+#     non-zero dirty pages during classification.  (Since 11.0)
+#
+# @zero-pages-published: pages successfully published as
+#     `PUBLISHED@ZERO`.  (Since 11.0)
+#
+# @zero-publish-cas-failures: failed attempts to publish a classified
+#     zero page through page-state CAS.  (Since 11.0)
+#
+# @cxl-zero-pages-skipped: classified zero pages skipped by the CXL
+#     data path.  (Since 11.0)
+#
+# @cxl-effective-bytes-after-zero-filter: bytes enqueued to the CXL
+#     page-state worker after filtering known zero pages.  (Since
+#     11.0)
+#
+# @rdma-partial-zero-bytes-sent: full-region RDMA bytes sent for
+#     regions that contained zero pages but preserved DST_LOCAL
+#     semantics.  (Since 11.0)
+#
+# @dst-zero-faults-resolved: destination postcopy faults resolved with
+#     zero-page placement for `PUBLISHED@ZERO` pages.  (Since 11.0)
+#
 # @rdma-sidecar-connect-time-ns: cumulative nanoseconds spent
 #     establishing the RDMA sidecar connection.  (Since 11.0)
 #
@@ -874,6 +904,11 @@
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
 #     @rdma-bulk-regions, @rdma-bulk-bytes,
+#     @zero-pages-classified, @zero-full-regions-bypassed,
+#     @zero-partial-regions, @zero-pages-published,
+#     @zero-publish-cas-failures, @cxl-zero-pages-skipped,
+#     @cxl-effective-bytes-after-zero-filter,
+#     @rdma-partial-zero-bytes-sent, @dst-zero-faults-resolved,
 #     @rdma-sidecar-connect-time-ns,
 #     @rdma-sidecar-registered-bytes,
 #     @rdma-sidecar-posted-regions,
@@ -1076,6 +1111,24 @@
             'page-state-rdma-stale-pages': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'page-state-cas-failures': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'zero-pages-classified': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'zero-full-regions-bypassed': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'zero-partial-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'zero-pages-published': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'zero-publish-cas-failures': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'cxl-zero-pages-skipped': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'cxl-effective-bytes-after-zero-filter': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-partial-zero-bytes-sent': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'dst-zero-faults-resolved': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'rdma-sidecar-connect-time-ns': {
                 'type': 'uint64', 'features': [ 'unstable' ] },

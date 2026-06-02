@@ -2834,6 +2834,24 @@ void cxl_populate_migration_info(MigrationInfo *info)
     info->x_cxl->page_state_rdma_stale_pages =
         rdma_bulk_stats.page_state_rdma_stale_pages;
     info->x_cxl->page_state_cas_failures = 0;
+    info->x_cxl->zero_pages_classified =
+        qatomic_read(&cxl_state.zero_pages_classified);
+    info->x_cxl->zero_full_regions_bypassed =
+        qatomic_read(&cxl_state.zero_full_regions_bypassed);
+    info->x_cxl->zero_partial_regions =
+        qatomic_read(&cxl_state.zero_partial_regions);
+    info->x_cxl->zero_pages_published =
+        qatomic_read(&cxl_state.zero_pages_published);
+    info->x_cxl->zero_publish_cas_failures =
+        qatomic_read(&cxl_state.zero_publish_cas_failures);
+    info->x_cxl->cxl_zero_pages_skipped =
+        qatomic_read(&cxl_state.cxl_zero_pages_skipped);
+    info->x_cxl->cxl_effective_bytes_after_zero_filter =
+        qatomic_read(&cxl_state.cxl_effective_bytes_after_zero_filter);
+    info->x_cxl->rdma_partial_zero_bytes_sent =
+        qatomic_read(&cxl_state.rdma_partial_zero_bytes_sent);
+    info->x_cxl->dst_zero_faults_resolved =
+        qatomic_read(&cxl_state.dst_zero_faults_resolved);
     info->x_cxl->rdma_sidecar_connect_time_ns =
         rdma_stats.rdma_sidecar_connect_time_ns;
     info->x_cxl->rdma_sidecar_registered_bytes =

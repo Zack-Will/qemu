@@ -2445,6 +2445,15 @@ def extract_summary(samples):
     page_state_rdma_completed_time_ns = 0
     page_state_rdma_stale_pages = 0
     page_state_cas_failures = 0
+    zero_pages_classified = 0
+    zero_full_regions_bypassed = 0
+    zero_partial_regions = 0
+    zero_pages_published = 0
+    zero_publish_cas_failures = 0
+    cxl_zero_pages_skipped = 0
+    cxl_effective_bytes_after_zero_filter = 0
+    rdma_partial_zero_bytes_sent = 0
+    dst_zero_faults_resolved = 0
     rdma_sidecar_metrics = {key: 0 for key in RDMA_SIDECAR_METRICS}
     rdma_ready_regions = 0
     rdma_ready_pages = 0
@@ -2649,6 +2658,42 @@ def extract_summary(samples):
             page_state_cas_failures,
             src_xcxl.get("page-state-cas-failures", 0),
             dst_xcxl.get("page-state-cas-failures", 0))
+        zero_pages_classified = max(
+            zero_pages_classified,
+            src_xcxl.get("zero-pages-classified", 0),
+            dst_xcxl.get("zero-pages-classified", 0))
+        zero_full_regions_bypassed = max(
+            zero_full_regions_bypassed,
+            src_xcxl.get("zero-full-regions-bypassed", 0),
+            dst_xcxl.get("zero-full-regions-bypassed", 0))
+        zero_partial_regions = max(
+            zero_partial_regions,
+            src_xcxl.get("zero-partial-regions", 0),
+            dst_xcxl.get("zero-partial-regions", 0))
+        zero_pages_published = max(
+            zero_pages_published,
+            src_xcxl.get("zero-pages-published", 0),
+            dst_xcxl.get("zero-pages-published", 0))
+        zero_publish_cas_failures = max(
+            zero_publish_cas_failures,
+            src_xcxl.get("zero-publish-cas-failures", 0),
+            dst_xcxl.get("zero-publish-cas-failures", 0))
+        cxl_zero_pages_skipped = max(
+            cxl_zero_pages_skipped,
+            src_xcxl.get("cxl-zero-pages-skipped", 0),
+            dst_xcxl.get("cxl-zero-pages-skipped", 0))
+        cxl_effective_bytes_after_zero_filter = max(
+            cxl_effective_bytes_after_zero_filter,
+            src_xcxl.get("cxl-effective-bytes-after-zero-filter", 0),
+            dst_xcxl.get("cxl-effective-bytes-after-zero-filter", 0))
+        rdma_partial_zero_bytes_sent = max(
+            rdma_partial_zero_bytes_sent,
+            src_xcxl.get("rdma-partial-zero-bytes-sent", 0),
+            dst_xcxl.get("rdma-partial-zero-bytes-sent", 0))
+        dst_zero_faults_resolved = max(
+            dst_zero_faults_resolved,
+            src_xcxl.get("dst-zero-faults-resolved", 0),
+            dst_xcxl.get("dst-zero-faults-resolved", 0))
         for key in RDMA_SIDECAR_METRICS:
             qmp_key = key.replace("_", "-")
             rdma_sidecar_metrics[key] = max(
@@ -2901,6 +2946,16 @@ def extract_summary(samples):
             page_state_rdma_completed_time_ns,
         "page_state_rdma_stale_pages": page_state_rdma_stale_pages,
         "page_state_cas_failures": page_state_cas_failures,
+        "zero_pages_classified": zero_pages_classified,
+        "zero_full_regions_bypassed": zero_full_regions_bypassed,
+        "zero_partial_regions": zero_partial_regions,
+        "zero_pages_published": zero_pages_published,
+        "zero_publish_cas_failures": zero_publish_cas_failures,
+        "cxl_zero_pages_skipped": cxl_zero_pages_skipped,
+        "cxl_effective_bytes_after_zero_filter":
+            cxl_effective_bytes_after_zero_filter,
+        "rdma_partial_zero_bytes_sent": rdma_partial_zero_bytes_sent,
+        "dst_zero_faults_resolved": dst_zero_faults_resolved,
         **rdma_sidecar_metrics,
         "rdma_ready_regions": rdma_ready_regions,
         "rdma_ready_pages": rdma_ready_pages,

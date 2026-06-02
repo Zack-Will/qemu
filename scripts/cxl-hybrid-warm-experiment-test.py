@@ -2422,6 +2422,67 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(summary["page_state_rdma_stale_pages"], 2)
         self.assertEqual(summary["page_state_cas_failures"], 5)
 
+    def test_zero_page_stats_are_exported_to_qapi_and_summary(self):
+        qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
+        cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        for field in (
+            "zero-pages-classified",
+            "zero-full-regions-bypassed",
+            "zero-partial-regions",
+            "zero-pages-published",
+            "zero-publish-cas-failures",
+            "cxl-zero-pages-skipped",
+            "cxl-effective-bytes-after-zero-filter",
+            "rdma-partial-zero-bytes-sent",
+            "dst-zero-faults-resolved",
+        ):
+            self.assertIn(f"'{field}'", qapi_text)
+
+        for field in (
+            "zero_pages_classified",
+            "zero_full_regions_bypassed",
+            "zero_partial_regions",
+            "zero_pages_published",
+            "zero_publish_cas_failures",
+            "cxl_zero_pages_skipped",
+            "cxl_effective_bytes_after_zero_filter",
+            "rdma_partial_zero_bytes_sent",
+            "dst_zero_faults_resolved",
+        ):
+            self.assertIn(f"info->x_cxl->{field}", cxl_text)
+
+        summary = self.mod.extract_summary([
+            {
+                "x-cxl": {
+                    "zero-pages-classified": 10,
+                    "zero-full-regions-bypassed": 1,
+                    "zero-partial-regions": 2,
+                    "zero-pages-published": 8,
+                    "zero-publish-cas-failures": 1,
+                    "cxl-zero-pages-skipped": 7,
+                    "cxl-effective-bytes-after-zero-filter": 12288,
+                    "rdma-partial-zero-bytes-sent": 65536,
+                },
+                "dst-query-migrate": {
+                    "x-cxl": {
+                        "dst-zero-faults-resolved": 3,
+                    }
+                },
+            }
+        ])
+
+        self.assertEqual(summary["zero_pages_classified"], 10)
+        self.assertEqual(summary["zero_full_regions_bypassed"], 1)
+        self.assertEqual(summary["zero_partial_regions"], 2)
+        self.assertEqual(summary["zero_pages_published"], 8)
+        self.assertEqual(summary["zero_publish_cas_failures"], 1)
+        self.assertEqual(summary["cxl_zero_pages_skipped"], 7)
+        self.assertEqual(summary["cxl_effective_bytes_after_zero_filter"],
+                         12288)
+        self.assertEqual(summary["rdma_partial_zero_bytes_sent"], 65536)
+        self.assertEqual(summary["dst_zero_faults_resolved"], 3)
+
     def test_region_remap_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             trace = Path(tmpdir) / "trace.log"
