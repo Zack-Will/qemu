@@ -546,6 +546,27 @@ static void cxl_hybrid_rdma_dirty_claimed_region(
     }
 }
 
+#define CXL_HYBRID_CXL_BULK_MAX_PAGES 1024
+
+typedef struct CXLHybridZeroRegionScan {
+    bool valid;
+    bool any_dirty;
+    bool all_dirty_zero;
+    bool partial_zero;
+    unsigned long dirty_zero_bmap[BITS_TO_LONGS(CXL_HYBRID_CXL_BULK_MAX_PAGES)];
+    unsigned long first_page_in_block;
+    uint32_t dirty_pages;
+    uint32_t zero_dirty_pages;
+    uint32_t nonzero_dirty_pages;
+    uint32_t pages;
+    ram_addr_t block_offset;
+    ram_addr_t region_len;
+    uint64_t global_offset;
+    uint64_t first_state_page;
+    uint64_t region_index;
+    uint64_t cxl_offset;
+} CXLHybridZeroRegionScan;
+
 static void cxl_hybrid_shadow_classify_bulk_page(RAMState *rs,
                                                  PageSearchStatus *pss)
 {
@@ -558,7 +579,83 @@ static void cxl_hybrid_shadow_classify_bulk_page(RAMState *rs,
                                              pss->page << TARGET_PAGE_BITS);
 }
 
-#define CXL_HYBRID_CXL_BULK_MAX_PAGES 1024
+static bool cxl_hybrid_zero_scan_region(PageSearchStatus *pss,
+                                        CXLHybridZeroRegionScan *scan)
+{
+    RAMBlock *block;
+    ram_addr_t region_offset;
+    ram_addr_t region_len;
+    uint64_t cxl_offset;
+    uint64_t global_offset;
+    uint64_t scan_global_offset;
+    unsigned long block_pages;
+    uint32_t pages;
+
+    memset(scan, 0, sizeof(*scan));
+    if (!migrate_cxl_hybrid() || !pss || !pss->block ||
+        postcopy_preempt_active()) {
+        return false;
+    }
+
+    block = pss->block;
+    region_len = cxl_hybrid_fault_region_granule();
+    if (!region_len || !QEMU_IS_ALIGNED(region_len, TARGET_PAGE_SIZE)) {
+        return false;
+    }
+
+    scan->block_offset = ((ram_addr_t)pss->page) << TARGET_PAGE_BITS;
+    region_offset = QEMU_ALIGN_DOWN(scan->block_offset, region_len);
+    if (!cxl_hybrid_global_page_offset(block, region_offset,
+                                       TARGET_PAGE_SIZE, &global_offset) ||
+        !cxl_hybrid_source_page_cxl_offset(block->idstr, region_offset,
+                                           &cxl_offset)) {
+        return false;
+    }
+
+    block_pages = block->used_length >> TARGET_PAGE_BITS;
+    if ((region_offset >> TARGET_PAGE_BITS) >= block_pages) {
+        return false;
+    }
+    pages = MIN((uint64_t)((block->used_length - region_offset) >>
+                           TARGET_PAGE_BITS),
+                region_len >> TARGET_PAGE_BITS);
+    if (!pages || pages > CXL_HYBRID_CXL_BULK_MAX_PAGES) {
+        return false;
+    }
+
+    bitmap_zero(scan->dirty_zero_bmap, CXL_HYBRID_CXL_BULK_MAX_PAGES);
+    scan->valid = true;
+    scan->first_page_in_block = region_offset >> TARGET_PAGE_BITS;
+    scan->pages = pages;
+    scan->region_len = region_len;
+    scan->global_offset = global_offset;
+    scan->first_state_page = global_offset >> TARGET_PAGE_BITS;
+    scan->region_index = global_offset / region_len;
+    scan->cxl_offset = cxl_offset;
+
+    for (uint32_t i = 0; i < pages; i++) {
+        unsigned long bitmap_page = scan->first_page_in_block + i;
+        uint8_t *host = block->host + region_offset +
+                        (ram_addr_t)i * TARGET_PAGE_SIZE;
+
+        if (!test_bit(bitmap_page, block->bmap)) {
+            continue;
+        }
+        scan->any_dirty = true;
+        scan->dirty_pages++;
+        if (buffer_is_zero(host, TARGET_PAGE_SIZE)) {
+            set_bit(i, scan->dirty_zero_bmap);
+            scan->zero_dirty_pages++;
+        } else {
+            scan->nonzero_dirty_pages++;
+        }
+    }
+
+    scan_global_offset = global_offset + scan->pages * TARGET_PAGE_SIZE;
+    scan->all_dirty_zero = scan->dirty_pages && !scan->nonzero_dirty_pages;
+    scan->partial_zero = scan->zero_dirty_pages && scan->nonzero_dirty_pages;
+    return scan_global_offset >= global_offset && scan->any_dirty;
+}
 
 static int cxl_hybrid_cxl_enqueue_bulk_page(RAMState *rs,
                                             PageSearchStatus *pss)
@@ -3075,7 +3172,9 @@ out:
  */
 static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
 {
+    CXLHybridZeroRegionScan zero_scan;
     bool page_dirty, preempt_active = postcopy_preempt_active();
+    bool have_zero_scan;
     int tmppages, pages = 0;
     size_t pagesize_bits =
         qemu_ram_pagesize(pss->block) >> TARGET_PAGE_BITS;
@@ -3089,6 +3188,8 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     }
 
     cxl_hybrid_shadow_classify_bulk_page(rs, pss);
+    have_zero_scan = cxl_hybrid_zero_scan_region(pss, &zero_scan);
+    (void)have_zero_scan;
     res = cxl_hybrid_cxl_enqueue_bulk_page(rs, pss);
     if (res) {
         return res;

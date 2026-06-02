@@ -281,6 +281,24 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertIn(enqueue, fn_body)
         self.assertLess(fn_body.index(enqueue), fn_body.index(cxl_copy))
 
+    def test_ram_main_loop_scans_zero_pages_before_cxl_and_rdma_enqueue(self):
+        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        self.assertIn("typedef struct CXLHybridZeroRegionScan", ram_text)
+        self.assertIn("static bool cxl_hybrid_zero_scan_region(", ram_text)
+        self.assertIn("buffer_is_zero(host, TARGET_PAGE_SIZE)", ram_text)
+
+        fn_start = ram_text.index("static int ram_save_host_page(")
+        fn_end = ram_text.index("/* Update host page boundary information */",
+                                fn_start)
+        prologue = ram_text[fn_start:fn_end]
+
+        zero_scan = prologue.index("cxl_hybrid_zero_scan_region(")
+        cxl_enqueue = prologue.index("cxl_hybrid_cxl_enqueue_bulk_page(")
+        rdma_enqueue = prologue.index("cxl_hybrid_rdma_enqueue_bulk_region(")
+        self.assertLess(zero_scan, cxl_enqueue)
+        self.assertLess(zero_scan, rdma_enqueue)
+
     def test_postcopy_bulk_dirty_pages_route_to_cxl_worker_not_stream(self):
         ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
 
