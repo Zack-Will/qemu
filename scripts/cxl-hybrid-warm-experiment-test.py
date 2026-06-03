@@ -324,11 +324,12 @@ class WarmExperimentScriptTest(unittest.TestCase):
             helper_start)
         helper_body = ram_source[helper_start:helper_end]
         self.assertIn("cxl_hybrid_ctrl_claim_rdma_pages", helper_body)
-        self.assertIn("cxl_rdma_sidecar_enqueue_bulk_claim", helper_body)
+        self.assertIn("cxl_rdma_sidecar_enqueue_reserved_bulk_claim",
+                      helper_body)
         self.assertNotIn("cxl_hybrid_region_try_own_rdma", helper_body)
         self.assertLess(
             helper_body.index("cxl_hybrid_ctrl_claim_rdma_pages"),
-            helper_body.index("cxl_rdma_sidecar_enqueue_bulk_claim"),
+            helper_body.index("cxl_rdma_sidecar_enqueue_reserved_bulk_claim"),
         )
 
         fn_start = ram_source.index("static int ram_save_host_page(")
@@ -339,6 +340,87 @@ class WarmExperimentScriptTest(unittest.TestCase):
         cxl_copy = "ram_save_target_page(rs, pss)"
         self.assertIn(enqueue, fn_body)
         self.assertLess(fn_body.index(enqueue), fn_body.index(cxl_copy))
+
+    def test_ram_bulk_scheduler_uses_dynamic_rdma_before_cxl_overflow(self):
+        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
+        cxl_start = ram_text.index(
+            "static int cxl_hybrid_cxl_enqueue_bulk_page(")
+        rdma_start = ram_text.index(
+            "static int cxl_hybrid_rdma_enqueue_bulk_region(",
+            cxl_start)
+        rdma_end = ram_text.index(
+            "void cxl_hybrid_rdma_drop_bulk_claim(",
+            rdma_start)
+        cxl_body = ram_text[cxl_start:rdma_start]
+        rdma_body = ram_text[rdma_start:rdma_end]
+        save_host = ram_text[ram_text.index(
+            "static int ram_save_host_page("):]
+        save_host = save_host[:save_host.index("/* Update host page")]
+
+        rdma_call = save_host.index("cxl_hybrid_rdma_enqueue_bulk_region")
+        cxl_call = save_host.index("cxl_hybrid_cxl_enqueue_bulk_page")
+        self.assertLess(rdma_call, cxl_call)
+
+        for helper_body in (cxl_body, rdma_body):
+            self.assertNotIn(".rdma_budget_pages = 1", helper_body)
+            self.assertNotIn(".cxl_background_pages = 1", helper_body)
+            self.assertNotIn("cxl_hybrid_scheduler_choose_bulk_lane(",
+                             helper_body)
+
+        self.assertNotIn("uint64_t region_index;", cxl_body)
+        self.assertNotIn("region_index = global_offset / region_len;",
+                         cxl_body)
+
+        block_offset = rdma_body.index(
+            "block_offset = ((ram_addr_t)pss->page) << TARGET_PAGE_BITS;")
+        region_offset = rdma_body.index(
+            "region_offset = QEMU_ALIGN_DOWN(block_offset, region_len);")
+        reserve = rdma_body.index(
+            "cxl_rdma_sidecar_try_reserve_bulk_admission")
+        claim_init = rdma_body.index("cxl_hybrid_rdma_bulk_claim_init")
+        ctrl_claim = rdma_body.index("cxl_hybrid_ctrl_claim_rdma_pages")
+        self.assertLess(block_offset, reserve)
+        self.assertLess(region_offset, reserve)
+        self.assertLess(reserve, claim_init)
+        self.assertLess(reserve, ctrl_claim)
+
+        claim_init_failure = rdma_body[rdma_body.index(
+            "if (!cxl_hybrid_rdma_bulk_claim_init"):
+            rdma_body.index("first_page =")]
+        self.assertIn("cxl_rdma_sidecar_cancel_bulk_admission(&reservation);",
+                      claim_init_failure)
+        self.assertLess(
+            claim_init_failure.index(
+                "cxl_rdma_sidecar_cancel_bulk_admission(&reservation);"),
+            claim_init_failure.index("return 0;"),
+        )
+
+        claim_failure = rdma_body[rdma_body.index(
+            "if (!cxl_hybrid_ctrl_claim_rdma_pages"):
+            rdma_body.index("claimed_pages =")]
+        claim_failure_drop = claim_failure.index(
+            "cxl_hybrid_ctrl_drop_rdma_pages(claim.page_desc);")
+        claim_failure_release = claim_failure.index(
+            "cxl_hybrid_rdma_bulk_claim_release(&claim);")
+        claim_failure_cancel = claim_failure.index(
+            "cxl_rdma_sidecar_cancel_bulk_admission(&reservation);")
+        claim_failure_return = claim_failure.index("return 0;")
+        self.assertLess(claim_failure_drop, claim_failure_release)
+        self.assertLess(claim_failure_release, claim_failure_cancel)
+        self.assertLess(claim_failure_cancel, claim_failure_return)
+
+        enqueue_failure = rdma_body[rdma_body.index(
+            "if (!cxl_rdma_sidecar_enqueue_reserved_bulk_claim"):
+            rdma_body.index("trace_cxl_hybrid_rdma_bulk_region")]
+        self.assertIn("cxl_hybrid_rdma_dirty_claimed_region(rs, &claim);",
+                      enqueue_failure)
+        self.assertIn("cxl_hybrid_ctrl_drop_rdma_pages(claim.page_desc);",
+                      enqueue_failure)
+        self.assertIn("cxl_hybrid_rdma_bulk_claim_release(&claim);",
+                      enqueue_failure)
+        self.assertIn("return 0;", enqueue_failure)
+        self.assertNotIn("cxl_rdma_sidecar_cancel_bulk_admission",
+                         enqueue_failure)
 
     def test_postcopy_bulk_dirty_pages_route_to_cxl_worker_not_stream(self):
         ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
@@ -355,11 +437,8 @@ class WarmExperimentScriptTest(unittest.TestCase):
             "postcopy_preempt_active() || migration_in_postcopy()",
             helper_body,
         )
-        self.assertIn(
-            "if (!postcopy &&\n"
-            "        cxl_hybrid_scheduler_choose_bulk_lane(",
-            helper_body,
-        )
+        self.assertNotIn("cxl_hybrid_scheduler_choose_bulk_lane(",
+                         helper_body)
 
     def test_cxl_bulk_scheduler_uses_batched_worker_enqueue(self):
         ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()

@@ -566,7 +566,6 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(RAMState *rs,
     ram_addr_t block_offset;
     ram_addr_t global_offset;
     uint64_t region_len;
-    uint64_t region_index;
     uint64_t cxl_offset;
     uint64_t page_index;
     uint32_t generation;
@@ -596,17 +595,6 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(RAMState *rs,
                                        TARGET_PAGE_SIZE, &global_offset) ||
         !cxl_hybrid_source_page_cxl_offset(pss->block->idstr, block_offset,
                                            &cxl_offset)) {
-        return 0;
-    }
-
-    region_index = global_offset / region_len;
-    if (!postcopy &&
-        cxl_hybrid_scheduler_choose_bulk_lane(
-            &(CXLHybridSchedulerPolicy) {
-                .rdma_budget_pages = 1,
-                .cxl_background_pages = 1,
-            },
-            region_index) != CXL_HYBRID_TRANSFER_CXL_LOW) {
         return 0;
     }
 
@@ -678,17 +666,15 @@ static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,
         return 0;
     }
 
+    CXLHybridRDMASidecarAdmissionReservation reservation = { 0 };
+
     block_offset = ((ram_addr_t)pss->page) << TARGET_PAGE_BITS;
     region_offset = QEMU_ALIGN_DOWN(block_offset, region_len);
-    if (!cxl_hybrid_rdma_bulk_claim_init(&claim, pss->block, region_offset)) {
+    if (!cxl_rdma_sidecar_try_reserve_bulk_admission(&reservation, NULL)) {
         return 0;
     }
-    if (cxl_hybrid_scheduler_choose_bulk_lane(
-            &(CXLHybridSchedulerPolicy) {
-                .rdma_budget_pages = 1,
-                .cxl_background_pages = 1,
-            },
-            claim.region_index) != CXL_HYBRID_TRANSFER_RDMA_BULK) {
+    if (!cxl_hybrid_rdma_bulk_claim_init(&claim, pss->block, region_offset)) {
+        cxl_rdma_sidecar_cancel_bulk_admission(&reservation);
         return 0;
     }
     first_page = claim.block_offset >> TARGET_PAGE_BITS;
@@ -716,6 +702,7 @@ static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,
                                         "claim");
         cxl_hybrid_ctrl_drop_rdma_pages(claim.page_desc);
         cxl_hybrid_rdma_bulk_claim_release(&claim);
+        cxl_rdma_sidecar_cancel_bulk_admission(&reservation);
         return 0;
     }
 
@@ -727,7 +714,8 @@ static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,
         migration_bitmap_clear_dirty(rs, claim.block, first_page + page);
     }
 
-    if (!cxl_rdma_sidecar_enqueue_bulk_claim(&claim)) {
+    if (!cxl_rdma_sidecar_enqueue_reserved_bulk_claim(&claim,
+                                                     &reservation)) {
         trace_cxl_hybrid_rdma_bulk_skip(claim.region_index, pss->page,
                                         "enqueue");
         cxl_hybrid_rdma_dirty_claimed_region(rs, &claim);
@@ -3089,11 +3077,11 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     }
 
     cxl_hybrid_shadow_classify_bulk_page(rs, pss);
-    res = cxl_hybrid_cxl_enqueue_bulk_page(rs, pss);
+    res = cxl_hybrid_rdma_enqueue_bulk_region(rs, pss);
     if (res) {
         return res;
     }
-    res = cxl_hybrid_rdma_enqueue_bulk_region(rs, pss);
+    res = cxl_hybrid_cxl_enqueue_bulk_page(rs, pss);
     if (res) {
         return res;
     }
