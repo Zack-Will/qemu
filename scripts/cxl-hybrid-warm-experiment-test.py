@@ -2538,6 +2538,32 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(summary["page_state_rdma_stale_pages"], 2)
         self.assertEqual(summary["page_state_cas_failures"], 5)
 
+    def test_rdma_dynamic_admission_metrics_are_exported_to_qapi(self):
+        qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
+        cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
+        rdma_header = (REPO_ROOT / "migration" / "cxl-rdma.h").read_text()
+
+        for field in (
+            "rdma-sidecar-dynamic-window-regions",
+            "rdma-sidecar-sq-capacity-regions",
+            "rdma-sidecar-queue-len",
+            "rdma-sidecar-inflight-len",
+            "rdma-sidecar-goodput-ewma-bytes-per-ns",
+            "rdma-sidecar-completion-latency-ewma-ns",
+            "rdma-sidecar-bdp-estimate-regions",
+            "rdma-sidecar-admission-accepted-regions",
+            "rdma-sidecar-admission-overflow-cxl-regions",
+            "rdma-sidecar-admission-closed-events",
+            "rdma-sidecar-admission-goodput-drop-events",
+        ):
+            self.assertIn(f"'{field}'", qapi_text)
+
+        self.assertIn("rdma_sidecar_dynamic_window_regions", rdma_header)
+        self.assertIn("info->x_cxl->rdma_sidecar_dynamic_window_regions",
+                      cxl_text)
+        self.assertIn("rdma_bulk_stats.rdma_sidecar_dynamic_window_regions",
+                      cxl_text)
+
     def test_region_remap_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             trace = Path(tmpdir) / "trace.log"

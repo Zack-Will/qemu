@@ -1873,6 +1873,7 @@ void cxl_rdma_sidecar_stop(void)
 void cxl_rdma_sidecar_get_stats(CXLHybridRDMASidecarBulkStats *stats)
 {
     CXLRDMASidecarContext *ctx = cxl_rdma_sidecar;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
 
     if (!stats) {
         return;
@@ -1894,6 +1895,37 @@ void cxl_rdma_sidecar_get_stats(CXLHybridRDMASidecarBulkStats *stats)
         qatomic_read(&ctx->stats.page_state_rdma_completed_time_ns);
     stats->page_state_rdma_stale_pages =
         qatomic_read(&ctx->stats.page_state_rdma_stale_pages);
+
+    qemu_mutex_lock(&ctx->lock);
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &ctx->admission,
+        ctx->running && !ctx->stop && !ctx->incoming,
+        !ctx->ops.bulk_active || ctx->ops.bulk_active(ctx->ops.opaque),
+        ctx->draining,
+        ctx->failed,
+        ctx->ops.migration_postcopy &&
+            ctx->ops.migration_postcopy(ctx->ops.opaque),
+        ctx->queue_len,
+        ctx->inflight_len);
+    qemu_mutex_unlock(&ctx->lock);
+
+    stats->rdma_sidecar_dynamic_window_regions =
+        snap.dynamic_window_regions;
+    stats->rdma_sidecar_sq_capacity_regions = snap.sq_capacity_regions;
+    stats->rdma_sidecar_queue_len = snap.queue_len;
+    stats->rdma_sidecar_inflight_len = snap.inflight_len;
+    stats->rdma_sidecar_goodput_ewma_bytes_per_ns =
+        snap.goodput_ewma_bytes_per_ns;
+    stats->rdma_sidecar_completion_latency_ewma_ns =
+        snap.completion_latency_ewma_ns;
+    stats->rdma_sidecar_bdp_estimate_regions = snap.bdp_estimate_regions;
+    stats->rdma_sidecar_admission_accepted_regions = snap.accepted_regions;
+    stats->rdma_sidecar_admission_overflow_cxl_regions =
+        snap.overflow_cxl_regions;
+    stats->rdma_sidecar_admission_closed_events =
+        snap.admission_closed_events;
+    stats->rdma_sidecar_admission_goodput_drop_events =
+        snap.goodput_drop_events;
 }
 #else
 int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,

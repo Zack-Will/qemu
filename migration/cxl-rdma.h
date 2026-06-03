@@ -33,6 +33,17 @@ typedef struct CXLHybridRDMASidecarBulkStats {
     uint64_t page_state_rdma_completed_bytes;
     uint64_t page_state_rdma_completed_time_ns;
     uint64_t page_state_rdma_stale_pages;
+    uint32_t rdma_sidecar_dynamic_window_regions;
+    uint32_t rdma_sidecar_sq_capacity_regions;
+    uint32_t rdma_sidecar_queue_len;
+    uint32_t rdma_sidecar_inflight_len;
+    double rdma_sidecar_goodput_ewma_bytes_per_ns;
+    uint64_t rdma_sidecar_completion_latency_ewma_ns;
+    uint32_t rdma_sidecar_bdp_estimate_regions;
+    uint64_t rdma_sidecar_admission_accepted_regions;
+    uint64_t rdma_sidecar_admission_overflow_cxl_regions;
+    uint64_t rdma_sidecar_admission_closed_events;
+    uint64_t rdma_sidecar_admission_goodput_drop_events;
 } CXLHybridRDMASidecarBulkStats;
 
 typedef struct CXLHybridRDMASidecarAdmissionSnapshot {

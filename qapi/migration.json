@@ -728,6 +728,39 @@
 # @rdma-sidecar-failed: whether any RDMA sidecar region failed.
 #     (Since 11.0)
 #
+# @rdma-sidecar-dynamic-window-regions: current dynamic RDMA admission
+#     window in region units.  (Since 11.0)
+#
+# @rdma-sidecar-sq-capacity-regions: RDMA admission hard cap derived
+#     from the configured sidecar SQ/in-flight capacity.  (Since 11.0)
+#
+# @rdma-sidecar-queue-len: queued RDMA sidecar bulk claims.
+#     (Since 11.0)
+#
+# @rdma-sidecar-inflight-len: posted RDMA sidecar bulk claims waiting
+#     for completion.  (Since 11.0)
+#
+# @rdma-sidecar-goodput-ewma-bytes-per-ns: EWMA useful RDMA completion
+#     goodput in bytes per nanosecond.  (Since 11.0)
+#
+# @rdma-sidecar-completion-latency-ewma-ns: EWMA post-to-completion
+#     latency for useful RDMA completions.  (Since 11.0)
+#
+# @rdma-sidecar-bdp-estimate-regions: BDP estimate in region units.
+#     (Since 11.0)
+#
+# @rdma-sidecar-admission-accepted-regions: RDMA bulk regions accepted
+#     by dynamic admission.  (Since 11.0)
+#
+# @rdma-sidecar-admission-overflow-cxl-regions: RDMA candidate regions
+#     sent to CXL because the dynamic window was full.  (Since 11.0)
+#
+# @rdma-sidecar-admission-closed-events: admission checks rejected
+#     because RDMA was closed by lifecycle state.  (Since 11.0)
+#
+# @rdma-sidecar-admission-goodput-drop-events: dynamic-window
+#     decreases caused by goodput or latency regression.  (Since 11.0)
+#
 # @rdma-ready-regions: number of whole fault regions copied by the
 #     hybrid RDMA sidecar and still considered source-current when
 #     marked ready.  (Since 11.0)
@@ -887,6 +920,16 @@
 #     @rdma-sidecar-budget-skip-events,
 #     @rdma-sidecar-max-inflight-regions,
 #     @rdma-sidecar-max-cover-percent, @rdma-sidecar-failed,
+#     @rdma-sidecar-dynamic-window-regions,
+#     @rdma-sidecar-sq-capacity-regions, @rdma-sidecar-queue-len,
+#     @rdma-sidecar-inflight-len,
+#     @rdma-sidecar-goodput-ewma-bytes-per-ns,
+#     @rdma-sidecar-completion-latency-ewma-ns,
+#     @rdma-sidecar-bdp-estimate-regions,
+#     @rdma-sidecar-admission-accepted-regions,
+#     @rdma-sidecar-admission-overflow-cxl-regions,
+#     @rdma-sidecar-admission-closed-events,
+#     @rdma-sidecar-admission-goodput-drop-events,
 #     @rdma-ready-regions, @rdma-ready-pages,
 #     @rdma-invalidated-regions, @rdma-ready-pages-lost,
 #     @cxl-republish-regions-due-to-rdma-invalidate,
@@ -1105,6 +1148,28 @@
                 'type': 'uint8', 'features': [ 'unstable' ] },
             'rdma-sidecar-failed': { 'type': 'bool',
                                      'features': [ 'unstable' ] },
+            'rdma-sidecar-dynamic-window-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-sq-capacity-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-queue-len': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-inflight-len': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-goodput-ewma-bytes-per-ns': {
+                'type': 'number', 'features': [ 'unstable' ] },
+            'rdma-sidecar-completion-latency-ewma-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-bdp-estimate-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-admission-accepted-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-admission-overflow-cxl-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-admission-closed-events': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-admission-goodput-drop-events': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
             'rdma-ready-regions': { 'type': 'uint64',
                                     'features': [ 'unstable' ] },
             'rdma-ready-pages': { 'type': 'uint64',
