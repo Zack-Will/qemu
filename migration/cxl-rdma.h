@@ -68,6 +68,7 @@ typedef struct CXLHybridRDMASidecarAdmissionState {
 
 typedef struct CXLHybridRDMASidecarAdmissionReservation {
     bool valid;
+    uint64_t owner;
 } CXLHybridRDMASidecarAdmissionReservation;
 
 typedef struct CXLHybridRDMASidecarConfig {
@@ -123,6 +124,16 @@ bool cxl_rdma_sidecar_start_async(const CXLHybridRDMASidecarConfig *cfg,
                                   Error **errp);
 void cxl_rdma_sidecar_stop(void);
 bool cxl_rdma_sidecar_running(void);
+bool cxl_rdma_sidecar_try_reserve_bulk_admission(
+    CXLHybridRDMASidecarAdmissionReservation *reservation,
+    CXLHybridRDMASidecarAdmissionSnapshot *snapshot);
+bool cxl_rdma_sidecar_enqueue_reserved_bulk_claim(
+    const CXLHybridRDMABulkClaim *claim,
+    CXLHybridRDMASidecarAdmissionReservation *reservation);
+void cxl_rdma_sidecar_cancel_bulk_admission(
+    CXLHybridRDMASidecarAdmissionReservation *reservation);
+bool cxl_rdma_sidecar_get_admission_snapshot(
+    CXLHybridRDMASidecarAdmissionSnapshot *snapshot);
 bool cxl_rdma_sidecar_enqueue_bulk_claim(
     const CXLHybridRDMABulkClaim *claim);
 void cxl_rdma_sidecar_drain_bulk_claims(void);

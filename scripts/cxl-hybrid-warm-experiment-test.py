@@ -180,6 +180,65 @@ class WarmExperimentScriptTest(unittest.TestCase):
                       loop_body)
         self.assertNotIn("ctx->ops.claim_bulk_region", loop_body)
 
+    def test_rdma_sidecar_runtime_uses_admission_reservation(self):
+        rdma_text = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+        rdma_header = (REPO_ROOT / "migration" / "cxl-rdma.h").read_text()
+
+        reserve = rdma_text.index(
+            "cxl_rdma_sidecar_try_reserve_bulk_admission")
+        enqueue = rdma_text.index(
+            "cxl_rdma_sidecar_enqueue_reserved_bulk_claim")
+        complete = rdma_text.index(
+            "cxl_rdma_sidecar_admission_note_completion", enqueue)
+
+        self.assertLess(reserve, enqueue)
+        self.assertIn("void cxl_rdma_sidecar_admission_note_completion",
+                      rdma_text)
+        self.assertIn("CXLHybridRDMASidecarAdmissionState admission",
+                      rdma_text)
+        self.assertIn("CXLHybridRDMASidecarAdmissionReservation",
+                      rdma_text)
+        self.assertIn("uint64_t owner;", rdma_header)
+        self.assertIn("ctx->admission", rdma_text)
+        self.assertGreater(complete, enqueue)
+
+    def test_rdma_sidecar_runtime_reservation_owner_is_checked(self):
+        rdma_text = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
+
+        reserve_start = rdma_text.index(
+            "bool cxl_rdma_sidecar_try_reserve_bulk_admission(")
+        reserve_end = rdma_text.index(
+            "void cxl_rdma_sidecar_cancel_bulk_admission(", reserve_start)
+        reserve_body = rdma_text[reserve_start:reserve_end]
+
+        enqueue_start = rdma_text.index(
+            "bool cxl_rdma_sidecar_enqueue_reserved_bulk_claim(")
+        enqueue_end = rdma_text.index(
+            "bool cxl_rdma_sidecar_enqueue_bulk_claim(", enqueue_start)
+        enqueue_body = rdma_text[enqueue_start:enqueue_end]
+
+        self.assertIn("cxl_rdma_sidecar_admission_reservation_clear",
+                      rdma_text)
+        self.assertLess(
+            reserve_body.index(
+                "cxl_rdma_sidecar_admission_reservation_clear(reservation)"),
+            reserve_body.index("if (!ctx)"))
+        self.assertIn("uint64_t admission_owner;", rdma_text)
+        self.assertIn("cxl_rdma_sidecar_next_admission_owner", rdma_text)
+        self.assertIn("ctx->admission_owner", rdma_text)
+        self.assertIn("reservation->owner = ctx->admission_owner",
+                      reserve_body)
+        self.assertIn("reservation->owner != ctx->admission_owner",
+                      rdma_text)
+        self.assertNotIn("reservation->owner = (uintptr_t)ctx", rdma_text)
+        self.assertNotIn("reservation->owner != (uintptr_t)ctx", rdma_text)
+        self.assertIn("cxl_rdma_sidecar_admission_reservation_clear("
+                      "reservation)", enqueue_body)
+        self.assertIn("migration_postcopy", enqueue_body)
+        self.assertLess(enqueue_body.index("migration_postcopy"),
+                        enqueue_body.index(
+                            "cxl_rdma_sidecar_admission_consume_reserve"))
+
     def test_rdma_sidecar_destination_registers_guest_ram_not_cxl_backing(self):
         source = (REPO_ROOT / "migration" / "cxl-rdma.c").read_text()
         cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
