@@ -276,81 +276,10 @@ class WarmExperimentScriptTest(unittest.TestCase):
         fn_end = ram_source.index("static bool ram_page_hint_valid(",
                                   fn_start)
         fn_body = ram_source[fn_start:fn_end]
-        enqueue = "cxl_hybrid_rdma_enqueue_bulk_region("
+        enqueue = "cxl_hybrid_rdma_enqueue_bulk_region(rs, pss)"
         cxl_copy = "ram_save_target_page(rs, pss)"
         self.assertIn(enqueue, fn_body)
         self.assertLess(fn_body.index(enqueue), fn_body.index(cxl_copy))
-
-    def test_ram_main_loop_scans_zero_pages_before_cxl_and_rdma_enqueue(self):
-        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
-
-        self.assertIn("typedef struct CXLHybridZeroRegionScan", ram_text)
-        self.assertIn("static bool cxl_hybrid_zero_scan_region(", ram_text)
-        self.assertIn("buffer_is_zero(host, TARGET_PAGE_SIZE)", ram_text)
-
-        fn_start = ram_text.index("static int ram_save_host_page(")
-        fn_end = ram_text.index("/* Update host page boundary information */",
-                                fn_start)
-        prologue = ram_text[fn_start:fn_end]
-
-        zero_scan = prologue.index("cxl_hybrid_zero_scan_region(")
-        cxl_enqueue = prologue.index("cxl_hybrid_cxl_enqueue_bulk_page(")
-        rdma_enqueue = prologue.index("cxl_hybrid_rdma_enqueue_bulk_region(")
-        self.assertLess(zero_scan, cxl_enqueue)
-        self.assertLess(zero_scan, rdma_enqueue)
-
-    def test_full_zero_region_bypasses_cxl_and_rdma_work(self):
-        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
-
-        self.assertIn("static int cxl_hybrid_publish_full_zero_region(",
-                      ram_text)
-        helper_start = ram_text.index(
-            "static int cxl_hybrid_publish_full_zero_region(")
-        helper_end = ram_text.index(
-            "static int cxl_hybrid_cxl_enqueue_bulk_page(")
-        helper = ram_text[helper_start:helper_end]
-        self.assertIn("cxl_hybrid_ctrl_publish_zero_page", helper)
-        self.assertIn("migration_bitmap_clear_dirty", helper)
-        self.assertIn("cxl_hybrid_account_full_zero_region_bypassed", helper)
-
-        fn_start = ram_text.index("static int ram_save_host_page(")
-        fn_end = ram_text.index("/* Update host page boundary information */",
-                                fn_start)
-        prologue = ram_text[fn_start:fn_end]
-        zero_bypass = prologue.index("cxl_hybrid_publish_full_zero_region(")
-        cxl_enqueue = prologue.index("cxl_hybrid_cxl_enqueue_bulk_page(")
-        rdma_enqueue = prologue.index("cxl_hybrid_rdma_enqueue_bulk_region(")
-        self.assertLess(zero_bypass, cxl_enqueue)
-        self.assertLess(zero_bypass, rdma_enqueue)
-
-    def test_partial_zero_cxl_skips_zero_pages_and_enqueues_nonzero_runs(self):
-        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
-
-        fn_start = ram_text.index("static int cxl_hybrid_cxl_enqueue_bulk_page(")
-        fn_end = ram_text.index(
-            "static int cxl_hybrid_rdma_enqueue_bulk_region(", fn_start)
-        helper = ram_text[fn_start:fn_end]
-
-        self.assertIn("const CXLHybridZeroRegionScan *zero_scan", helper)
-        self.assertIn("cxl_hybrid_ctrl_publish_zero_page", helper)
-        self.assertIn("cxl_hybrid_ctrl_enqueue_cxl_pages", helper)
-        self.assertIn("cxl_hybrid_account_cxl_zero_pages_skipped", helper)
-        self.assertIn("cxl_hybrid_account_cxl_effective_zero_filtered_bytes",
-                      helper)
-        self.assertIn("!test_bit(page, zero_scan->dirty_zero_bmap)", helper)
-
-    def test_partial_zero_rdma_keeps_full_region_dst_local(self):
-        ram_text = (REPO_ROOT / "migration" / "ram.c").read_text()
-
-        fn_start = ram_text.index("static int cxl_hybrid_rdma_enqueue_bulk_region(")
-        fn_end = ram_text.index("void cxl_hybrid_rdma_drop_bulk_claim(",
-                                fn_start)
-        helper = ram_text[fn_start:fn_end]
-
-        self.assertIn("const CXLHybridZeroRegionScan *zero_scan", helper)
-        self.assertIn("cxl_hybrid_account_rdma_partial_zero_bytes", helper)
-        self.assertIn("claim.bytes", helper)
-        self.assertNotIn("cxl_hybrid_ctrl_publish_zero_page", helper)
 
     def test_postcopy_bulk_dirty_pages_route_to_cxl_worker_not_stream(self):
         ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
@@ -2422,67 +2351,6 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(summary["page_state_rdma_stale_pages"], 2)
         self.assertEqual(summary["page_state_cas_failures"], 5)
 
-    def test_zero_page_stats_are_exported_to_qapi_and_summary(self):
-        qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
-        cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
-
-        for field in (
-            "zero-pages-classified",
-            "zero-full-regions-bypassed",
-            "zero-partial-regions",
-            "zero-pages-published",
-            "zero-publish-cas-failures",
-            "cxl-zero-pages-skipped",
-            "cxl-effective-bytes-after-zero-filter",
-            "rdma-partial-zero-bytes-sent",
-            "dst-zero-faults-resolved",
-        ):
-            self.assertIn(f"'{field}'", qapi_text)
-
-        for field in (
-            "zero_pages_classified",
-            "zero_full_regions_bypassed",
-            "zero_partial_regions",
-            "zero_pages_published",
-            "zero_publish_cas_failures",
-            "cxl_zero_pages_skipped",
-            "cxl_effective_bytes_after_zero_filter",
-            "rdma_partial_zero_bytes_sent",
-            "dst_zero_faults_resolved",
-        ):
-            self.assertIn(f"info->x_cxl->{field}", cxl_text)
-
-        summary = self.mod.extract_summary([
-            {
-                "x-cxl": {
-                    "zero-pages-classified": 10,
-                    "zero-full-regions-bypassed": 1,
-                    "zero-partial-regions": 2,
-                    "zero-pages-published": 8,
-                    "zero-publish-cas-failures": 1,
-                    "cxl-zero-pages-skipped": 7,
-                    "cxl-effective-bytes-after-zero-filter": 12288,
-                    "rdma-partial-zero-bytes-sent": 65536,
-                },
-                "dst-query-migrate": {
-                    "x-cxl": {
-                        "dst-zero-faults-resolved": 3,
-                    }
-                },
-            }
-        ])
-
-        self.assertEqual(summary["zero_pages_classified"], 10)
-        self.assertEqual(summary["zero_full_regions_bypassed"], 1)
-        self.assertEqual(summary["zero_partial_regions"], 2)
-        self.assertEqual(summary["zero_pages_published"], 8)
-        self.assertEqual(summary["zero_publish_cas_failures"], 1)
-        self.assertEqual(summary["cxl_zero_pages_skipped"], 7)
-        self.assertEqual(summary["cxl_effective_bytes_after_zero_filter"],
-                         12288)
-        self.assertEqual(summary["rdma_partial_zero_bytes_sent"], 65536)
-        self.assertEqual(summary["dst_zero_faults_resolved"], 3)
-
     def test_region_remap_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             trace = Path(tmpdir) / "trace.log"
@@ -2505,34 +2373,6 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(counts["region_wait_complete"], 1)
         self.assertEqual(counts["region_wait_complete_failures"], 0)
         self.assertEqual(counts["dst_region_remap"], 1)
-
-    def test_region_remap_zero_location_uses_postcopy_zero_page(self):
-        cxl_text = (REPO_ROOT / "migration" / "cxl.c").read_text()
-
-        self.assertIn("static int cxl_hybrid_resolve_zero_fault(", cxl_text)
-        helper_start = cxl_text.index("static int cxl_hybrid_resolve_zero_fault(")
-        helper_end = cxl_text.index(
-            "static int cxl_hybrid_wait_and_resolve_region_fault(")
-        helper = cxl_text[helper_start:helper_end]
-        self.assertIn("postcopy_place_page_zero(mis, fault_host, rb)",
-                      helper)
-        self.assertIn("if (ret == -EEXIST)", helper)
-        self.assertIn("pagesize = qemu_ram_pagesize(rb)", helper)
-        self.assertIn("postcopy_mark_range_received_and_wake(mis, rb, fault_host",
-                      helper)
-        self.assertIn("dst_zero_faults_resolved", helper)
-
-        resolver_start = cxl_text.index(
-            "static int cxl_hybrid_wait_and_resolve_region_fault(")
-        resolver_end = cxl_text.index(
-            "static int cxl_hybrid_try_resolve_region_fault_fast(")
-        resolver = cxl_text[resolver_start:resolver_end]
-        zero_branch = resolver.index(
-            "location == CXL_HYBRID_PAGE_LOCATION_ZERO")
-        self.assertIn("return cxl_hybrid_resolve_zero_fault(",
-                      resolver[zero_branch:zero_branch + 400])
-        self.assertNotIn("unsupported zero location",
-                         resolver[zero_branch:zero_branch + 400])
 
     def test_rdma_fallback_stats_are_exported_to_qapi_and_summary(self):
         qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()

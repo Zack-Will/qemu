@@ -448,62 +448,6 @@ static void test_cxl_page_claim_complete_publishes_cxl(void)
         slot, 4, CXL_HYBRID_PAGE_LOCATION_CXL));
 }
 
-static void test_zero_page_claim_complete_publishes_zero(void)
-{
-    uint64_t slot = cxl_hybrid_page_state_make_dirty(15, 23);
-    CXLHybridPageClaim claim = { 0 };
-
-    g_assert_true(cxl_hybrid_page_state_claim_for_zero(&slot, 15, &claim));
-    g_assert_cmpuint(claim.owner, ==, CXL_HYBRID_PAGE_OWNER_ZERO);
-    g_assert_true(cxl_hybrid_page_state_complete_zero(&slot, &claim));
-    g_assert_cmpuint(cxl_hybrid_page_state_kind(slot), ==,
-                     CXL_HYBRID_PAGE_STATE_PUBLISHED);
-    g_assert_cmpuint(cxl_hybrid_page_state_location(slot), ==,
-                     CXL_HYBRID_PAGE_LOCATION_ZERO);
-    g_assert_true(cxl_hybrid_page_state_can_consume(
-        slot, 15, CXL_HYBRID_PAGE_LOCATION_ZERO));
-}
-
-static void test_zero_page_claim_completion_stales_after_dirty(void)
-{
-    uint64_t slot = cxl_hybrid_page_state_make_dirty(16, 44);
-    CXLHybridPageClaim claim = { 0 };
-
-    g_assert_true(cxl_hybrid_page_state_claim_for_zero(&slot, 16, &claim));
-    cxl_hybrid_page_state_mark_dirty(&slot, 16, 45);
-    g_assert_false(cxl_hybrid_page_state_complete_zero(&slot, &claim));
-    g_assert_cmpuint(cxl_hybrid_page_state_kind(slot), ==,
-                     CXL_HYBRID_PAGE_STATE_DIRTY);
-    g_assert_cmpuint(cxl_hybrid_page_state_dirty_seq(slot), ==, 45);
-}
-
-static void test_zero_page_drop_after_completion_failure_restores_dirty(void)
-{
-    CXLHybridControlHeader hdr = { 0 };
-    unsigned long visible[1] = { 0 };
-    uint64_t page_state[1];
-    uint32_t generation = 19;
-    CXLHybridPageClaim claim = { 0 };
-
-    cxl_hybrid_control_reset_run_state(&hdr, visible,
-                                       G_N_ELEMENTS(page_state),
-                                       page_state,
-                                       G_N_ELEMENTS(page_state),
-                                       NULL, 0, NULL, 0,
-                                       64 * 1024, 12, generation + 1);
-    page_state[0] = cxl_hybrid_page_state_make_dirty(generation, 77);
-
-    g_assert_true(cxl_hybrid_page_state_claim_for_zero(&page_state[0],
-                                                       generation, &claim));
-    g_assert_false(cxl_hybrid_control_complete_zero_page_visible_generation(
-        &hdr, visible, page_state, 0, generation, &claim));
-    g_assert_true(cxl_hybrid_page_state_drop_claim(&page_state[0], &claim));
-    g_assert_false(test_bit(0, visible));
-    g_assert_cmpuint(cxl_hybrid_page_state_kind(page_state[0]), ==,
-                     CXL_HYBRID_PAGE_STATE_DIRTY);
-    g_assert_cmpuint(cxl_hybrid_page_state_dirty_seq(page_state[0]), ==, 77);
-}
-
 static void test_cxl_descriptor_completion_skips_stale_page(void)
 {
     uint64_t page_state[3];
@@ -1339,62 +1283,6 @@ static void test_mark_page_visible_sets_page_state_cxl(void)
                      CXL_HYBRID_PAGE_LOCATION_CXL);
 }
 
-static void test_complete_zero_page_visible_marks_zero_not_cxl(void)
-{
-    CXLHybridControlHeader hdr = { 0 };
-    unsigned long visible[1] = { 0 };
-    uint64_t page_state[4];
-    uint32_t generation = 17;
-    CXLHybridPageClaim claim = { 0 };
-
-    cxl_hybrid_control_reset_run_state(&hdr, visible,
-                                       G_N_ELEMENTS(page_state),
-                                       page_state,
-                                       G_N_ELEMENTS(page_state),
-                                       NULL, 0, NULL, 0,
-                                       64 * 1024, 12, generation);
-    cxl_hybrid_control_mark_page_dirty_generation(
-        &hdr, visible, page_state, 2, generation, 99);
-    g_assert_true(cxl_hybrid_page_state_claim_for_zero(&page_state[2],
-                                                       generation, &claim));
-
-    g_assert_true(cxl_hybrid_control_complete_zero_page_visible_generation(
-        &hdr, visible, page_state, 2, generation, &claim));
-    g_assert_true(test_bit(2, visible));
-    g_assert_true(cxl_hybrid_page_state_can_consume(
-        page_state[2], generation, CXL_HYBRID_PAGE_LOCATION_ZERO));
-    g_assert_false(cxl_hybrid_page_state_can_consume(
-        page_state[2], generation, CXL_HYBRID_PAGE_LOCATION_CXL));
-}
-
-static void test_complete_zero_page_visible_rejects_total_pages_tail(void)
-{
-    CXLHybridControlHeader hdr = { 0 };
-    unsigned long visible[1] = { 0 };
-    uint64_t page_state[4];
-    uint32_t generation = 18;
-    CXLHybridPageClaim claim = {
-        .owner = CXL_HYBRID_PAGE_OWNER_ZERO,
-        .generation = generation,
-        .dirty_seq = 101,
-    };
-
-    cxl_hybrid_control_reset_run_state(&hdr, visible, 2,
-                                       page_state,
-                                       G_N_ELEMENTS(page_state),
-                                       NULL, 0, NULL, 0,
-                                       64 * 1024, 12, generation);
-    page_state[2] = cxl_hybrid_page_state_make_dirty(generation, 101);
-    claim.observed = page_state[2];
-
-    g_assert_false(cxl_hybrid_control_complete_zero_page_visible_generation(
-        &hdr, visible, page_state, 2, generation, &claim));
-    g_assert_false(test_bit(2, visible));
-    g_assert_cmpuint(cxl_hybrid_page_state_kind(page_state[2]), ==,
-                     CXL_HYBRID_PAGE_STATE_DIRTY);
-    g_assert_cmpuint(cxl_hybrid_page_state_dirty_seq(page_state[2]), ==, 101);
-}
-
 static void test_set_pages_visible_marks_range_once_generation_matches(void)
 {
     CXLHybridControlHeader hdr = { 0 };
@@ -2137,12 +2025,6 @@ int main(int argc, char **argv)
                     test_page_state_claim_and_complete_cxl);
     g_test_add_func("/cxl-hybrid-control/page-state-cxl-claim-complete-wrapper",
                     test_cxl_page_claim_complete_publishes_cxl);
-    g_test_add_func("/cxl-hybrid-control/zero-page-claim-complete-publishes-zero",
-                    test_zero_page_claim_complete_publishes_zero);
-    g_test_add_func("/cxl-hybrid-control/zero-page-claim-stales-after-dirty",
-                    test_zero_page_claim_completion_stales_after_dirty);
-    g_test_add_func("/cxl-hybrid-control/zero-page-drop-after-completion-failure",
-                    test_zero_page_drop_after_completion_failure_restores_dirty);
     g_test_add_func("/cxl-hybrid-control/cxl-descriptor-completion-skips-stale",
                     test_cxl_descriptor_completion_skips_stale_page);
     g_test_add_func("/cxl-hybrid-control/complete-cxl-page-visible-publishes-matching-claim",
@@ -2223,10 +2105,6 @@ int main(int argc, char **argv)
                     test_set_page_visible_rejects_stale_generation);
     g_test_add_func("/cxl-hybrid-control/page-visible-mirrors-page-state",
                     test_mark_page_visible_sets_page_state_cxl);
-    g_test_add_func("/cxl-hybrid-control/complete-zero-page-visible-marks-zero",
-                    test_complete_zero_page_visible_marks_zero_not_cxl);
-    g_test_add_func("/cxl-hybrid-control/complete-zero-page-visible-rejects-total-pages-tail",
-                    test_complete_zero_page_visible_rejects_total_pages_tail);
     g_test_add_func("/cxl-hybrid-control/set-pages-visible-marks-range-once-generation-matches",
                     test_set_pages_visible_marks_range_once_generation_matches);
     g_test_add_func("/cxl-hybrid-control/mark-region-visible-for-complete-span-generation",

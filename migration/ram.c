@@ -546,27 +546,6 @@ static void cxl_hybrid_rdma_dirty_claimed_region(
     }
 }
 
-#define CXL_HYBRID_CXL_BULK_MAX_PAGES 1024
-
-typedef struct CXLHybridZeroRegionScan {
-    bool valid;
-    bool any_dirty;
-    bool all_dirty_zero;
-    bool partial_zero;
-    unsigned long dirty_zero_bmap[BITS_TO_LONGS(CXL_HYBRID_CXL_BULK_MAX_PAGES)];
-    unsigned long first_page_in_block;
-    uint32_t dirty_pages;
-    uint32_t zero_dirty_pages;
-    uint32_t nonzero_dirty_pages;
-    uint32_t pages;
-    ram_addr_t block_offset;
-    ram_addr_t region_len;
-    uint64_t global_offset;
-    uint64_t first_state_page;
-    uint64_t region_index;
-    uint64_t cxl_offset;
-} CXLHybridZeroRegionScan;
-
 static void cxl_hybrid_shadow_classify_bulk_page(RAMState *rs,
                                                  PageSearchStatus *pss)
 {
@@ -579,139 +558,10 @@ static void cxl_hybrid_shadow_classify_bulk_page(RAMState *rs,
                                              pss->page << TARGET_PAGE_BITS);
 }
 
-static bool cxl_hybrid_zero_scan_region(PageSearchStatus *pss,
-                                        CXLHybridZeroRegionScan *scan)
-{
-    RAMBlock *block;
-    ram_addr_t region_offset;
-    ram_addr_t region_len;
-    uint64_t cxl_offset;
-    uint64_t global_offset;
-    uint64_t scan_global_offset;
-    unsigned long block_pages;
-    uint32_t pages;
+#define CXL_HYBRID_CXL_BULK_MAX_PAGES 1024
 
-    memset(scan, 0, sizeof(*scan));
-    if (!migrate_cxl_hybrid() || !pss || !pss->block ||
-        postcopy_preempt_active()) {
-        return false;
-    }
-
-    block = pss->block;
-    region_len = cxl_hybrid_fault_region_granule();
-    if (!region_len || !QEMU_IS_ALIGNED(region_len, TARGET_PAGE_SIZE)) {
-        return false;
-    }
-
-    scan->block_offset = ((ram_addr_t)pss->page) << TARGET_PAGE_BITS;
-    region_offset = QEMU_ALIGN_DOWN(scan->block_offset, region_len);
-    if (!cxl_hybrid_global_page_offset(block, region_offset,
-                                       TARGET_PAGE_SIZE, &global_offset) ||
-        !cxl_hybrid_source_page_cxl_offset(block->idstr, region_offset,
-                                           &cxl_offset)) {
-        return false;
-    }
-
-    block_pages = block->used_length >> TARGET_PAGE_BITS;
-    if ((region_offset >> TARGET_PAGE_BITS) >= block_pages) {
-        return false;
-    }
-    pages = MIN((uint64_t)((block->used_length - region_offset) >>
-                           TARGET_PAGE_BITS),
-                region_len >> TARGET_PAGE_BITS);
-    if (!pages || pages > CXL_HYBRID_CXL_BULK_MAX_PAGES) {
-        return false;
-    }
-
-    bitmap_zero(scan->dirty_zero_bmap, CXL_HYBRID_CXL_BULK_MAX_PAGES);
-    scan->valid = true;
-    scan->first_page_in_block = region_offset >> TARGET_PAGE_BITS;
-    scan->pages = pages;
-    scan->block_offset = region_offset;
-    scan->region_len = region_len;
-    scan->global_offset = global_offset;
-    scan->first_state_page = global_offset >> TARGET_PAGE_BITS;
-    scan->region_index = global_offset / region_len;
-    scan->cxl_offset = cxl_offset;
-
-    for (uint32_t i = 0; i < pages; i++) {
-        unsigned long bitmap_page = scan->first_page_in_block + i;
-        uint8_t *host = block->host + region_offset +
-                        (ram_addr_t)i * TARGET_PAGE_SIZE;
-
-        if (!test_bit(bitmap_page, block->bmap)) {
-            continue;
-        }
-        scan->any_dirty = true;
-        scan->dirty_pages++;
-        if (buffer_is_zero(host, TARGET_PAGE_SIZE)) {
-            set_bit(i, scan->dirty_zero_bmap);
-            scan->zero_dirty_pages++;
-        } else {
-            scan->nonzero_dirty_pages++;
-        }
-    }
-
-    scan_global_offset = global_offset + scan->pages * TARGET_PAGE_SIZE;
-    scan->all_dirty_zero = scan->dirty_pages && !scan->nonzero_dirty_pages;
-    scan->partial_zero = scan->zero_dirty_pages && scan->nonzero_dirty_pages;
-    if (scan_global_offset < global_offset) {
-        return false;
-    }
-    cxl_hybrid_account_zero_scan(scan->zero_dirty_pages, scan->partial_zero);
-    return scan->any_dirty;
-}
-
-static int cxl_hybrid_publish_full_zero_region(RAMState *rs,
-                                               PageSearchStatus *pss,
-                                               const CXLHybridZeroRegionScan *scan)
-{
-    RAMBlock *block;
-    uint32_t generation;
-    uint32_t published = 0;
-
-    if (!rs || !pss || !scan || !scan->valid || !scan->all_dirty_zero) {
-        return 0;
-    }
-
-    block = pss->block;
-    generation = cxl_hybrid_fault_publish_generation();
-    for (uint32_t i = 0; i < scan->pages; i++) {
-        unsigned long bitmap_page = scan->first_page_in_block + i;
-        uint64_t state_page = scan->first_state_page + i;
-        uint8_t *host = block->host + scan->block_offset +
-                        (ram_addr_t)i * TARGET_PAGE_SIZE;
-        bool ok;
-
-        if (!test_bit(bitmap_page, block->bmap) ||
-            !test_bit(i, scan->dirty_zero_bmap)) {
-            continue;
-        }
-        if (!buffer_is_zero(host, TARGET_PAGE_SIZE)) {
-            continue;
-        }
-        ok = cxl_hybrid_ctrl_publish_zero_page(state_page, generation);
-        cxl_hybrid_account_zero_publish(ok);
-        if (!ok) {
-            continue;
-        }
-        migration_bitmap_clear_dirty(rs, block, bitmap_page);
-        published++;
-    }
-
-    if (published != scan->dirty_pages) {
-        return 0;
-    }
-
-    cxl_hybrid_account_full_zero_region_bypassed(published);
-    pss->page = scan->first_page_in_block + scan->pages;
-    return published;
-}
-
-static int cxl_hybrid_cxl_enqueue_bulk_page(
-    RAMState *rs,
-    PageSearchStatus *pss,
-    const CXLHybridZeroRegionScan *zero_scan)
+static int cxl_hybrid_cxl_enqueue_bulk_page(RAMState *rs,
+                                            PageSearchStatus *pss)
 {
     ram_addr_t block_offset;
     ram_addr_t global_offset;
@@ -723,13 +573,11 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(
     uint32_t batch_pages;
     uint32_t enqueued_pages;
     unsigned long block_pages;
-    unsigned long zero_scan_end;
     unsigned long scan_limit;
     unsigned long dirty_end;
     uint64_t max_pages;
     uint64_t region_pages;
     bool postcopy;
-    bool use_zero_scan = false;
 
     if (!rs || !pss || !migrate_cxl_hybrid() ||
         postcopy_preempt_active()) {
@@ -776,103 +624,6 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(
         return 0;
     }
 
-    if (zero_scan && zero_scan->valid && zero_scan->partial_zero &&
-        zero_scan->pages <= ULONG_MAX - zero_scan->first_page_in_block) {
-        zero_scan_end = zero_scan->first_page_in_block + zero_scan->pages;
-        use_zero_scan = pss->page >= zero_scan->first_page_in_block &&
-                        pss->page < zero_scan_end &&
-                        zero_scan->region_index == region_index;
-    }
-
-    if (use_zero_scan) {
-        uint32_t zero_published = 0;
-        uint32_t total_enqueued = 0;
-
-        for (uint32_t page = 0; page < zero_scan->pages; page++) {
-            unsigned long bitmap_page = zero_scan->first_page_in_block + page;
-            uint64_t state_page = zero_scan->first_state_page + page;
-            uint8_t *host = pss->block->host + zero_scan->block_offset +
-                            (ram_addr_t)page * TARGET_PAGE_SIZE;
-            bool ok;
-
-            if (!test_bit(page, zero_scan->dirty_zero_bmap) ||
-                !test_bit(bitmap_page, pss->block->bmap)) {
-                continue;
-            }
-            if (!buffer_is_zero(host, TARGET_PAGE_SIZE)) {
-                continue;
-            }
-            ok = cxl_hybrid_ctrl_publish_zero_page(state_page, generation);
-            cxl_hybrid_account_zero_publish(ok);
-            if (!ok) {
-                continue;
-            }
-            migration_bitmap_clear_dirty(rs, pss->block, bitmap_page);
-            zero_published++;
-        }
-        cxl_hybrid_account_cxl_zero_pages_skipped(zero_published);
-
-        for (uint32_t page = 0; page < zero_scan->pages; ) {
-            uint32_t run_pages = 0;
-            uint32_t enqueued_run;
-            unsigned long bitmap_page = zero_scan->first_page_in_block + page;
-
-            if (!test_bit(page, zero_scan->dirty_zero_bmap) &&
-                test_bit(bitmap_page, pss->block->bmap)) {
-                while (page + run_pages < zero_scan->pages) {
-                    unsigned long run_bitmap_page =
-                        zero_scan->first_page_in_block + page + run_pages;
-
-                    if (test_bit(page + run_pages, zero_scan->dirty_zero_bmap) ||
-                        !test_bit(run_bitmap_page, pss->block->bmap)) {
-                        break;
-                    }
-                    run_pages++;
-                }
-            }
-            if (!run_pages) {
-                page++;
-                continue;
-            }
-
-            cxl_hybrid_ctrl_mark_dirty_pages(
-                pss->block->bmap, bitmap_page,
-                zero_scan->first_state_page + page, run_pages, generation);
-            enqueued_run = cxl_hybrid_ctrl_enqueue_cxl_pages(
-                pss->block,
-                zero_scan->block_offset + (ram_addr_t)page * TARGET_PAGE_SIZE,
-                zero_scan->first_state_page + page,
-                zero_scan->cxl_offset + (uint64_t)page * TARGET_PAGE_SIZE,
-                generation, CXL_HYBRID_TRANSFER_CXL_LOW, run_pages);
-            if (!enqueued_run) {
-                page += run_pages;
-                continue;
-            }
-
-            cxl_hybrid_invalidate_rdma_ready_region_for_page(
-                pss->block,
-                zero_scan->block_offset + (ram_addr_t)page * TARGET_PAGE_SIZE);
-            for (uint32_t i = 0; i < enqueued_run; i++) {
-                migration_bitmap_clear_dirty(rs, pss->block, bitmap_page + i);
-            }
-            total_enqueued += enqueued_run;
-            page += MAX(enqueued_run, 1);
-        }
-
-        if (total_enqueued) {
-            unsigned long next_dirty;
-
-            cxl_hybrid_account_cxl_effective_zero_filtered_bytes(
-                (uint64_t)total_enqueued * TARGET_PAGE_SIZE);
-            next_dirty = find_next_bit(pss->block->bmap, zero_scan_end,
-                                       pss->page);
-            pss->page = next_dirty < zero_scan_end ? next_dirty :
-                        zero_scan_end;
-            return total_enqueued;
-        }
-        return 0;
-    }
-
     scan_limit = pss->page + (unsigned long)max_pages;
     dirty_end = find_next_zero_bit(pss->block->bmap, scan_limit, pss->page);
     batch_pages = dirty_end - pss->page;
@@ -907,10 +658,8 @@ static int cxl_hybrid_cxl_enqueue_bulk_page(
     return enqueued_pages;
 }
 
-static int cxl_hybrid_rdma_enqueue_bulk_region(
-    RAMState *rs,
-    PageSearchStatus *pss,
-    const CXLHybridZeroRegionScan *zero_scan)
+static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,
+                                               PageSearchStatus *pss)
 {
     CXLHybridRDMABulkClaim claim;
     ram_addr_t region_len = cxl_hybrid_fault_region_granule();
@@ -987,10 +736,6 @@ static int cxl_hybrid_rdma_enqueue_bulk_region(
         return 0;
     }
 
-    if (zero_scan && zero_scan->valid && zero_scan->partial_zero &&
-        zero_scan->region_index == claim.region_index) {
-        cxl_hybrid_account_rdma_partial_zero_bytes(claim.bytes);
-    }
     trace_cxl_hybrid_rdma_bulk_region(claim.region_index, claim.bytes);
     pss->page = first_page + claim.pages;
     return claimed_pages;
@@ -3330,9 +3075,7 @@ out:
  */
 static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
 {
-    CXLHybridZeroRegionScan zero_scan;
     bool page_dirty, preempt_active = postcopy_preempt_active();
-    bool have_zero_scan;
     int tmppages, pages = 0;
     size_t pagesize_bits =
         qemu_ram_pagesize(pss->block) >> TARGET_PAGE_BITS;
@@ -3346,20 +3089,11 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     }
 
     cxl_hybrid_shadow_classify_bulk_page(rs, pss);
-    have_zero_scan = cxl_hybrid_zero_scan_region(pss, &zero_scan);
-    if (have_zero_scan && zero_scan.all_dirty_zero) {
-        res = cxl_hybrid_publish_full_zero_region(rs, pss, &zero_scan);
-        if (res) {
-            return res;
-        }
-    }
-    res = cxl_hybrid_cxl_enqueue_bulk_page(
-        rs, pss, have_zero_scan ? &zero_scan : NULL);
+    res = cxl_hybrid_cxl_enqueue_bulk_page(rs, pss);
     if (res) {
         return res;
     }
-    res = cxl_hybrid_rdma_enqueue_bulk_region(
-        rs, pss, have_zero_scan ? &zero_scan : NULL);
+    res = cxl_hybrid_rdma_enqueue_bulk_region(rs, pss);
     if (res) {
         return res;
     }

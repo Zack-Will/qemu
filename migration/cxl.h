@@ -111,7 +111,6 @@ typedef enum CXLHybridPageOwner {
     CXL_HYBRID_PAGE_OWNER_NONE = 0,
     CXL_HYBRID_PAGE_OWNER_CXL = 1,
     CXL_HYBRID_PAGE_OWNER_RDMA = 2,
-    CXL_HYBRID_PAGE_OWNER_ZERO = 3,
 } CXLHybridPageOwner;
 
 typedef enum CXLHybridPageLocation {
@@ -629,12 +628,6 @@ CXLHybridTransferClass cxl_hybrid_scheduler_choose_zero_page_lane(
     const CXLHybridSchedulerPolicy *policy);
 void cxl_hybrid_account_shadow_bulk_candidate(RAMBlock *block,
                                                ram_addr_t block_offset);
-void cxl_hybrid_account_zero_scan(uint32_t zero_pages, bool partial_zero);
-void cxl_hybrid_account_full_zero_region_bypassed(uint32_t pages);
-void cxl_hybrid_account_zero_publish(bool success);
-void cxl_hybrid_account_cxl_zero_pages_skipped(uint32_t pages);
-void cxl_hybrid_account_cxl_effective_zero_filtered_bytes(uint64_t bytes);
-void cxl_hybrid_account_rdma_partial_zero_bytes(uint64_t bytes);
 void cxl_hybrid_account_rdma_ready(uint64_t region_index,
                                    uint64_t pages);
 void cxl_hybrid_account_rdma_invalidate(uint64_t region_index,
@@ -856,17 +849,12 @@ bool cxl_hybrid_page_state_claim_for_cxl(uint64_t *slot,
 bool cxl_hybrid_page_state_claim_for_rdma(uint64_t *slot,
                                           uint32_t generation,
                                           CXLHybridPageClaim *claim);
-bool cxl_hybrid_page_state_claim_for_zero(uint64_t *slot,
-                                          uint32_t generation,
-                                          CXLHybridPageClaim *claim);
 bool cxl_hybrid_page_state_complete(uint64_t *slot,
                                     const CXLHybridPageClaim *claim,
                                     CXLHybridPageLocation location);
 bool cxl_hybrid_page_state_complete_cxl(uint64_t *slot,
                                         const CXLHybridPageClaim *claim);
 bool cxl_hybrid_page_state_complete_rdma(uint64_t *slot,
-                                         const CXLHybridPageClaim *claim);
-bool cxl_hybrid_page_state_complete_zero(uint64_t *slot,
                                          const CXLHybridPageClaim *claim);
 bool cxl_hybrid_page_state_drop_claim(uint64_t *slot,
                                       const CXLHybridPageClaim *claim);
@@ -1014,13 +1002,6 @@ bool cxl_hybrid_control_complete_rdma_page_visible_generation(
     uint64_t page_index,
     uint32_t generation,
     const CXLHybridPageClaim *claim);
-bool cxl_hybrid_control_complete_zero_page_visible_generation(
-    const CXLHybridControlHeader *hdr,
-    unsigned long *visible_bitmap,
-    uint64_t *page_state,
-    uint64_t page_index,
-    uint32_t generation,
-    const CXLHybridPageClaim *claim);
 void cxl_hybrid_control_mark_pages_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
@@ -1106,8 +1087,6 @@ bool cxl_hybrid_ctrl_complete_rdma_page_visible(
     uint64_t page_index,
     uint32_t generation,
     const CXLHybridPageClaim *claim);
-bool cxl_hybrid_ctrl_publish_zero_page(uint64_t page_index,
-                                       uint32_t generation);
 bool cxl_hybrid_ctrl_enqueue_cxl_page(RAMBlock *block,
                                       ram_addr_t block_offset,
                                       uint64_t page_index,
