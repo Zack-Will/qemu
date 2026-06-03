@@ -2729,6 +2729,46 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertEqual(row["rdma_sidecar_failed"], True)
         self.assertEqual(default_row["rdma_sidecar_failed"], 0)
 
+    def test_extract_summary_includes_rdma_dynamic_admission_metrics(self):
+        summary = self.mod.extract_summary([
+            {
+                "x-cxl": {
+                    "rdma-sidecar-dynamic-window-regions": 3,
+                    "rdma-sidecar-sq-capacity-regions": 8,
+                    "rdma-sidecar-queue-len": 1,
+                    "rdma-sidecar-inflight-len": 2,
+                    "rdma-sidecar-goodput-ewma-bytes-per-ns": 2.5,
+                    "rdma-sidecar-completion-latency-ewma-ns": 1000000,
+                    "rdma-sidecar-bdp-estimate-regions": 3,
+                    "rdma-sidecar-admission-accepted-regions": 10,
+                    "rdma-sidecar-admission-overflow-cxl-regions": 4,
+                    "rdma-sidecar-admission-closed-events": 1,
+                    "rdma-sidecar-admission-goodput-drop-events": 2,
+                },
+                "dst-query-migrate": {
+                    "x-cxl": {
+                        "rdma-sidecar-dynamic-window-regions": 2,
+                        "rdma-sidecar-sq-capacity-regions": 8,
+                    }
+                },
+            }
+        ])
+
+        self.assertEqual(summary["rdma_sidecar_dynamic_window_regions"], 3)
+        self.assertEqual(summary["rdma_sidecar_sq_capacity_regions"], 8)
+        self.assertEqual(summary["rdma_sidecar_queue_len"], 1)
+        self.assertEqual(summary["rdma_sidecar_inflight_len"], 2)
+        self.assertEqual(summary["rdma_sidecar_goodput_ewma_bytes_per_ns"], 2.5)
+        self.assertEqual(summary["rdma_sidecar_completion_latency_ewma_ns"],
+                         1000000)
+        self.assertEqual(summary["rdma_sidecar_bdp_estimate_regions"], 3)
+        self.assertEqual(summary["rdma_sidecar_admission_accepted_regions"], 10)
+        self.assertEqual(
+            summary["rdma_sidecar_admission_overflow_cxl_regions"], 4)
+        self.assertEqual(summary["rdma_sidecar_admission_closed_events"], 1)
+        self.assertEqual(
+            summary["rdma_sidecar_admission_goodput_drop_events"], 2)
+
     def test_rdma_bulk_trace_events_are_counted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             trace = Path(tmpdir) / "trace.log"

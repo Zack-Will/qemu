@@ -354,6 +354,17 @@ RDMA_SIDECAR_METRICS = [
     "rdma_sidecar_max_inflight_regions",
     "rdma_sidecar_max_cover_percent",
     "rdma_sidecar_failed",
+    "rdma_sidecar_dynamic_window_regions",
+    "rdma_sidecar_sq_capacity_regions",
+    "rdma_sidecar_queue_len",
+    "rdma_sidecar_inflight_len",
+    "rdma_sidecar_goodput_ewma_bytes_per_ns",
+    "rdma_sidecar_completion_latency_ewma_ns",
+    "rdma_sidecar_bdp_estimate_regions",
+    "rdma_sidecar_admission_accepted_regions",
+    "rdma_sidecar_admission_overflow_cxl_regions",
+    "rdma_sidecar_admission_closed_events",
+    "rdma_sidecar_admission_goodput_drop_events",
 ]
 
 
