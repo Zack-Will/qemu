@@ -35,6 +35,41 @@ typedef struct CXLHybridRDMASidecarBulkStats {
     uint64_t page_state_rdma_stale_pages;
 } CXLHybridRDMASidecarBulkStats;
 
+typedef struct CXLHybridRDMASidecarAdmissionSnapshot {
+    bool accept_rdma;
+    uint32_t dynamic_window_regions;
+    uint32_t sq_capacity_regions;
+    uint32_t queue_len;
+    uint32_t inflight_len;
+    uint32_t reserved_regions;
+    uint32_t outstanding_regions;
+    double goodput_ewma_bytes_per_ns;
+    uint64_t completion_latency_ewma_ns;
+    uint32_t bdp_estimate_regions;
+    uint64_t accepted_regions;
+    uint64_t overflow_cxl_regions;
+    uint64_t admission_closed_events;
+    uint64_t goodput_drop_events;
+} CXLHybridRDMASidecarAdmissionSnapshot;
+
+typedef struct CXLHybridRDMASidecarAdmissionState {
+    uint32_t sq_capacity_regions;
+    uint32_t dynamic_window_regions;
+    uint32_t reserved_regions;
+    uint64_t bytes_per_region;
+    double goodput_ewma_bytes_per_ns;
+    uint64_t completion_latency_ewma_ns;
+    uint32_t bdp_estimate_regions;
+    uint64_t accepted_regions;
+    uint64_t overflow_cxl_regions;
+    uint64_t admission_closed_events;
+    uint64_t goodput_drop_events;
+} CXLHybridRDMASidecarAdmissionState;
+
+typedef struct CXLHybridRDMASidecarAdmissionReservation {
+    bool valid;
+} CXLHybridRDMASidecarAdmissionReservation;
+
 typedef struct CXLHybridRDMASidecarConfig {
     const MigrationAddress *addr;
     uint64_t total_regions;
@@ -46,6 +81,41 @@ typedef struct CXLHybridRDMASidecarConfig {
     bool incoming;
     const CXLHybridRDMASidecarOps *ops;
 } CXLHybridRDMASidecarConfig;
+
+void cxl_rdma_sidecar_admission_state_init(
+    CXLHybridRDMASidecarAdmissionState *state,
+    uint32_t sq_capacity_regions,
+    uint64_t bytes_per_region);
+CXLHybridRDMASidecarAdmissionSnapshot cxl_rdma_sidecar_admission_snapshot(
+    const CXLHybridRDMASidecarAdmissionState *state,
+    bool running,
+    bool bulk_active,
+    bool draining,
+    bool failed,
+    bool postcopy,
+    uint32_t queue_len,
+    uint32_t inflight_len);
+bool cxl_rdma_sidecar_admission_try_reserve(
+    CXLHybridRDMASidecarAdmissionState *state,
+    bool running,
+    bool bulk_active,
+    bool draining,
+    bool failed,
+    bool postcopy,
+    uint32_t queue_len,
+    uint32_t inflight_len,
+    CXLHybridRDMASidecarAdmissionReservation *reservation,
+    CXLHybridRDMASidecarAdmissionSnapshot *snapshot);
+void cxl_rdma_sidecar_admission_cancel_reserve(
+    CXLHybridRDMASidecarAdmissionState *state,
+    CXLHybridRDMASidecarAdmissionReservation *reservation);
+void cxl_rdma_sidecar_admission_consume_reserve(
+    CXLHybridRDMASidecarAdmissionState *state,
+    CXLHybridRDMASidecarAdmissionReservation *reservation);
+void cxl_rdma_sidecar_admission_note_completion(
+    CXLHybridRDMASidecarAdmissionState *state,
+    uint64_t useful_bytes,
+    uint64_t latency_ns);
 
 int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,
                            Error **errp);

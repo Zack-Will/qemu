@@ -586,6 +586,145 @@ static void test_rdma_posted_page_blocks_cxl_publish_until_completion(void)
         slot, 8, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL));
 }
 
+static void test_rdma_admission_rejects_full_dynamic_window(void)
+{
+    CXLHybridRDMASidecarAdmissionState state;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+    CXLHybridRDMASidecarAdmissionReservation reservation = { 0 };
+
+    cxl_rdma_sidecar_admission_state_init(&state, 8, 2 * MiB);
+
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 1);
+    g_assert_false(snap.accept_rdma);
+    g_assert_cmpuint(snap.dynamic_window_regions, ==, 1);
+    g_assert_cmpuint(snap.sq_capacity_regions, ==, 8);
+    g_assert_cmpuint(snap.inflight_len, ==, 1);
+
+    g_assert_false(cxl_rdma_sidecar_admission_try_reserve(
+        &state, true, true, false, false, false, 0, 1, &reservation, &snap));
+    g_assert_false(reservation.valid);
+    g_assert_cmpuint(state.overflow_cxl_regions, ==, 1);
+}
+
+static void test_rdma_admission_reserve_and_cancel_updates_outstanding(void)
+{
+    CXLHybridRDMASidecarAdmissionState state;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+    CXLHybridRDMASidecarAdmissionReservation reservation = { 0 };
+
+    cxl_rdma_sidecar_admission_state_init(&state, 4, 2 * MiB);
+
+    g_assert_true(cxl_rdma_sidecar_admission_try_reserve(
+        &state, true, true, false, false, false, 0, 0, &reservation, &snap));
+    g_assert_true(reservation.valid);
+    g_assert_cmpuint(state.reserved_regions, ==, 1);
+    g_assert_cmpuint(state.accepted_regions, ==, 1);
+
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 0);
+    g_assert_false(snap.accept_rdma);
+    g_assert_cmpuint(snap.outstanding_regions, ==, 1);
+
+    cxl_rdma_sidecar_admission_cancel_reserve(&state, &reservation);
+    g_assert_false(reservation.valid);
+    g_assert_cmpuint(state.reserved_regions, ==, 0);
+
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 0);
+    g_assert_true(snap.accept_rdma);
+}
+
+static void test_rdma_admission_outstanding_wrap_rejects_rdma(void)
+{
+    CXLHybridRDMASidecarAdmissionState state;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+
+    cxl_rdma_sidecar_admission_state_init(&state, 8, 2 * MiB);
+    cxl_rdma_sidecar_admission_note_completion(&state, 2 * MiB, 1000000);
+    cxl_rdma_sidecar_admission_note_completion(&state, 2 * MiB, 1000000);
+
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, UINT32_MAX, 2);
+
+    g_assert_cmpuint(snap.dynamic_window_regions, >, 1);
+    g_assert_cmpuint(snap.outstanding_regions, ==, UINT32_MAX);
+    g_assert_false(snap.accept_rdma);
+}
+
+static void test_rdma_admission_completion_grows_window_and_bdp(void)
+{
+    CXLHybridRDMASidecarAdmissionState state;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+
+    cxl_rdma_sidecar_admission_state_init(&state, 8, 2 * MiB);
+
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 0);
+    g_assert_cmpuint(snap.bdp_estimate_regions, ==, 0);
+
+    cxl_rdma_sidecar_admission_note_completion(&state, 2 * MiB, 1000000);
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 0);
+
+    g_assert_cmpuint(snap.dynamic_window_regions, ==, 2);
+    g_assert_cmpuint(snap.bdp_estimate_regions, >=, 1);
+    g_assert_cmpfloat(snap.goodput_ewma_bytes_per_ns, >, 0.0);
+    g_assert_cmpuint(snap.completion_latency_ewma_ns, ==, 1000000);
+}
+
+static void test_rdma_admission_bdp_clamps_without_u32_wrap(void)
+{
+    CXLHybridRDMASidecarAdmissionState state;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+
+    cxl_rdma_sidecar_admission_state_init(&state, 8, 1);
+
+    cxl_rdma_sidecar_admission_note_completion(
+        &state, (uint64_t)UINT32_MAX + 4, 1);
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 0);
+
+    g_assert_cmpuint(snap.bdp_estimate_regions, ==, 8);
+}
+
+static void test_rdma_admission_bdp_ceil_division_does_not_wrap(void)
+{
+    CXLHybridRDMASidecarAdmissionState state;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+
+    cxl_rdma_sidecar_admission_state_init(&state, 8, 3);
+    state.goodput_ewma_bytes_per_ns = (double)UINT64_MAX;
+    state.completion_latency_ewma_ns = 1;
+
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 0);
+
+    g_assert_cmpuint(snap.bdp_estimate_regions, ==, 8);
+}
+
+static void test_rdma_admission_goodput_regression_halves_window(void)
+{
+    CXLHybridRDMASidecarAdmissionState state;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+
+    cxl_rdma_sidecar_admission_state_init(&state, 8, 2 * MiB);
+
+    cxl_rdma_sidecar_admission_note_completion(&state, 2 * MiB, 1000000);
+    cxl_rdma_sidecar_admission_note_completion(&state, 4 * MiB, 1000000);
+    cxl_rdma_sidecar_admission_note_completion(&state, 4 * MiB, 1000000);
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 0);
+    g_assert_cmpuint(snap.dynamic_window_regions, ==, 4);
+
+    cxl_rdma_sidecar_admission_note_completion(&state, 1 * MiB, 4000000);
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 0);
+
+    g_assert_cmpuint(snap.dynamic_window_regions, ==, 2);
+    g_assert_cmpuint(state.goodput_drop_events, ==, 1);
+}
+
 static void test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish(void)
 {
     CXLHybridRDMASidecarState state = { 0 };
@@ -1078,6 +1217,20 @@ int main(int argc, char **argv)
                     test_rdma_descriptor_completion_consumes_claims_once);
     g_test_add_func("/cxl/region/rdma-posted-page-blocks-cxl-publish",
                     test_rdma_posted_page_blocks_cxl_publish_until_completion);
+    g_test_add_func("/cxl/region/rdma-admission-rejects-full-window",
+                    test_rdma_admission_rejects_full_dynamic_window);
+    g_test_add_func("/cxl/region/rdma-admission-reserve-cancel",
+                    test_rdma_admission_reserve_and_cancel_updates_outstanding);
+    g_test_add_func("/cxl/region/rdma-admission-outstanding-wrap-rejects-rdma",
+                    test_rdma_admission_outstanding_wrap_rejects_rdma);
+    g_test_add_func("/cxl/region/rdma-admission-completion-grows-window",
+                    test_rdma_admission_completion_grows_window_and_bdp);
+    g_test_add_func("/cxl/region/rdma-admission-bdp-clamps-without-u32-wrap",
+                    test_rdma_admission_bdp_clamps_without_u32_wrap);
+    g_test_add_func("/cxl/region/rdma-admission-bdp-ceil-division-no-wrap",
+                    test_rdma_admission_bdp_ceil_division_does_not_wrap);
+    g_test_add_func("/cxl/region/rdma-admission-goodput-regression-halves-window",
+                    test_rdma_admission_goodput_regression_halves_window);
     g_test_add_func("/cxl/region/rdma-sidecar-accounting",
                     test_rdma_sidecar_accounting_counts_ready_invalidate_and_republish);
     g_test_add_func("/cxl/region/rdma-sidecar-inflight-does-not-block-cxl",

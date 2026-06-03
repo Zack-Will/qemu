@@ -17,6 +17,227 @@
 #include "system/ramblock.h"
 #include "trace.h"
 
+#define CXL_RDMA_ADMISSION_MIN_WINDOW 1U
+#define CXL_RDMA_ADMISSION_EWMA_WEIGHT 8.0
+
+static uint32_t cxl_rdma_admission_clamp_window(uint32_t value,
+                                                uint32_t cap)
+{
+    if (!cap) {
+        return 0;
+    }
+    return MIN(MAX(value, CXL_RDMA_ADMISSION_MIN_WINDOW), cap);
+}
+
+void cxl_rdma_sidecar_admission_state_init(
+    CXLHybridRDMASidecarAdmissionState *state,
+    uint32_t sq_capacity_regions,
+    uint64_t bytes_per_region)
+{
+    if (!state) {
+        return;
+    }
+    memset(state, 0, sizeof(*state));
+    state->sq_capacity_regions = MAX((uint32_t)1, sq_capacity_regions);
+    state->dynamic_window_regions = CXL_RDMA_ADMISSION_MIN_WINDOW;
+    state->bytes_per_region = bytes_per_region;
+}
+
+static uint32_t cxl_rdma_sidecar_admission_bdp_regions(
+    const CXLHybridRDMASidecarAdmissionState *state)
+{
+    double bytes_in_flight;
+    uint64_t estimated_bytes;
+    uint64_t bytes_per_region;
+    uint64_t estimated_regions;
+
+    if (!state || state->goodput_ewma_bytes_per_ns <= 0.0 ||
+        !state->completion_latency_ewma_ns || !state->bytes_per_region) {
+        return 0;
+    }
+
+    bytes_per_region = state->bytes_per_region;
+    bytes_in_flight = state->goodput_ewma_bytes_per_ns *
+                      (double)state->completion_latency_ewma_ns;
+    estimated_bytes = bytes_in_flight >= (double)UINT64_MAX ?
+                      UINT64_MAX : (uint64_t)bytes_in_flight;
+    if (!estimated_bytes) {
+        return 1;
+    }
+    estimated_regions = estimated_bytes / bytes_per_region;
+    if (estimated_bytes % bytes_per_region) {
+        estimated_regions++;
+    }
+    if (estimated_regions >= state->sq_capacity_regions) {
+        return state->sq_capacity_regions;
+    }
+    return cxl_rdma_admission_clamp_window((uint32_t)estimated_regions,
+                                           state->sq_capacity_regions);
+}
+
+CXLHybridRDMASidecarAdmissionSnapshot cxl_rdma_sidecar_admission_snapshot(
+    const CXLHybridRDMASidecarAdmissionState *state,
+    bool running,
+    bool bulk_active,
+    bool draining,
+    bool failed,
+    bool postcopy,
+    uint32_t queue_len,
+    uint32_t inflight_len)
+{
+    CXLHybridRDMASidecarAdmissionSnapshot snap = { 0 };
+    uint64_t outstanding_regions;
+    uint32_t window;
+
+    if (!state || !state->sq_capacity_regions) {
+        return snap;
+    }
+
+    outstanding_regions = (uint64_t)queue_len + inflight_len +
+                          state->reserved_regions;
+    window = cxl_rdma_admission_clamp_window(
+        state->dynamic_window_regions, state->sq_capacity_regions);
+    snap.dynamic_window_regions = window;
+    snap.sq_capacity_regions = state->sq_capacity_regions;
+    snap.queue_len = queue_len;
+    snap.inflight_len = inflight_len;
+    snap.reserved_regions = state->reserved_regions;
+    snap.outstanding_regions = MIN(outstanding_regions, (uint64_t)UINT32_MAX);
+    snap.goodput_ewma_bytes_per_ns = state->goodput_ewma_bytes_per_ns;
+    snap.completion_latency_ewma_ns = state->completion_latency_ewma_ns;
+    snap.bdp_estimate_regions =
+        cxl_rdma_sidecar_admission_bdp_regions(state);
+    snap.accepted_regions = state->accepted_regions;
+    snap.overflow_cxl_regions = state->overflow_cxl_regions;
+    snap.admission_closed_events = state->admission_closed_events;
+    snap.goodput_drop_events = state->goodput_drop_events;
+    snap.accept_rdma = running && bulk_active && !draining && !failed &&
+                       !postcopy && outstanding_regions < window;
+    return snap;
+}
+
+bool cxl_rdma_sidecar_admission_try_reserve(
+    CXLHybridRDMASidecarAdmissionState *state,
+    bool running,
+    bool bulk_active,
+    bool draining,
+    bool failed,
+    bool postcopy,
+    uint32_t queue_len,
+    uint32_t inflight_len,
+    CXLHybridRDMASidecarAdmissionReservation *reservation,
+    CXLHybridRDMASidecarAdmissionSnapshot *snapshot)
+{
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+
+    if (!state || !reservation) {
+        return false;
+    }
+
+    reservation->valid = false;
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        state, running, bulk_active, draining, failed, postcopy, queue_len,
+        inflight_len);
+    if (!snap.accept_rdma) {
+        if (!running || !bulk_active || draining || failed || postcopy) {
+            state->admission_closed_events++;
+        } else {
+            state->overflow_cxl_regions++;
+        }
+        if (snapshot) {
+            *snapshot = cxl_rdma_sidecar_admission_snapshot(
+                state, running, bulk_active, draining, failed, postcopy,
+                queue_len, inflight_len);
+        }
+        return false;
+    }
+
+    state->reserved_regions++;
+    state->accepted_regions++;
+    reservation->valid = true;
+    if (snapshot) {
+        *snapshot = cxl_rdma_sidecar_admission_snapshot(
+            state, running, bulk_active, draining, failed, postcopy, queue_len,
+            inflight_len);
+    }
+    return true;
+}
+
+void cxl_rdma_sidecar_admission_cancel_reserve(
+    CXLHybridRDMASidecarAdmissionState *state,
+    CXLHybridRDMASidecarAdmissionReservation *reservation)
+{
+    if (!state || !reservation || !reservation->valid) {
+        return;
+    }
+    assert(state->reserved_regions > 0);
+    state->reserved_regions--;
+    reservation->valid = false;
+}
+
+void cxl_rdma_sidecar_admission_consume_reserve(
+    CXLHybridRDMASidecarAdmissionState *state,
+    CXLHybridRDMASidecarAdmissionReservation *reservation)
+{
+    cxl_rdma_sidecar_admission_cancel_reserve(state, reservation);
+}
+
+void cxl_rdma_sidecar_admission_note_completion(
+    CXLHybridRDMASidecarAdmissionState *state,
+    uint64_t useful_bytes,
+    uint64_t latency_ns)
+{
+    double sample_goodput;
+    double old_goodput;
+    uint64_t old_latency;
+    bool regression;
+
+    if (!state || !useful_bytes || !latency_ns ||
+        !state->sq_capacity_regions) {
+        return;
+    }
+
+    sample_goodput = (double)useful_bytes / (double)latency_ns;
+    old_goodput = state->goodput_ewma_bytes_per_ns;
+    old_latency = state->completion_latency_ewma_ns;
+    regression = old_goodput > 0.0 && old_latency > 0 &&
+                 sample_goodput < old_goodput &&
+                 latency_ns > old_latency;
+
+    if (old_goodput == 0.0) {
+        state->goodput_ewma_bytes_per_ns = sample_goodput;
+    } else {
+        state->goodput_ewma_bytes_per_ns =
+            ((old_goodput * (CXL_RDMA_ADMISSION_EWMA_WEIGHT - 1.0)) +
+             sample_goodput) / CXL_RDMA_ADMISSION_EWMA_WEIGHT;
+    }
+
+    if (!old_latency) {
+        state->completion_latency_ewma_ns = latency_ns;
+    } else {
+        state->completion_latency_ewma_ns =
+            (uint64_t)((((double)old_latency *
+                         (CXL_RDMA_ADMISSION_EWMA_WEIGHT - 1.0)) +
+                        (double)latency_ns) /
+                       CXL_RDMA_ADMISSION_EWMA_WEIGHT);
+    }
+
+    state->bdp_estimate_regions =
+        cxl_rdma_sidecar_admission_bdp_regions(state);
+    if (regression) {
+        state->dynamic_window_regions =
+            cxl_rdma_admission_clamp_window(
+                state->dynamic_window_regions / 2,
+                state->sq_capacity_regions);
+        state->goodput_drop_events++;
+        return;
+    }
+
+    if (state->dynamic_window_regions < state->sq_capacity_regions) {
+        state->dynamic_window_regions++;
+    }
+}
+
 #ifdef CONFIG_RDMA
 #include <netdb.h>
 #include <arpa/inet.h>
