@@ -500,6 +500,32 @@ static void test_complete_cxl_page_visible_publishes_matching_claim(void)
         page_state[2], generation, CXL_HYBRID_PAGE_LOCATION_CXL));
 }
 
+static void test_complete_zero_page_visible_publishes_matching_cxl_claim(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[1] = { 0 };
+    uint64_t page_state[4];
+    CXLHybridPageClaim claim = { 0 };
+    uint32_t generation = 15;
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible,
+                                       G_N_ELEMENTS(page_state),
+                                       page_state,
+                                       G_N_ELEMENTS(page_state),
+                                       NULL, 0, NULL, 0,
+                                       64 * 1024, 12, generation);
+    page_state[2] = cxl_hybrid_page_state_make_dirty(generation, 1);
+    g_assert_true(cxl_hybrid_page_state_claim_for_cxl(&page_state[2],
+                                                      generation, &claim));
+
+    g_assert_true(cxl_hybrid_control_complete_zero_page_visible_generation(
+        &hdr, visible, page_state, 2, generation, &claim));
+
+    g_assert_true(test_bit(2, visible));
+    g_assert_true(cxl_hybrid_page_state_can_consume(
+        page_state[2], generation, CXL_HYBRID_PAGE_LOCATION_ZERO));
+}
+
 static void test_complete_cxl_page_visible_skips_stale_page(void)
 {
     CXLHybridControlHeader hdr = { 0 };
@@ -2029,6 +2055,8 @@ int main(int argc, char **argv)
                     test_cxl_descriptor_completion_skips_stale_page);
     g_test_add_func("/cxl-hybrid-control/complete-cxl-page-visible-publishes-matching-claim",
                     test_complete_cxl_page_visible_publishes_matching_claim);
+    g_test_add_func("/cxl-hybrid-control/complete-zero-page-visible-publishes-matching-cxl-claim",
+                    test_complete_zero_page_visible_publishes_matching_cxl_claim);
     g_test_add_func("/cxl-hybrid-control/complete-cxl-page-visible-skips-stale-page",
                     test_complete_cxl_page_visible_skips_stale_page);
     g_test_add_func("/cxl-hybrid-control/complete-rdma-page-visible-publishes-dst-local",

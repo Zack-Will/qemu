@@ -6,6 +6,7 @@
 #include "io/channel-cxl.h"
 #include "qemu/atomic.h"
 #include "qemu/bitmap.h"
+#include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
@@ -769,6 +770,22 @@ static bool cxl_hybrid_ctrl_process_cxl_descriptor(
         return false;
     }
 
+    if (buffer_is_zero(desc->block->host + desc->block_offset,
+                       TARGET_PAGE_SIZE)) {
+        if (retp) {
+            *retp = 0;
+        }
+        completed = cxl_hybrid_control_complete_zero_page_visible_generation(
+            state->hdr, state->visible_bitmap, state->page_state,
+            desc->page_index, desc->generation, &desc->claim);
+        if (completed) {
+            cxl_hybrid_note_cxl_worker_page_visible(desc->page_index);
+        } else {
+            cxl_hybrid_ctrl_drop_cxl_descriptor(state, desc);
+        }
+        return completed;
+    }
+
     ret = cxl_hybrid_copy_page_to_stable_cxl(desc->block, desc->block_offset,
                                              desc->cxl_offset,
                                              TARGET_PAGE_SIZE, &local_err);
@@ -869,33 +886,64 @@ static void cxl_hybrid_ctrl_process_cxl_batch(
         return;
     }
 
-    span_bytes = count * TARGET_PAGE_SIZE;
-    ret = cxl_hybrid_copy_page_to_stable_cxl(descs[0].block,
-                                             descs[0].block_offset,
-                                             descs[0].cxl_offset,
-                                             span_bytes,
-                                             &local_err);
-    if (ret) {
-        if (local_err) {
-            error_report_err(local_err);
-        }
-        for (uint32_t i = 0; i < count; i++) {
-            rets[i] = ret;
-            cxl_hybrid_ctrl_drop_cxl_descriptor(state, &descs[i]);
-        }
-        return;
-    }
+    for (uint32_t i = 0; i < count;) {
+        uint32_t run_start;
 
-    for (uint32_t i = 0; i < count; i++) {
-        rets[i] = 0;
-        copied_bytes[i] = TARGET_PAGE_SIZE;
-        completed[i] = cxl_hybrid_control_complete_cxl_page_visible_generation(
-            state->hdr, state->visible_bitmap, state->page_state,
-            descs[i].page_index, descs[i].generation, &descs[i].claim);
-        if (completed[i]) {
-            cxl_hybrid_note_cxl_worker_page_visible(descs[i].page_index);
-        } else {
-            cxl_hybrid_ctrl_drop_cxl_descriptor(state, &descs[i]);
+        if (buffer_is_zero(descs[i].block->host + descs[i].block_offset,
+                           TARGET_PAGE_SIZE)) {
+            rets[i] = 0;
+            completed[i] =
+                cxl_hybrid_control_complete_zero_page_visible_generation(
+                    state->hdr, state->visible_bitmap, state->page_state,
+                    descs[i].page_index, descs[i].generation,
+                    &descs[i].claim);
+            if (completed[i]) {
+                cxl_hybrid_note_cxl_worker_page_visible(descs[i].page_index);
+            } else {
+                cxl_hybrid_ctrl_drop_cxl_descriptor(state, &descs[i]);
+            }
+            i++;
+            continue;
+        }
+
+        run_start = i++;
+
+        while (i < count &&
+               !buffer_is_zero(descs[i].block->host + descs[i].block_offset,
+                               TARGET_PAGE_SIZE)) {
+            i++;
+        }
+
+        span_bytes = (i - run_start) * TARGET_PAGE_SIZE;
+        ret = cxl_hybrid_copy_page_to_stable_cxl(descs[run_start].block,
+                                                 descs[run_start].block_offset,
+                                                 descs[run_start].cxl_offset,
+                                                 span_bytes,
+                                                 &local_err);
+        if (ret) {
+            if (local_err) {
+                error_report_err(local_err);
+            }
+            for (uint32_t j = run_start; j < count; j++) {
+                rets[j] = ret;
+                cxl_hybrid_ctrl_drop_cxl_descriptor(state, &descs[j]);
+            }
+            return;
+        }
+
+        for (uint32_t j = run_start; j < i; j++) {
+            rets[j] = 0;
+            copied_bytes[j] = TARGET_PAGE_SIZE;
+            completed[j] =
+                cxl_hybrid_control_complete_cxl_page_visible_generation(
+                    state->hdr, state->visible_bitmap, state->page_state,
+                    descs[j].page_index, descs[j].generation,
+                    &descs[j].claim);
+            if (completed[j]) {
+                cxl_hybrid_note_cxl_worker_page_visible(descs[j].page_index);
+            } else {
+                cxl_hybrid_ctrl_drop_cxl_descriptor(state, &descs[j]);
+            }
         }
     }
 }

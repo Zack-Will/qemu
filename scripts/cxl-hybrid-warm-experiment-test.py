@@ -368,6 +368,55 @@ class WarmExperimentScriptTest(unittest.TestCase):
             batch_body.index("cxl_hybrid_note_cxl_worker_page_visible("),
         )
 
+    def test_cxl_worker_detects_zero_pages_while_copying(self):
+        control_source = (
+            REPO_ROOT / "migration" / "cxl-hybrid-control.c").read_text()
+
+        batch_start = control_source.index(
+            "static void cxl_hybrid_ctrl_process_cxl_batch(")
+        batch_end = control_source.index(
+            "static void *cxl_hybrid_ctrl_cxl_worker_thread(",
+            batch_start)
+        batch_body = control_source[batch_start:batch_end]
+
+        self.assertIn("buffer_is_zero(", batch_body)
+        self.assertIn("cxl_hybrid_copy_page_to_stable_cxl(", batch_body)
+        self.assertLess(
+            batch_body.index("buffer_is_zero("),
+            batch_body.index("cxl_hybrid_copy_page_to_stable_cxl("),
+        )
+        self.assertIn("cxl_hybrid_control_complete_zero_page_visible_generation(",
+                      batch_body)
+
+    def test_zero_page_faults_are_resolved_on_destination(self):
+        cxl_source = (REPO_ROOT / "migration" / "cxl.c").read_text()
+
+        helper_start = cxl_source.index(
+            "static int cxl_hybrid_wait_and_resolve_region_fault(")
+        helper_end = cxl_source.index(
+            "static int cxl_hybrid_try_resolve_region_fault_fast(",
+            helper_start)
+        helper_body = cxl_source[helper_start:helper_end]
+
+        self.assertIn("CXL_HYBRID_PAGE_LOCATION_ZERO", helper_body)
+        self.assertIn("cxl_hybrid_resolve_zero_fault(", helper_body)
+        self.assertIn("postcopy_place_page_zero(", cxl_source)
+        self.assertNotIn("unsupported zero location", helper_body)
+
+    def test_rdma_bulk_path_remains_zero_unaware(self):
+        ram_source = (REPO_ROOT / "migration" / "ram.c").read_text()
+
+        helper_start = ram_source.index(
+            "static int cxl_hybrid_rdma_enqueue_bulk_region(")
+        helper_end = ram_source.index(
+            "void cxl_hybrid_rdma_drop_bulk_claim(",
+            helper_start)
+        helper_body = ram_source[helper_start:helper_end]
+
+        self.assertNotIn("buffer_is_zero(", helper_body)
+        self.assertNotIn("complete_zero", helper_body)
+        self.assertNotIn("CXL_HYBRID_PAGE_LOCATION_ZERO", helper_body)
+
     def test_cxl_worker_batch_size_matches_bulk_pipeline(self):
         control_source = (
             REPO_ROOT / "migration" / "cxl-hybrid-control.c").read_text()

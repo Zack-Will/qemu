@@ -856,6 +856,8 @@ bool cxl_hybrid_page_state_complete_cxl(uint64_t *slot,
                                         const CXLHybridPageClaim *claim);
 bool cxl_hybrid_page_state_complete_rdma(uint64_t *slot,
                                          const CXLHybridPageClaim *claim);
+bool cxl_hybrid_page_state_complete_zero(uint64_t *slot,
+                                         const CXLHybridPageClaim *claim);
 bool cxl_hybrid_page_state_drop_claim(uint64_t *slot,
                                       const CXLHybridPageClaim *claim);
 void cxl_hybrid_page_state_mark_dirty(uint64_t *slot,
@@ -996,6 +998,13 @@ bool cxl_hybrid_control_complete_cxl_page_visible_generation(
     uint32_t generation,
     const CXLHybridPageClaim *claim);
 bool cxl_hybrid_control_complete_rdma_page_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    const CXLHybridPageClaim *claim);
+bool cxl_hybrid_control_complete_zero_page_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
     uint64_t *page_state,

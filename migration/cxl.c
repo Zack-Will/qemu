@@ -1427,6 +1427,41 @@ static int cxl_hybrid_dst_remap_visible_fault_span(MigrationIncomingState *mis,
     return cxl_hybrid_dst_remap_span(mis, rb, &clipped, fault_host_addr, errp);
 }
 
+static int cxl_hybrid_resolve_zero_fault(MigrationIncomingState *mis,
+                                         RAMBlock *rb,
+                                         ram_addr_t offset,
+                                         void *fault_host,
+                                         Error **errp)
+{
+    size_t pagesize;
+    bool received = false;
+    int ret;
+
+    ret = postcopy_place_page_zero(mis, fault_host, rb);
+    if (ret == -EEXIST) {
+        pagesize = qemu_ram_pagesize(rb);
+        ret = postcopy_mark_range_received_and_wake(mis, rb, fault_host,
+                                                    pagesize, fault_host,
+                                                    &received);
+        if (ret) {
+            error_setg(errp,
+                       "CXL hybrid zero fault page %s/0x%" PRIx64
+                       " existing-page wake failed: %d",
+                       qemu_ram_get_idstr(rb), (uint64_t)offset, ret);
+            return ret;
+        }
+    }
+    if (ret) {
+        error_setg(errp,
+                   "CXL hybrid zero fault page %s/0x%" PRIx64
+                   " failed zero-page placement: %d",
+                   qemu_ram_get_idstr(rb), (uint64_t)offset, ret);
+        return ret;
+    }
+
+    return 0;
+}
+
 static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
                                                     RAMBlock *rb,
                                                     ram_addr_t offset,
@@ -1506,11 +1541,8 @@ static int cxl_hybrid_wait_and_resolve_region_fault(MigrationIncomingState *mis,
     }
 
     if (location == CXL_HYBRID_PAGE_LOCATION_ZERO) {
-        error_setg(errp,
-                   "CXL hybrid region remap fault page %s/0x%" PRIx64
-                   " resolved to unsupported zero location",
-                   ramblock, (uint64_t)offset);
-        return -EINVAL;
+        return cxl_hybrid_resolve_zero_fault(mis, rb, offset, fault_host,
+                                             errp);
     }
 
     error_setg(errp,
