@@ -2360,6 +2360,23 @@ class WarmExperimentScriptTest(unittest.TestCase):
         self.assertLess(cover_percent_check, sidecar_gate)
         self.assertGreater(address_check, sidecar_gate)
 
+    def test_rdma_sidecar_cover_percent_is_documented_as_deprecated(self):
+        qapi_text = (REPO_ROOT / "qapi" / "migration.json").read_text()
+        options_text = (REPO_ROOT / "migration" / "options.c").read_text()
+        docs_text = (
+            REPO_ROOT / "docs" / "superpowers" / "reports" /
+            "2026-06-04-rdma-cxl-current-experiment-config.md"
+        ).read_text()
+
+        self.assertIn("deprecated; dynamic admission ignores this value",
+                      qapi_text)
+        self.assertIn("x-cxl-rdma-sidecar-max-cover-percent is deprecated",
+                      options_text)
+        self.assertNotIn("--x-cxl-rdma-sidecar-max-cover-percent 50",
+                         docs_text)
+        self.assertIn("RDMA sidecar in-flight parameter is a safety cap",
+                      docs_text)
+
     def test_hmp_migrate_set_parameter_handles_rdma_sidecar_params(self):
         hmp_text = (
             REPO_ROOT / "migration" / "migration-hmp-cmds.c"

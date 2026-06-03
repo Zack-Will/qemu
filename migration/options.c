@@ -2153,6 +2153,8 @@ static void migrate_params_apply(MigrationParameters *params)
             params->x_cxl_rdma_sidecar_max_inflight_regions;
     }
     if (params->has_x_cxl_rdma_sidecar_max_cover_percent) {
+        warn_report("x-cxl-rdma-sidecar-max-cover-percent is deprecated; "
+                    "dynamic RDMA admission ignores this value");
         s->parameters.x_cxl_rdma_sidecar_max_cover_percent =
             params->x_cxl_rdma_sidecar_max_cover_percent;
     }

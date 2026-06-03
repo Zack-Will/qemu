@@ -4980,9 +4980,13 @@ def parse_args(argv=None):
     parser.add_argument("--rdma-port", type=int, default=DEFAULT_RDMA_PORT)
     parser.add_argument("--rdma-pin-all", action="store_true")
     parser.add_argument("--x-cxl-rdma-sidecar-max-inflight-regions",
-                        type=int, default=1)
+                        type=int, default=1,
+                        help=("Hard safety cap for the RDMA sidecar SQ and "
+                              "dynamic admission window"))
     parser.add_argument("--x-cxl-rdma-sidecar-max-cover-percent",
-                        type=int, default=25)
+                        type=int, default=25,
+                        help=("Deprecated compatibility option; dynamic RDMA "
+                              "admission ignores fixed coverage"))
     parser.add_argument("--x-cxl-rdma-sidecar-region-bytes",
                         type=int, default=0)
     parser.add_argument("--accel", choices=("tcg", "kvm"), default="tcg",

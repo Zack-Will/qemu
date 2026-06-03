@@ -2228,12 +2228,16 @@
 #     primary migration address.  The address transport must be @rdma
 #     when @x-cxl-rdma-sidecar is enabled.  (Since 11.0)
 #
-# @x-cxl-rdma-sidecar-max-inflight-regions: Maximum number of CXL
-#     hybrid RDMA sidecar regions in flight at once.  Default is 1.
-#     (Since 11.0)
+# @x-cxl-rdma-sidecar-max-inflight-regions: Hard safety cap for the
+#     CXL hybrid RDMA sidecar SQ and dynamic admission window.  It no
+#     longer expresses the desired fixed in-flight depth.  (Since
+#     11.0)
 #
-# @x-cxl-rdma-sidecar-max-cover-percent: Maximum percentage of guest
-#     RAM the CXL hybrid RDMA sidecar may cover.  Default is 25.
+# @x-cxl-rdma-sidecar-max-cover-percent: Deprecated compatibility
+#     parameter.
+#     It is deprecated; dynamic admission ignores this value.
+#     It routes RDMA overflow to CXL based on runtime sidecar state.
+#     Kept only for compatibility with older experiment commands.
 #     (Since 11.0)
 #
 # @x-cxl-rdma-sidecar-region-bytes: CXL hybrid RDMA sidecar region
