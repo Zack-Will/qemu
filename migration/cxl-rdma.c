@@ -19,6 +19,8 @@
 
 #define CXL_RDMA_ADMISSION_MIN_WINDOW 1U
 #define CXL_RDMA_ADMISSION_EWMA_WEIGHT 8.0
+#define CXL_RDMA_ADMISSION_DROP_GOODPUT_FACTOR 0.80
+#define CXL_RDMA_ADMISSION_DROP_LATENCY_FACTOR 1.10
 
 static uint32_t cxl_rdma_admission_clamp_window(uint32_t value,
                                                 uint32_t cap)
@@ -50,7 +52,7 @@ void cxl_rdma_sidecar_admission_state_init(
     }
     memset(state, 0, sizeof(*state));
     state->sq_capacity_regions = MAX((uint32_t)1, sq_capacity_regions);
-    state->dynamic_window_regions = CXL_RDMA_ADMISSION_MIN_WINDOW;
+    state->dynamic_window_regions = state->sq_capacity_regions;
     state->bytes_per_region = bytes_per_region;
 }
 
@@ -110,7 +112,7 @@ CXLHybridRDMASidecarAdmissionSnapshot cxl_rdma_sidecar_admission_snapshot(
     window = cxl_rdma_admission_clamp_window(
         state->dynamic_window_regions, state->sq_capacity_regions);
     bdp_regions = cxl_rdma_sidecar_admission_bdp_regions(state);
-    if (bdp_regions) {
+    if (bdp_regions && state->goodput_drop_events) {
         window = MIN(window, bdp_regions);
     }
     snap.dynamic_window_regions = window;
@@ -216,8 +218,11 @@ void cxl_rdma_sidecar_admission_note_completion(
     old_goodput = state->goodput_ewma_bytes_per_ns;
     old_latency = state->completion_latency_ewma_ns;
     regression = old_goodput > 0.0 && old_latency > 0 &&
-                 sample_goodput < old_goodput &&
-                 latency_ns > old_latency;
+                 sample_goodput <
+                 old_goodput * CXL_RDMA_ADMISSION_DROP_GOODPUT_FACTOR &&
+                 (double)latency_ns >
+                 (double)old_latency *
+                 CXL_RDMA_ADMISSION_DROP_LATENCY_FACTOR;
 
     if (old_goodput == 0.0) {
         state->goodput_ewma_bytes_per_ns = sample_goodput;

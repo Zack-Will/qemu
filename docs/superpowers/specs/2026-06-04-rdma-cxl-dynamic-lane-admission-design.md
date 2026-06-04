@@ -101,14 +101,21 @@ walk RDMA queues, or inspect CQ state.
 ## Window Adjustment
 
 The sidecar updates the window on completion and, optionally, on short idle
-ticks. A conservative first implementation should use additive increase and
-multiplicative decrease:
+ticks. The controller must first probe RDMA up to the configured SQ safety cap
+before treating CXL as the steady overflow lane. A BDP estimate derived from
+the current window is self-limiting if it is applied too early: a one-region
+window produces one-region goodput, which then keeps the BDP estimate small.
 
-- Start with `window_regions = 1`.
+A conservative implementation should therefore use probe-first additive
+increase and multiplicative decrease:
+
+- Start with `window_regions = sq_capacity_regions` as an initial probe window.
+- Until the controller observes a material goodput drop with a material latency
+  rise, do not use self-estimated BDP as a hard cap on admission.
 - On completions that improve or maintain goodput without raising completion
-  latency materially, increase by one region up to `sq_capacity_regions`.
-- If goodput stops improving while latency rises, halve the window, but keep it
-  at least one region.
+  latency materially, keep or increase the window up to `sq_capacity_regions`.
+- If goodput falls materially while latency rises materially, halve the window,
+  but keep it at least one region.
 - If the sidecar sees CQ errors, migration failure, drain, or postcopy entry,
   close admission immediately.
 - If the queue remains full while completions are slow, stop accepting new RDMA
@@ -125,13 +132,13 @@ bdp_regions =
 The effective window is:
 
 ```text
-window_regions = clamp(controller_window, 1, sq_capacity_regions)
+probe_window_regions = clamp(controller_window, 1, sq_capacity_regions)
 target_regions = clamp(bdp_regions, 1, sq_capacity_regions)
 ```
 
-The first implementation may use `target_regions` as an upper bound on additive
-growth. It should expose both values so later experiments can compare the
-controller decision against observed BDP.
+After the probe phase has observed a material regression, the effective window
+may use `target_regions` as an upper bound. It should expose both values so
+later experiments can compare the controller decision against observed BDP.
 
 ## Scheduler Behavior
 

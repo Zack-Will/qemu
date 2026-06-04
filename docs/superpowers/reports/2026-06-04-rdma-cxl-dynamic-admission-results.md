@@ -60,6 +60,14 @@ region, with BDP estimated at 2 regions and 4 goodput-drop events, so the
 controller kept admission conservative and overflowed 30 candidate regions to
 CXL.
 
+This run exposed a policy issue rather than an RDMA transport failure. With a
+2 MiB region and about 1.47 ms RDMA completion latency, a one-region window caps
+RDMA near 1.3 GiB/s, matching the measured 1265.5 MiB/s. The follow-up
+controller change probes to the SQ safety cap before applying self-estimated
+BDP as a hard cap, and it requires a material goodput drop plus a material
+latency rise before reducing the window. A new performance run is required to
+validate the post-probe policy.
+
 ## Interpretation
 
 RDMA admission is valid for this sample only if the run completed,
