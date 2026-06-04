@@ -43,14 +43,16 @@ cap and did not pass a fixed RDMA coverage parameter.
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | /tmp/cxl-hybrid-warm-exp-hfeajir2/remap_xlarge_random_rw/hybrid_parallel_rdma_cxl-balanced-run01 | completed | 67 | 8 | 1 | 2 | 9 | 28 | 1.6435218267284948 | 1290575 | 35045376 | 8388608 |
 | /tmp/cxl-hybrid-warm-exp-rvc16ak1/remap_xlarge_random_rw/hybrid_parallel_rdma_cxl-balanced-run01 | completed | 62 | 8 | 1 | 2 | 7 | 30 | 1.4829019524823313 | 1468869 | 34467840 | 12582912 |
+| /tmp/cxl-hybrid-warm-exp-fed6uchc/remap_xlarge_random_rw/hybrid_parallel_rdma_cxl-balanced-run01 | completed | 56 | 8 | 2 | 2 | 9 | 28 | 4.1750082220221 | 588325 | 21917696 | 8388608 |
 
 ## Lane Time Breakdown
 
-For the post-BDP-cap validation run:
+For the post-BDP-cap validation runs:
 
-| precopy wall ms | RDMA completed ms | CXL worker ms | RDMA MiB | CXL MiB | RDMA byte share | CXL byte share | RDMA MiB/s | CXL MiB/s |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10.589699 | 9.482069 | 5.277465 | 12.00 | 32.87 | 26.7% | 73.3% | 1265.5 | 6228.6 |
+| run | precopy wall ms | RDMA completed ms | CXL worker ms | RDMA MiB | CXL MiB | RDMA byte share | CXL byte share | RDMA MiB/s | CXL MiB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BDP hard cap | 10.589699 | 9.482069 | 5.277465 | 12.00 | 32.87 | 26.7% | 73.3% | 1265.5 | 6228.6 |
+| probe first | 3.610789 | 3.247525 | 2.285807 | 8.00 | 20.90 | 27.7% | 72.3% | 2463.4 | 9144.4 |
 
 The RDMA and CXL lane times are cumulative lane work counters, so they overlap
 inside the precopy wall-clock window and should not be summed. The sample shows
@@ -65,8 +67,15 @@ This run exposed a policy issue rather than an RDMA transport failure. With a
 RDMA near 1.3 GiB/s, matching the measured 1265.5 MiB/s. The follow-up
 controller change probes to the SQ safety cap before applying self-estimated
 BDP as a hard cap, and it requires a material goodput drop plus a material
-latency rise before reducing the window. A new performance run is required to
-validate the post-probe policy.
+latency rise before reducing the window.
+
+The clean post-probe run completed with primary in-memory dump and no
+stderr/log cleanup, UFFD, error, failed, or traceback matches. It reduced the
+precopy wall time from 10.589699 ms to 3.610789 ms and raised RDMA completed
+goodput from 1265.5 MiB/s to 2463.4 MiB/s. It still does not produce equal byte
+balance: CXL carried 72.3% of measured lane bytes. An earlier post-probe run at
+`/tmp/cxl-hybrid-warm-exp-i56t13_m` completed but had `uffd_copy_page() failed`
+messages in destination stderr, so it is excluded from the clean sample table.
 
 ## Interpretation
 
