@@ -641,8 +641,8 @@ static void test_rdma_admission_outstanding_wrap_rejects_rdma(void)
     CXLHybridRDMASidecarAdmissionSnapshot snap;
 
     cxl_rdma_sidecar_admission_state_init(&state, 8, 2 * MiB);
-    cxl_rdma_sidecar_admission_note_completion(&state, 2 * MiB, 1000000);
-    cxl_rdma_sidecar_admission_note_completion(&state, 2 * MiB, 1000000);
+    cxl_rdma_sidecar_admission_note_completion(&state, 8 * MiB, 1000000);
+    cxl_rdma_sidecar_admission_note_completion(&state, 8 * MiB, 1000000);
 
     snap = cxl_rdma_sidecar_admission_snapshot(
         &state, true, true, false, false, false, UINT32_MAX, 2);
@@ -667,10 +667,33 @@ static void test_rdma_admission_completion_grows_window_and_bdp(void)
     snap = cxl_rdma_sidecar_admission_snapshot(
         &state, true, true, false, false, false, 0, 0);
 
-    g_assert_cmpuint(snap.dynamic_window_regions, ==, 2);
+    g_assert_cmpuint(state.dynamic_window_regions, ==, 2);
+    g_assert_cmpuint(snap.dynamic_window_regions, ==, 1);
     g_assert_cmpuint(snap.bdp_estimate_regions, >=, 1);
     g_assert_cmpfloat(snap.goodput_ewma_bytes_per_ns, >, 0.0);
     g_assert_cmpuint(snap.completion_latency_ewma_ns, ==, 1000000);
+}
+
+static void test_rdma_admission_bdp_caps_effective_window(void)
+{
+    CXLHybridRDMASidecarAdmissionState state;
+    CXLHybridRDMASidecarAdmissionSnapshot snap;
+    CXLHybridRDMASidecarAdmissionReservation reservation = { 0 };
+
+    cxl_rdma_sidecar_admission_state_init(&state, 8, 2 * MiB);
+
+    cxl_rdma_sidecar_admission_note_completion(&state, 2 * MiB, 1000000);
+    cxl_rdma_sidecar_admission_note_completion(&state, 2 * MiB, 1000000);
+    snap = cxl_rdma_sidecar_admission_snapshot(
+        &state, true, true, false, false, false, 0, 1);
+
+    g_assert_cmpuint(snap.bdp_estimate_regions, ==, 1);
+    g_assert_cmpuint(snap.dynamic_window_regions, ==, 1);
+    g_assert_false(snap.accept_rdma);
+    g_assert_false(cxl_rdma_sidecar_admission_try_reserve(
+        &state, true, true, false, false, false, 0, 1, &reservation, &snap));
+    g_assert_false(reservation.valid);
+    g_assert_cmpuint(state.overflow_cxl_regions, ==, 1);
 }
 
 static void test_rdma_admission_bdp_clamps_without_u32_wrap(void)
@@ -715,13 +738,17 @@ static void test_rdma_admission_goodput_regression_halves_window(void)
     cxl_rdma_sidecar_admission_note_completion(&state, 4 * MiB, 1000000);
     snap = cxl_rdma_sidecar_admission_snapshot(
         &state, true, true, false, false, false, 0, 0);
-    g_assert_cmpuint(snap.dynamic_window_regions, ==, 4);
+    g_assert_cmpuint(state.dynamic_window_regions, ==, 4);
+    g_assert_cmpuint(snap.dynamic_window_regions, <=,
+                     snap.bdp_estimate_regions);
 
     cxl_rdma_sidecar_admission_note_completion(&state, 1 * MiB, 4000000);
     snap = cxl_rdma_sidecar_admission_snapshot(
         &state, true, true, false, false, false, 0, 0);
 
-    g_assert_cmpuint(snap.dynamic_window_regions, ==, 2);
+    g_assert_cmpuint(state.dynamic_window_regions, ==, 2);
+    g_assert_cmpuint(snap.dynamic_window_regions, <=,
+                     snap.bdp_estimate_regions);
     g_assert_cmpuint(state.goodput_drop_events, ==, 1);
 }
 
@@ -1225,6 +1252,8 @@ int main(int argc, char **argv)
                     test_rdma_admission_outstanding_wrap_rejects_rdma);
     g_test_add_func("/cxl/region/rdma-admission-completion-grows-window",
                     test_rdma_admission_completion_grows_window_and_bdp);
+    g_test_add_func("/cxl/region/rdma-admission-bdp-caps-effective-window",
+                    test_rdma_admission_bdp_caps_effective_window);
     g_test_add_func("/cxl/region/rdma-admission-bdp-clamps-without-u32-wrap",
                     test_rdma_admission_bdp_clamps_without_u32_wrap);
     g_test_add_func("/cxl/region/rdma-admission-bdp-ceil-division-no-wrap",

@@ -99,6 +99,7 @@ CXLHybridRDMASidecarAdmissionSnapshot cxl_rdma_sidecar_admission_snapshot(
     CXLHybridRDMASidecarAdmissionSnapshot snap = { 0 };
     uint64_t outstanding_regions;
     uint32_t window;
+    uint32_t bdp_regions;
 
     if (!state || !state->sq_capacity_regions) {
         return snap;
@@ -108,6 +109,10 @@ CXLHybridRDMASidecarAdmissionSnapshot cxl_rdma_sidecar_admission_snapshot(
                           state->reserved_regions;
     window = cxl_rdma_admission_clamp_window(
         state->dynamic_window_regions, state->sq_capacity_regions);
+    bdp_regions = cxl_rdma_sidecar_admission_bdp_regions(state);
+    if (bdp_regions) {
+        window = MIN(window, bdp_regions);
+    }
     snap.dynamic_window_regions = window;
     snap.sq_capacity_regions = state->sq_capacity_regions;
     snap.queue_len = queue_len;
@@ -116,8 +121,7 @@ CXLHybridRDMASidecarAdmissionSnapshot cxl_rdma_sidecar_admission_snapshot(
     snap.outstanding_regions = MIN(outstanding_regions, (uint64_t)UINT32_MAX);
     snap.goodput_ewma_bytes_per_ns = state->goodput_ewma_bytes_per_ns;
     snap.completion_latency_ewma_ns = state->completion_latency_ewma_ns;
-    snap.bdp_estimate_regions =
-        cxl_rdma_sidecar_admission_bdp_regions(state);
+    snap.bdp_estimate_regions = bdp_regions;
     snap.accepted_regions = state->accepted_regions;
     snap.overflow_cxl_regions = state->overflow_cxl_regions;
     snap.admission_closed_events = state->admission_closed_events;

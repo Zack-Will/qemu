@@ -367,6 +367,21 @@ RDMA_SIDECAR_METRICS = [
     "rdma_sidecar_admission_goodput_drop_events",
 ]
 
+RDMA_SIDECAR_LATEST_METRICS = {
+    "rdma_sidecar_dynamic_window_regions",
+    "rdma_sidecar_sq_capacity_regions",
+    "rdma_sidecar_queue_len",
+    "rdma_sidecar_inflight_len",
+    "rdma_sidecar_goodput_ewma_bytes_per_ns",
+    "rdma_sidecar_completion_latency_ewma_ns",
+    "rdma_sidecar_bdp_estimate_regions",
+}
+
+RDMA_SIDECAR_COUNTER_METRICS = [
+    key for key in RDMA_SIDECAR_METRICS
+    if key not in RDMA_SIDECAR_LATEST_METRICS
+]
+
 
 def mib_s(bytes_value: int, time_ns: int) -> float:
     return 0.0 if time_ns <= 0 else (
@@ -2660,12 +2675,21 @@ def extract_summary(samples):
             page_state_cas_failures,
             src_xcxl.get("page-state-cas-failures", 0),
             dst_xcxl.get("page-state-cas-failures", 0))
-        for key in RDMA_SIDECAR_METRICS:
+        for key in RDMA_SIDECAR_COUNTER_METRICS:
             qmp_key = key.replace("_", "-")
             rdma_sidecar_metrics[key] = max(
                 rdma_sidecar_metrics[key],
                 src_xcxl.get(qmp_key, 0),
                 dst_xcxl.get(qmp_key, 0))
+        for key in RDMA_SIDECAR_LATEST_METRICS:
+            qmp_key = key.replace("_", "-")
+            values = []
+            if qmp_key in src_xcxl:
+                values.append(src_xcxl[qmp_key])
+            if qmp_key in dst_xcxl:
+                values.append(dst_xcxl[qmp_key])
+            if values:
+                rdma_sidecar_metrics[key] = max(values)
         rdma_ready_regions = max(
             rdma_ready_regions,
             src_xcxl.get("rdma-ready-regions", 0),
