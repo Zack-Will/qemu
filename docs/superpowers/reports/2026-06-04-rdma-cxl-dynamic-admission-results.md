@@ -44,6 +44,22 @@ cap and did not pass a fixed RDMA coverage parameter.
 | /tmp/cxl-hybrid-warm-exp-hfeajir2/remap_xlarge_random_rw/hybrid_parallel_rdma_cxl-balanced-run01 | completed | 67 | 8 | 1 | 2 | 9 | 28 | 1.6435218267284948 | 1290575 | 35045376 | 8388608 |
 | /tmp/cxl-hybrid-warm-exp-rvc16ak1/remap_xlarge_random_rw/hybrid_parallel_rdma_cxl-balanced-run01 | completed | 62 | 8 | 1 | 2 | 7 | 30 | 1.4829019524823313 | 1468869 | 34467840 | 12582912 |
 
+## Lane Time Breakdown
+
+For the post-BDP-cap validation run:
+
+| precopy wall ms | RDMA completed ms | CXL worker ms | RDMA MiB | CXL MiB | RDMA byte share | CXL byte share | RDMA MiB/s | CXL MiB/s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10.589699 | 9.482069 | 5.277465 | 12.00 | 32.87 | 26.7% | 73.3% | 1265.5 | 6228.6 |
+
+The RDMA and CXL lane times are cumulative lane work counters, so they overlap
+inside the precopy wall-clock window and should not be summed. The sample shows
+that both lanes are active, but not evenly balanced: CXL carries most bytes and
+RDMA remains a constrained fast lane. The final effective RDMA window was 1
+region, with BDP estimated at 2 regions and 4 goodput-drop events, so the
+controller kept admission conservative and overflowed 30 candidate regions to
+CXL.
+
 ## Interpretation
 
 RDMA admission is valid for this sample only if the run completed,
