@@ -177,6 +177,7 @@ typedef struct CXLHybridRemapSpan {
 typedef struct CXLHybridTransferQueue {
     QemuMutex lock;
     GQueue classes[CXL_HYBRID_TRANSFER_CLASS_COUNT];
+    uint64_t pending_pages[CXL_HYBRID_TRANSFER_CLASS_COUNT];
     bool lock_ready;
 } CXLHybridTransferQueue;
 
@@ -538,8 +539,18 @@ uint32_t cxl_hybrid_transfer_queue_pop_cxl_batch(
 bool cxl_hybrid_transfer_queue_pop_rdma(CXLHybridTransferQueue *queue,
                                         CXLHybridPageDescriptor *desc,
                                         CXLHybridTransferClass *klass);
+uint64_t cxl_hybrid_transfer_queue_pending_pages(
+    CXLHybridTransferQueue *queue,
+    CXLHybridTransferClass klass);
+uint64_t cxl_hybrid_transfer_queue_cxl_pending_pages(
+    CXLHybridTransferQueue *queue);
 uint64_t cxl_hybrid_transfer_queue_depth(CXLHybridTransferQueue *queue,
                                          CXLHybridTransferClass klass);
+bool cxl_hybrid_should_prioritize_cxl(uint64_t threshold_bytes,
+                                      uint64_t pending_bytes);
+uint64_t cxl_hybrid_ctrl_cxl_queue_pending_bytes(void);
+bool cxl_hybrid_ctrl_should_prioritize_cxl(uint64_t *threshold_bytesp,
+                                           uint64_t *pending_bytesp);
 void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,
                                                uint64_t total_regions);
 void cxl_hybrid_dst_region_state_destroy_for_test(

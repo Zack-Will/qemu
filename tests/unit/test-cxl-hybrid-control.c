@@ -2190,6 +2190,78 @@ static void test_transfer_queue_preserves_cxl_claim(void)
     cxl_hybrid_transfer_queue_destroy_for_test(&queue);
 }
 
+static void test_transfer_queue_cxl_pending_pages_ignores_rdma(void)
+{
+    CXLHybridTransferQueue queue;
+
+    cxl_hybrid_transfer_queue_init_for_test(&queue);
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_HIGH,
+        &(CXLHybridPageDescriptor) { .page_index = 1, .nr_pages = 1 });
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_LOW,
+        &(CXLHybridPageDescriptor) { .page_index = 2, .nr_pages = 3 });
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_RDMA_BULK,
+        &(CXLHybridPageDescriptor) { .page_index = 5, .nr_pages = 8 });
+
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_cxl_pending_pages(&queue),
+                     ==, 4);
+
+    cxl_hybrid_transfer_queue_destroy_for_test(&queue);
+}
+
+static void test_transfer_queue_pending_pages_tracks_push_and_pop(void)
+{
+    CXLHybridTransferQueue queue;
+    CXLHybridPageDescriptor out[2] = { 0 };
+    CXLHybridTransferClass klass = CXL_HYBRID_TRANSFER_CLASS_COUNT;
+
+    cxl_hybrid_transfer_queue_init_for_test(&queue);
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_LOW,
+        &(CXLHybridPageDescriptor) {
+            .block_offset = 10 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .page_index = 10,
+            .cxl_offset = 110 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .generation = 3,
+            .nr_pages = 1,
+        });
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_CXL_LOW,
+        &(CXLHybridPageDescriptor) {
+            .block_offset = 11 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .page_index = 11,
+            .cxl_offset = 111 * CXL_HYBRID_TEST_PAGE_SIZE,
+            .generation = 3,
+            .nr_pages = 1,
+        });
+    cxl_hybrid_transfer_queue_push(&queue, CXL_HYBRID_TRANSFER_RDMA_BULK,
+        &(CXLHybridPageDescriptor) { .page_index = 20, .nr_pages = 4 });
+
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_pending_pages(
+                         &queue, CXL_HYBRID_TRANSFER_CXL_LOW), ==, 2);
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_pending_pages(
+                         &queue, CXL_HYBRID_TRANSFER_RDMA_BULK), ==, 4);
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_cxl_pending_pages(&queue),
+                     ==, 2);
+
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_pop_cxl_batch(
+                         &queue, out, G_N_ELEMENTS(out), &klass), ==, 2);
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_pending_pages(
+                         &queue, CXL_HYBRID_TRANSFER_CXL_LOW), ==, 0);
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_pending_pages(
+                         &queue, CXL_HYBRID_TRANSFER_RDMA_BULK), ==, 4);
+    g_assert_cmpuint(cxl_hybrid_transfer_queue_cxl_pending_pages(&queue),
+                     ==, 0);
+
+    cxl_hybrid_transfer_queue_destroy_for_test(&queue);
+}
+
+static void test_cxl_priority_policy_requires_low_watermark(void)
+{
+    g_assert_false(cxl_hybrid_should_prioritize_cxl(0, 0));
+    g_assert_true(cxl_hybrid_should_prioritize_cxl(64 * KiB, 0));
+    g_assert_true(cxl_hybrid_should_prioritize_cxl(64 * KiB, 60 * KiB));
+    g_assert_false(cxl_hybrid_should_prioritize_cxl(64 * KiB, 64 * KiB));
+    g_assert_false(cxl_hybrid_should_prioritize_cxl(64 * KiB, 128 * KiB));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -2375,5 +2447,11 @@ int main(int argc, char **argv)
                     test_transfer_queue_push_batch_preserves_cxl_order);
     g_test_add_func("/cxl-hybrid-control/transfer-queue-preserves-cxl-claim",
                     test_transfer_queue_preserves_cxl_claim);
+    g_test_add_func("/cxl-hybrid-control/transfer-queue-cxl-pending-pages-ignores-rdma",
+                    test_transfer_queue_cxl_pending_pages_ignores_rdma);
+    g_test_add_func("/cxl-hybrid-control/transfer-queue-pending-pages-tracks-push-and-pop",
+                    test_transfer_queue_pending_pages_tracks_push_and_pop);
+    g_test_add_func("/cxl-hybrid-control/cxl-priority-policy-requires-low-watermark",
+                    test_cxl_priority_policy_requires_low_watermark);
     return g_test_run();
 }

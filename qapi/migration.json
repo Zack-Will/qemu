@@ -2132,7 +2132,8 @@
 #     @x-cxl-rdma-sidecar-max-inflight-regions,
 #     @x-cxl-rdma-sidecar-region-bytes,
 #     @x-cxl-rdma-sidecar-postcopy-dirty,
-#     @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes, and
+#     @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes,
+#     @x-cxl-rdma-cxl-priority-threshold-bytes, and
 #     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
@@ -2205,6 +2206,8 @@
            { 'name': 'x-cxl-rdma-sidecar-postcopy-dirty',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-rdma-sidecar-postcopy-dirty-min-bytes',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-cxl-priority-threshold-bytes',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-fault-resolve-mode',
              'features': [ 'unstable' ] },
@@ -2491,6 +2494,13 @@
 #     dirty span size, in bytes, accepted for RDMA sidecar transfer.
 #     Default is 64 KiB.  (Since 11.0)
 #
+# @x-cxl-rdma-cxl-priority-threshold-bytes: CXL queue low-watermark
+#     threshold, in bytes.  When nonzero and the pending CXL transfer
+#     queue bytes are below this value, CXL/RDMA hybrid migration
+#     prefers the CXL lane before RDMA for precopy bulk and postcopy
+#     dirty dispatch.  Default is 0, which disables this priority
+#     override.  (Since 11.0)
+#
 # @x-cxl-fault-resolve-mode: Experimental destination fault
 #     resolution policy for CXL hybrid postcopy.  (Since 11.0)
 #
@@ -2517,7 +2527,8 @@
 #     @x-cxl-rdma-sidecar-max-inflight-regions,
 #     @x-cxl-rdma-sidecar-region-bytes,
 #     @x-cxl-rdma-sidecar-postcopy-dirty,
-#     @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes, and
+#     @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes,
+#     @x-cxl-rdma-cxl-priority-threshold-bytes, and
 #     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
@@ -2603,6 +2614,8 @@
             '*x-cxl-rdma-sidecar-postcopy-dirty': {
                 'type': 'bool', 'features': [ 'unstable' ] },
             '*x-cxl-rdma-sidecar-postcopy-dirty-min-bytes': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-cxl-priority-threshold-bytes': {
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-fault-resolve-mode': {
                 'type': 'CXLHybridFaultResolveMode',

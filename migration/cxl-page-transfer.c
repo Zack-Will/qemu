@@ -96,6 +96,7 @@ void cxl_hybrid_transfer_queue_init_for_test(CXLHybridTransferQueue *queue)
     queue->lock_ready = true;
     for (i = 0; i < CXL_HYBRID_TRANSFER_CLASS_COUNT; i++) {
         g_queue_init(&queue->classes[i]);
+        queue->pending_pages[i] = 0;
     }
 }
 
@@ -108,9 +109,40 @@ void cxl_hybrid_transfer_queue_destroy_for_test(CXLHybridTransferQueue *queue)
     }
     for (i = 0; i < CXL_HYBRID_TRANSFER_CLASS_COUNT; i++) {
         g_queue_clear_full(&queue->classes[i], g_free);
+        queue->pending_pages[i] = 0;
     }
     qemu_mutex_destroy(&queue->lock);
     queue->lock_ready = false;
+}
+
+static uint64_t cxl_hybrid_transfer_desc_pages(
+    const CXLHybridPageDescriptor *desc)
+{
+    return desc && desc->nr_pages ? desc->nr_pages : 1;
+}
+
+static void cxl_hybrid_transfer_queue_add_pending_pages_locked(
+    CXLHybridTransferQueue *queue,
+    CXLHybridTransferClass klass,
+    uint64_t pages)
+{
+    if (pages > UINT64_MAX - queue->pending_pages[klass]) {
+        queue->pending_pages[klass] = UINT64_MAX;
+        return;
+    }
+    queue->pending_pages[klass] += pages;
+}
+
+static void cxl_hybrid_transfer_queue_sub_pending_pages_locked(
+    CXLHybridTransferQueue *queue,
+    CXLHybridTransferClass klass,
+    uint64_t pages)
+{
+    if (pages >= queue->pending_pages[klass]) {
+        queue->pending_pages[klass] = 0;
+        return;
+    }
+    queue->pending_pages[klass] -= pages;
 }
 
 void cxl_hybrid_transfer_queue_push(CXLHybridTransferQueue *queue,
@@ -142,6 +174,8 @@ uint32_t cxl_hybrid_transfer_queue_push_batch(
     qemu_mutex_lock(&queue->lock);
     for (uint32_t i = 0; i < count; i++) {
         g_queue_push_tail(&queue->classes[klass], copies[i]);
+        cxl_hybrid_transfer_queue_add_pending_pages_locked(
+            queue, klass, cxl_hybrid_transfer_desc_pages(copies[i]));
     }
     qemu_mutex_unlock(&queue->lock);
 
@@ -170,6 +204,8 @@ bool cxl_hybrid_transfer_queue_pop(CXLHybridTransferQueue *queue,
         copy = g_queue_pop_head(&queue->classes[order[i]]);
         if (copy) {
             *desc = *copy;
+            cxl_hybrid_transfer_queue_sub_pending_pages_locked(
+                queue, order[i], cxl_hybrid_transfer_desc_pages(copy));
             g_free(copy);
             qemu_mutex_unlock(&queue->lock);
             return true;
@@ -200,6 +236,8 @@ static bool cxl_hybrid_transfer_queue_pop_ordered(
             if (klass) {
                 *klass = order[i];
             }
+            cxl_hybrid_transfer_queue_sub_pending_pages_locked(
+                queue, order[i], cxl_hybrid_transfer_desc_pages(copy));
             g_free(copy);
             qemu_mutex_unlock(&queue->lock);
             return true;
@@ -270,6 +308,8 @@ uint32_t cxl_hybrid_transfer_queue_pop_cxl_batch(
     copy = g_queue_pop_head(&queue->classes[selected]);
     assert(copy);
     descs[count++] = *copy;
+    cxl_hybrid_transfer_queue_sub_pending_pages_locked(
+        queue, selected, cxl_hybrid_transfer_desc_pages(copy));
     g_free(copy);
 
     while (count < max_descs) {
@@ -281,6 +321,8 @@ uint32_t cxl_hybrid_transfer_queue_pop_cxl_batch(
         copy = g_queue_pop_head(&queue->classes[selected]);
         assert(copy);
         descs[count++] = *copy;
+        cxl_hybrid_transfer_queue_sub_pending_pages_locked(
+            queue, selected, cxl_hybrid_transfer_desc_pages(copy));
         g_free(copy);
     }
 
@@ -302,6 +344,49 @@ bool cxl_hybrid_transfer_queue_pop_rdma(CXLHybridTransferQueue *queue,
 
     return cxl_hybrid_transfer_queue_pop_ordered(
         queue, order, G_N_ELEMENTS(order), desc, klass);
+}
+
+uint64_t cxl_hybrid_transfer_queue_pending_pages(
+    CXLHybridTransferQueue *queue,
+    CXLHybridTransferClass klass)
+{
+    uint64_t pages;
+
+    if (!queue || !queue->lock_ready || (int)klass < 0 ||
+        klass >= CXL_HYBRID_TRANSFER_CLASS_COUNT) {
+        return 0;
+    }
+
+    qemu_mutex_lock(&queue->lock);
+    pages = queue->pending_pages[klass];
+    qemu_mutex_unlock(&queue->lock);
+    return pages;
+}
+
+uint64_t cxl_hybrid_transfer_queue_cxl_pending_pages(
+    CXLHybridTransferQueue *queue)
+{
+    uint64_t high;
+    uint64_t low;
+
+    if (!queue || !queue->lock_ready) {
+        return 0;
+    }
+
+    qemu_mutex_lock(&queue->lock);
+    high = queue->pending_pages[CXL_HYBRID_TRANSFER_CXL_HIGH];
+    low = queue->pending_pages[CXL_HYBRID_TRANSFER_CXL_LOW];
+    qemu_mutex_unlock(&queue->lock);
+    if (low > UINT64_MAX - high) {
+        return UINT64_MAX;
+    }
+    return high + low;
+}
+
+bool cxl_hybrid_should_prioritize_cxl(uint64_t threshold_bytes,
+                                      uint64_t pending_bytes)
+{
+    return threshold_bytes > 0 && pending_bytes < threshold_bytes;
 }
 
 bool cxl_hybrid_rdma_descriptor_page_claimed(

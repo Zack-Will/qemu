@@ -115,6 +115,7 @@ uint32_t migrate_cxl_rdma_sidecar_max_inflight_regions(void);
 uint64_t migrate_cxl_rdma_sidecar_region_bytes(void);
 bool migrate_cxl_rdma_sidecar_postcopy_dirty(void);
 uint64_t migrate_cxl_rdma_sidecar_postcopy_dirty_min_bytes(void);
+uint64_t migrate_cxl_rdma_cxl_priority_threshold_bytes(void);
 CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void);
 bool migrate_cxl_fault_resolve_copy(void);
 bool migrate_cxl_fault_resolve_region_remap(void);

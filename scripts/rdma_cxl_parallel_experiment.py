@@ -73,6 +73,7 @@ DEBUG_TRACE_EVENTS = MINIMAL_TRACE_EVENTS + (
     "cxl_hybrid_publish_wait_begin",
     "cxl_hybrid_publish_wait_complete",
     "cxl_hybrid_region_publish_complete",
+    "cxl_hybrid_rdma_cxl_priority",
     "cxl_hybrid_cxl_worker_enqueue",
     "cxl_hybrid_cxl_worker_complete",
     "cxl_hybrid_ram_stream_publish_span",
@@ -112,11 +113,23 @@ SUMMARY_FIELDS = [
     "cxl_worker_bytes",
     "cxl_worker_time_ns",
     "cxl_worker_precopy_bytes",
+    "cxl_worker_precopy_time_ns",
     "cxl_worker_postcopy_bytes",
+    "cxl_worker_postcopy_time_ns",
     "rdma_completed_bytes",
     "rdma_completed_time_ns",
     "rdma_precopy_completed_bytes",
+    "rdma_precopy_completed_time_ns",
+    "rdma_precopy_active_time_ns",
+    "rdma_precopy_transport_completed_time_ns",
+    "rdma_precopy_transport_active_time_ns",
+    "rdma_precopy_publish_time_ns",
     "rdma_postcopy_dirty_completed_bytes",
+    "rdma_postcopy_dirty_completed_time_ns",
+    "rdma_postcopy_dirty_active_time_ns",
+    "rdma_postcopy_dirty_transport_completed_time_ns",
+    "rdma_postcopy_dirty_transport_active_time_ns",
+    "rdma_postcopy_dirty_publish_time_ns",
     "rdma_postcopy_dirty_completed_spans",
     "rdma_postcopy_dirty_stale_pages",
     "rdma_dynamic_window_regions",
@@ -227,6 +240,8 @@ def parse_args(argv=None):
     parser.add_argument("--rdma-pin-all", action="store_true")
     parser.add_argument("--x-cxl-rdma-sidecar-max-inflight-regions",
                         type=non_negative_int, default=0)
+    parser.add_argument("--x-cxl-rdma-cxl-priority-threshold-bytes",
+                        type=non_negative_int, default=0)
     dirty = parser.add_mutually_exclusive_group()
     dirty.add_argument("--postcopy-dirty-rdma",
                        dest="postcopy_dirty_rdma",
@@ -279,6 +294,8 @@ def build_migration_parameters(args, cxl_path, run_index=0):
         "x-cxl-rdma-sidecar-postcopy-dirty": args.postcopy_dirty_rdma,
         "x-cxl-rdma-sidecar-postcopy-dirty-min-bytes":
             args.postcopy_dirty_rdma_min_bytes,
+        "x-cxl-rdma-cxl-priority-threshold-bytes":
+            args.x_cxl_rdma_cxl_priority_threshold_bytes,
     }
     return params
 
@@ -573,16 +590,43 @@ def extract_summary(samples, run_dir, mode, pressure, run_index,
             samples, "page-state-cxl-worker-time-ns"),
         "cxl_worker_precopy_bytes": xcxl_max(
             samples, "page-state-cxl-worker-precopy-bytes"),
+        "cxl_worker_precopy_time_ns": xcxl_max(
+            samples, "page-state-cxl-worker-precopy-time-ns"),
         "cxl_worker_postcopy_bytes": xcxl_max(
             samples, "page-state-cxl-worker-postcopy-bytes"),
+        "cxl_worker_postcopy_time_ns": xcxl_max(
+            samples, "page-state-cxl-worker-postcopy-time-ns"),
         "rdma_completed_bytes": xcxl_max(
             samples, "page-state-rdma-completed-bytes"),
         "rdma_completed_time_ns": xcxl_max(
             samples, "page-state-rdma-completed-time-ns"),
         "rdma_precopy_completed_bytes": xcxl_max(
             samples, "page-state-rdma-precopy-completed-bytes"),
+        "rdma_precopy_completed_time_ns": xcxl_max(
+            samples, "page-state-rdma-precopy-completed-time-ns"),
+        "rdma_precopy_active_time_ns": xcxl_max(
+            samples, "page-state-rdma-precopy-active-time-ns"),
+        "rdma_precopy_transport_completed_time_ns": xcxl_max(
+            samples,
+            "page-state-rdma-precopy-transport-completed-time-ns"),
+        "rdma_precopy_transport_active_time_ns": xcxl_max(
+            samples, "page-state-rdma-precopy-transport-active-time-ns"),
+        "rdma_precopy_publish_time_ns": xcxl_max(
+            samples, "page-state-rdma-precopy-publish-time-ns"),
         "rdma_postcopy_dirty_completed_bytes":
             sidecar_postcopy_bytes or page_state_postcopy_bytes,
+        "rdma_postcopy_dirty_completed_time_ns": xcxl_max(
+            samples, "page-state-rdma-postcopy-dirty-completed-time-ns"),
+        "rdma_postcopy_dirty_active_time_ns": xcxl_max(
+            samples, "page-state-rdma-postcopy-dirty-active-time-ns"),
+        "rdma_postcopy_dirty_transport_completed_time_ns": xcxl_max(
+            samples,
+            "page-state-rdma-postcopy-dirty-transport-completed-time-ns"),
+        "rdma_postcopy_dirty_transport_active_time_ns": xcxl_max(
+            samples,
+            "page-state-rdma-postcopy-dirty-transport-active-time-ns"),
+        "rdma_postcopy_dirty_publish_time_ns": xcxl_max(
+            samples, "page-state-rdma-postcopy-dirty-publish-time-ns"),
         "rdma_postcopy_dirty_completed_spans": xcxl_max(
             samples, "rdma-sidecar-postcopy-dirty-completed-spans"),
         "rdma_postcopy_dirty_stale_pages": xcxl_max(

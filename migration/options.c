@@ -94,6 +94,7 @@
 #define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_REGION_BYTES 0
 #define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY false
 #define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY_MIN_BYTES (64 * 1024)
+#define DEFAULT_MIGRATE_X_CXL_RDMA_CXL_PRIORITY_THRESHOLD_BYTES 0
 #define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
     CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP
 
@@ -282,6 +283,10 @@ const Property migration_properties[] = {
                       MigrationState,
                       parameters.x_cxl_rdma_sidecar_postcopy_dirty_min_bytes,
                       DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY_MIN_BYTES),
+    DEFINE_PROP_SIZE("x-cxl-rdma-cxl-priority-threshold-bytes",
+                      MigrationState,
+                      parameters.x_cxl_rdma_cxl_priority_threshold_bytes,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_CXL_PRIORITY_THRESHOLD_BYTES),
     DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE("x-cxl-fault-resolve-mode",
                       MigrationState,
                       parameters.x_cxl_fault_resolve_mode,
@@ -1190,6 +1195,13 @@ uint64_t migrate_cxl_rdma_sidecar_postcopy_dirty_min_bytes(void)
     return s->parameters.x_cxl_rdma_sidecar_postcopy_dirty_min_bytes;
 }
 
+uint64_t migrate_cxl_rdma_cxl_priority_threshold_bytes(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_cxl_priority_threshold_bytes;
+}
+
 CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1437,6 +1449,7 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_rdma_sidecar_region_bytes,
         &p->has_x_cxl_rdma_sidecar_postcopy_dirty,
         &p->has_x_cxl_rdma_sidecar_postcopy_dirty_min_bytes,
+        &p->has_x_cxl_rdma_cxl_priority_threshold_bytes,
         &p->has_x_cxl_fault_resolve_mode,
         &p->has_cpr_exec_command,
     };
@@ -1489,6 +1502,8 @@ void migrate_params_init(MigrationParameters *params)
         DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY;
     params->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes =
         DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY_MIN_BYTES;
+    params->x_cxl_rdma_cxl_priority_threshold_bytes =
+        DEFAULT_MIGRATE_X_CXL_RDMA_CXL_PRIORITY_THRESHOLD_BYTES;
     params->x_cxl_fault_resolve_mode =
         DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
     migrate_mark_all_params_present(params);
@@ -1959,6 +1974,10 @@ static void migrate_params_test_apply(MigrationParameters *params,
         dest->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes =
             params->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes;
     }
+    if (params->has_x_cxl_rdma_cxl_priority_threshold_bytes) {
+        dest->x_cxl_rdma_cxl_priority_threshold_bytes =
+            params->x_cxl_rdma_cxl_priority_threshold_bytes;
+    }
     if (params->has_x_cxl_fault_resolve_mode) {
         dest->x_cxl_fault_resolve_mode = params->x_cxl_fault_resolve_mode;
     }
@@ -2185,6 +2204,10 @@ static void migrate_params_apply(MigrationParameters *params)
     if (params->has_x_cxl_rdma_sidecar_postcopy_dirty_min_bytes) {
         s->parameters.x_cxl_rdma_sidecar_postcopy_dirty_min_bytes =
             params->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes;
+    }
+    if (params->has_x_cxl_rdma_cxl_priority_threshold_bytes) {
+        s->parameters.x_cxl_rdma_cxl_priority_threshold_bytes =
+            params->x_cxl_rdma_cxl_priority_threshold_bytes;
     }
     if (params->has_x_cxl_fault_resolve_mode) {
         s->parameters.x_cxl_fault_resolve_mode =

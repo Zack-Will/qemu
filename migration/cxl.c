@@ -3510,7 +3510,17 @@ static int cxl_hybrid_try_send_postcopy_rdma_span_from_block(
 {
     CXLHybridRDMAPostcopyDirtyAdmissionReservation reservation = { 0 };
     CXLHybridRDMABulkClaim claim = { 0 };
+    uint64_t cxl_priority_threshold;
+    uint64_t cxl_pending_bytes;
     int ret;
+
+    if (cxl_hybrid_ctrl_should_prioritize_cxl(&cxl_priority_threshold,
+                                              &cxl_pending_bytes)) {
+        trace_cxl_hybrid_rdma_cxl_priority("postcopy-dirty", page_idx,
+                                           cxl_pending_bytes,
+                                           cxl_priority_threshold);
+        return 0;
+    }
 
     if (!cxl_hybrid_rdma_postcopy_dirty_span_claim_init(
             &claim, block, block_offset, page_idx, generation)) {

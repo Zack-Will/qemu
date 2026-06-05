@@ -653,6 +653,8 @@ static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,
     ram_addr_t region_len = cxl_hybrid_fault_region_granule();
     ram_addr_t block_offset;
     ram_addr_t region_offset;
+    uint64_t cxl_priority_threshold;
+    uint64_t cxl_pending_bytes;
     unsigned long first_page;
     uint64_t current_page_offset;
     uint32_t claimed_pages;
@@ -670,6 +672,14 @@ static int cxl_hybrid_rdma_enqueue_bulk_region(RAMState *rs,
 
     block_offset = ((ram_addr_t)pss->page) << TARGET_PAGE_BITS;
     region_offset = QEMU_ALIGN_DOWN(block_offset, region_len);
+    if (cxl_hybrid_ctrl_should_prioritize_cxl(&cxl_priority_threshold,
+                                              &cxl_pending_bytes)) {
+        trace_cxl_hybrid_rdma_cxl_priority("precopy", pss->page,
+                                           cxl_pending_bytes,
+                                           cxl_priority_threshold);
+        return 0;
+    }
+
     if (!cxl_rdma_sidecar_try_reserve_bulk_admission(&reservation, NULL)) {
         return 0;
     }

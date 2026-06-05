@@ -515,6 +515,47 @@ static bool cxl_hybrid_ctrl_cxl_queue_empty(CXLHybridControlState *state)
            qatomic_load_acquire(&state->active_cxl_work) == 0;
 }
 
+uint64_t cxl_hybrid_ctrl_cxl_queue_pending_bytes(void)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_source;
+    uint64_t pages;
+
+    if (!state->hdr || !state->transfer_queue.lock_ready) {
+        return 0;
+    }
+
+    pages = cxl_hybrid_transfer_queue_cxl_pending_pages(
+        &state->transfer_queue);
+    if (pages > UINT64_MAX / TARGET_PAGE_SIZE) {
+        return UINT64_MAX;
+    }
+    return pages * TARGET_PAGE_SIZE;
+}
+
+bool cxl_hybrid_ctrl_should_prioritize_cxl(uint64_t *threshold_bytesp,
+                                           uint64_t *pending_bytesp)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_source;
+    uint64_t threshold = migrate_cxl_rdma_cxl_priority_threshold_bytes();
+    uint64_t pending = 0;
+
+    if (threshold_bytesp) {
+        *threshold_bytesp = threshold;
+    }
+    if (pending_bytesp) {
+        *pending_bytesp = 0;
+    }
+    if (!threshold || !state->hdr || !state->transfer_queue.lock_ready) {
+        return false;
+    }
+
+    pending = cxl_hybrid_ctrl_cxl_queue_pending_bytes();
+    if (pending_bytesp) {
+        *pending_bytesp = pending;
+    }
+    return cxl_hybrid_should_prioritize_cxl(threshold, pending);
+}
+
 static bool cxl_hybrid_ctrl_request_path_empty(CXLHybridControlState *state)
 {
     return state->hdr &&

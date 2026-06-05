@@ -517,6 +517,34 @@ static void test_migrate_set_parameters_cxl_rdma_sidecar_resources(void)
     qtest_quit(qts);
 }
 
+static void test_migrate_set_parameters_cxl_rdma_cxl_priority_threshold(void)
+{
+    QTestState *qts;
+    QDict *resp;
+    QDict *ret;
+
+    qts = qtest_init(common_args);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
+                    "  'arguments': {"
+                    "    'x-cxl-rdma-cxl-priority-threshold-bytes': 262144"
+                    "  } }");
+    g_assert_nonnull(resp);
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
+
+    resp = qtest_qmp(qts, "{ 'execute': 'query-migrate-parameters' }");
+    g_assert_nonnull(resp);
+    ret = qdict_get_qdict(resp, "return");
+    g_assert_nonnull(ret);
+    g_assert_cmpint(qdict_get_int(
+                    ret, "x-cxl-rdma-cxl-priority-threshold-bytes"), ==,
+                    262144);
+    qobject_unref(resp);
+
+    qtest_quit(qts);
+}
+
 static void test_migrate_set_parameters_cxl_rdma_sidecar_requires_address(void)
 {
     QTestState *qts;
@@ -703,6 +731,8 @@ int main(int argc, char *argv[])
                    test_migrate_set_parameters_cxl_clean_remap);
     qtest_add_func("qmp/migrate-set-parameters/cxl-rdma-sidecar-resources",
                    test_migrate_set_parameters_cxl_rdma_sidecar_resources);
+    qtest_add_func("qmp/migrate-set-parameters/cxl-rdma-cxl-priority-threshold",
+                   test_migrate_set_parameters_cxl_rdma_cxl_priority_threshold);
     qtest_add_func("qmp/migrate-set-parameters/cxl-rdma-sidecar-address-required",
                    test_migrate_set_parameters_cxl_rdma_sidecar_requires_address);
     qtest_add_func("qmp/query-migrate/cxl-schema-loop-stats",
