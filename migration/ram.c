@@ -746,7 +746,9 @@ void cxl_hybrid_rdma_drop_bulk_claim(const CXLHybridRDMABulkClaim *claim)
     tmp = *claim;
     cxl_hybrid_ctrl_drop_rdma_pages(tmp.page_desc);
     cxl_hybrid_rdma_bulk_claim_release(&tmp);
-    cxl_hybrid_region_drop_rdma(claim->region_index);
+    if (cxl_hybrid_rdma_claim_has_region_ownership(claim)) {
+        cxl_hybrid_region_drop_rdma(claim->region_index);
+    }
 }
 
 void ram_transferred_add(uint64_t bytes)
@@ -3070,6 +3072,7 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     unsigned long start_page = pss->page;
     int res;
     uint64_t op_start_ns = 0;
+    Error *local_err = NULL;
 
     if (migrate_ram_is_ignored(pss->block)) {
         error_report("block %s should not be migrated !", pss->block->idstr);
@@ -3079,6 +3082,22 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss)
     cxl_hybrid_shadow_classify_bulk_page(rs, pss);
     res = cxl_hybrid_rdma_enqueue_bulk_region(rs, pss);
     if (res) {
+        return res;
+    }
+    res = cxl_hybrid_try_send_postcopy_rdma_span_for_ram(
+        pss->block, ((ram_addr_t)pss->page) << TARGET_PAGE_BITS, &local_err);
+    if (res < 0) {
+        if (local_err) {
+            error_report_err(local_err);
+        }
+        return res;
+    }
+    if (res) {
+        for (uint32_t page = 0; page < res; page++) {
+            migration_bitmap_clear_dirty(rs, pss->block, pss->page + page);
+        }
+        pss->page = migration_postcopy_cxl_dirty_rdma_next_ram_stream_page(
+            pss->page, res);
         return res;
     }
     res = cxl_hybrid_cxl_enqueue_bulk_page(rs, pss);

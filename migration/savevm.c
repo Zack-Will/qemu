@@ -2219,6 +2219,30 @@ static void loadvm_postcopy_handle_run_bh(void *opaque)
         trace_vmstate_downtime_checkpoint("dst-postcopy-bh-cache-invalidated");
 
         if (success) {
+            Error *local_err = NULL;
+            int ret;
+
+            ret = cxl_hybrid_postcopy_wake_dst_local_pages(mis, &local_err);
+            if (ret) {
+                MigrationState *s = migrate_get_current();
+
+                loadvm_trace_postcopy_timeline(
+                    mis, "dst-postcopy-bh-dst-local-wake-failed",
+                    UINT64_MAX);
+                if (local_err) {
+                    migrate_error_propagate(s, error_copy(local_err));
+                    error_report_err(local_err);
+                }
+                migrate_set_state(&mis->state, mis->state,
+                                  MIGRATION_STATUS_FAILED);
+                success = false;
+            } else {
+                loadvm_trace_postcopy_timeline(
+                    mis, "dst-postcopy-bh-dst-local-woke", UINT64_MAX);
+            }
+        }
+
+        if (success) {
             vm_start();
             vm_started = true;
             cxl_guest_timeline_mark("dst-started",

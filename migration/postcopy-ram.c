@@ -741,9 +741,19 @@ static int cleanup_range(RAMBlock *rb, void *opaque)
     range_struct.len = length;
 
     if (ioctl(mis->userfault_fd, UFFDIO_UNREGISTER, &range_struct)) {
-        error_report("%s: userfault unregister %s", __func__, strerror(errno));
+        int ret = -errno;
 
-        return -1;
+        /*
+         * CXL MAP_FIXED remaps can leave holes in the original UFFD
+         * registration.  Treat that as cleanup-complete for this range so the
+         * common path still closes the userfault fd below.
+         */
+        if (!migration_postcopy_cleanup_unregister_result_satisfied(
+                ret, migrate_cxl_hybrid())) {
+            error_report("%s: userfault unregister %s",
+                         __func__, strerror(errno));
+            return -1;
+        }
     }
 
     return 0;
@@ -831,7 +841,7 @@ int postcopy_ram_incoming_cleanup(MigrationIncomingState *mis)
 
         if (migrate_cxl_hybrid() &&
             cxl_hybrid_postcopy_install_remaining_pages(
-                mis, postcopy_place_page_allow_existing, &local_err)) {
+                mis, postcopy_place_page_cleanup, &local_err)) {
             error_report_err(local_err);
             return -1;
         }
@@ -1634,16 +1644,25 @@ int postcopy_ram_incoming_setup(MigrationIncomingState *mis)
 
 static int qemu_ufd_copy_ioctl(MigrationIncomingState *mis, void *host_addr,
                                void *from_addr, uint64_t pagesize,
-                               RAMBlock *rb, bool allow_existing)
+                               RAMBlock *rb, bool allow_existing,
+                               bool allow_missing)
 {
     int userfault_fd = mis->userfault_fd;
     int ret;
 
     if (from_addr) {
-        if (allow_existing) {
+        if (allow_existing && allow_missing) {
+            ret = uffd_copy_page_suppress_errnos(userfault_fd, host_addr,
+                                                 from_addr, pagesize, false,
+                                                 EEXIST, ENOENT);
+        } else if (allow_existing) {
             ret = uffd_copy_page_suppress_errno(userfault_fd, host_addr,
                                                 from_addr, pagesize, false,
                                                 EEXIST);
+        } else if (allow_missing) {
+            ret = uffd_copy_page_suppress_errno(userfault_fd, host_addr,
+                                                from_addr, pagesize, false,
+                                                ENOENT);
         } else {
             ret = uffd_copy_page(userfault_fd, host_addr, from_addr, pagesize,
                                  false);
@@ -1847,7 +1866,7 @@ int postcopy_place_page(MigrationIncomingState *mis, void *host, void *from,
      * which would be slightly cheaper, but we'd have to be careful
      * of the order of updating our page state.
      */
-    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb, false);
+    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb, false, false);
     if (e) {
         return e;
     }
@@ -1863,7 +1882,30 @@ int postcopy_place_page_allow_existing(MigrationIncomingState *mis, void *host,
     size_t pagesize = qemu_ram_pagesize(rb);
     int e;
 
-    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb, true);
+    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb, true, false);
+    if (e == -EEXIST) {
+        bool received = false;
+
+        e = postcopy_mark_range_received_and_wake(mis, rb, host, pagesize,
+                                                  host, &received);
+        return e;
+    }
+    if (e) {
+        return e;
+    }
+
+    trace_postcopy_place_page(host);
+    return postcopy_notify_shared_wake(rb,
+                                       qemu_ram_block_host_offset(rb, host));
+}
+
+int postcopy_place_page_cleanup(MigrationIncomingState *mis, void *host,
+                                void *from, RAMBlock *rb)
+{
+    size_t pagesize = qemu_ram_pagesize(rb);
+    int e;
+
+    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb, true, true);
     if (e == -EEXIST) {
         bool received = false;
 
@@ -1895,7 +1937,7 @@ int postcopy_place_page_zero(MigrationIncomingState *mis, void *host,
      */
     if (qemu_ram_is_uf_zeroable(rb)) {
         int e;
-        e = qemu_ufd_copy_ioctl(mis, host, NULL, pagesize, rb, false);
+        e = qemu_ufd_copy_ioctl(mis, host, NULL, pagesize, rb, false, false);
         if (e) {
             return e;
         }
@@ -1954,6 +1996,12 @@ int postcopy_place_page(MigrationIncomingState *mis, void *host, void *from,
 
 int postcopy_place_page_allow_existing(MigrationIncomingState *mis, void *host,
                                        void *from, RAMBlock *rb)
+{
+    g_assert_not_reached();
+}
+
+int postcopy_place_page_cleanup(MigrationIncomingState *mis, void *host,
+                                void *from, RAMBlock *rb)
 {
     g_assert_not_reached();
 }

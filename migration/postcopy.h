@@ -68,7 +68,21 @@ bool migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
     bool hybrid_mode,
     bool rdma_sidecar_enabled,
     MigrationStatus state);
+bool migration_postcopy_cxl_should_try_dirty_rdma_before_ram_stream(
+    bool in_postcopy,
+    bool hybrid_mode,
+    CXLHybridPhase phase,
+    bool postcopy_dirty_rdma_enabled,
+    bool dirty_rdma_candidate);
+unsigned long migration_postcopy_cxl_dirty_rdma_next_ram_stream_page(
+    unsigned long page,
+    uint32_t claimed_pages);
 bool migration_postcopy_uffd_copy_result_satisfied(int ret,
                                                    bool allow_existing);
+bool migration_postcopy_cleanup_unregister_result_satisfied(int ret,
+                                                            bool hybrid_cxl);
+bool migration_postcopy_timeline_marker_skip_guest_write(
+    bool incoming_postcopy,
+    CXLGuestTimelineEvent event);
 
 #endif /* QEMU_MIGRATION_POSTCOPY_H */

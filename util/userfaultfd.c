@@ -252,6 +252,15 @@ int uffd_copy_page_suppress_errno(int uffd_fd, void *dst_addr,
         void *src_addr, uint64_t length, bool dont_wake,
         int suppressed_errno)
 {
+    return uffd_copy_page_suppress_errnos(uffd_fd, dst_addr, src_addr,
+                                          length, dont_wake,
+                                          suppressed_errno, 0);
+}
+
+int uffd_copy_page_suppress_errnos(int uffd_fd, void *dst_addr,
+        void *src_addr, uint64_t length, bool dont_wake,
+        int suppressed_errno1, int suppressed_errno2)
+{
     struct uffdio_copy uffd_copy;
 
     uffd_copy.dst = (uintptr_t) dst_addr;
@@ -261,7 +270,7 @@ int uffd_copy_page_suppress_errno(int uffd_fd, void *dst_addr,
 
     if (ioctl(uffd_fd, UFFDIO_COPY, &uffd_copy)) {
         int e = errno;
-        if (e != suppressed_errno) {
+        if (e != suppressed_errno1 && e != suppressed_errno2) {
             error_report("uffd_copy_page() failed: dst_addr=%p src_addr=%p length=%" PRIu64
                     " mode=%" PRIx64 " errno=%i", dst_addr, src_addr,
                     length, (uint64_t) uffd_copy.mode, e);

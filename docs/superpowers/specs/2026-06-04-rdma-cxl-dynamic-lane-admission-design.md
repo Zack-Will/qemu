@@ -2,10 +2,10 @@
 
 Date: 2026-06-04
 Branch: `rdma-cxl-parallel-hybrid`
-Status: design spec
+Status: implemented for converged experiment cleanup
 
-Supersedes the fixed RDMA/CXL bulk split policy from the earlier
-`max-inflight-regions` plus `max-cover-percent` experiments. It preserves the
+Supersedes and removes the fixed RDMA/CXL bulk split policy from the earlier
+`max-inflight-regions` plus fixed-coverage experiments. It preserves the
 page-state worker architecture from:
 
 - `docs/superpowers/specs/2026-05-30-rdma-cxl-page-state-control-plane-design.md`
@@ -49,15 +49,14 @@ cannot accept the work.
 
 ## Current Problems
 
-Two fixed controls currently drive RDMA scheduling:
+Two fixed controls drove the old RDMA scheduling path:
 
 - `x-cxl-rdma-sidecar-max-inflight-regions`;
 - `x-cxl-rdma-sidecar-max-cover-percent`.
 
-They are used as static policy, while `migration/ram.c` still has hard-coded
-1:1 scheduling decisions for CXL low versus RDMA bulk. The sidecar queue and
-transport in-flight capacity are also initialized from the fixed in-flight
-value.
+The converged cleanup removes the fixed coverage parameter and the modulo
+scheduler. `x-cxl-rdma-sidecar-max-inflight-regions` remains only as an
+automatic transport/resource sizing hint.
 
 This creates three problems:
 
@@ -87,8 +86,8 @@ not perform one admission check per 4 KiB page.
 
 The sidecar owns the dynamic window:
 
-- `sq_capacity_regions`: hard ceiling derived from QP/SQ creation and any
-  configured safety cap;
+- `sq_capacity_regions`: ceiling derived from QP/SQ creation, CQ/device
+  resources, and migration geometry;
 - `window_regions`: current dynamic admission window;
 - `queue_len + inflight_len`: current outstanding RDMA demand;
 - `goodput_ewma_bytes_per_ns`: recent completed RDMA data rate;
@@ -101,15 +100,16 @@ walk RDMA queues, or inspect CQ state.
 ## Window Adjustment
 
 The sidecar updates the window on completion and, optionally, on short idle
-ticks. The controller must first probe RDMA up to the configured SQ safety cap
-before treating CXL as the steady overflow lane. A BDP estimate derived from
+ticks. The controller must probe RDMA in bounded waves up to transport/resource
+capacity before treating CXL as the steady overflow lane. A BDP estimate derived from
 the current window is self-limiting if it is applied too early: a one-region
 window produces one-region goodput, which then keeps the BDP estimate small.
 
 A conservative implementation should therefore use probe-first additive
 increase and multiplicative decrease:
 
-- Start with `window_regions = sq_capacity_regions` as an initial probe window.
+- Start with a bounded initial probe window, then grow additively while
+  transport goodput holds.
 - Until the controller observes a material goodput drop with a material latency
   rise, do not use self-estimated BDP as a hard cap on admission.
 - On completions that improve or maintain goodput without raising completion
@@ -214,19 +214,19 @@ closed.
 
 ## CLI And Compatibility
 
-The fixed policy semantics are deprecated.
+The fixed policy semantics are removed from the converged experiment surface.
 
-- `x-cxl-rdma-sidecar-max-cover-percent` no longer controls lane split.
-- `x-cxl-rdma-sidecar-max-inflight-regions` no longer controls desired
-  in-flight depth.
+- `x-cxl-rdma-sidecar-max-cover-percent` is no longer a QAPI/script
+  parameter.
+- `x-cxl-rdma-sidecar-max-inflight-regions` no longer controls fixed coverage
+  or desired in-flight depth.
 
-For a transition period, `max-inflight-regions` may remain as a hard safety cap
-on SQ/window size. It should be documented and reported as a cap, not a policy.
-`max-cover-percent` should either be ignored with a warning or replaced by a
-dynamic-admission enablement parameter in a later cleanup.
+For compatibility, `max-inflight-regions` may remain accepted as an auto hint
+for older command lines, but it must not cap SQ/window size or total RDMA
+coverage.
 
-The canonical performance command should stop using fixed coverage as an
-experimental explanation once dynamic admission is implemented.
+The canonical performance command uses `scripts/rdma_cxl_parallel_experiment.py`
+with automatic sizing and postcopy dirty RDMA enabled.
 
 ## Failure And Fallback
 
@@ -257,14 +257,14 @@ Unit tests should cover:
 - additive increase grows the dynamic window within SQ cap;
 - multiplicative decrease shrinks the window after goodput/latency regression;
 - RAM scheduler sends overflow to CXL without first claiming RDMA pages;
-- `max-cover-percent` no longer affects scheduler lane choice;
+- fixed coverage strings no longer appear in active migration/QAPI/scripts/tests;
 - zero pages are never admitted to RDMA.
 
 Parser tests should cover all new metrics and grouped summary fields.
 
 Integration experiments should compare:
 
-- fixed historical `8/50` run for reference only;
+- fixed historical runs for reference only;
 - dynamic admission with the current canonical destination-stall command;
 - a forced low SQ cap to prove overflow-to-CXL behavior;
 - a high cap to prove the window grows only while goodput improves.

@@ -2,27 +2,29 @@
 
 Date: 2026-06-04
 
-This document fixes the current performance/stall experiment shape for the
-`rdma-cxl-parallel-hybrid` branch. It supersedes the older ad-hoc command lines
-for new `remap_xlarge_random_rw` destination-stall measurements, but it does not
-rewrite the historical no-brake/source-first results.
+This document fixes the current converged experiment shape for the
+`rdma-cxl-parallel-hybrid` branch. New runs use the simplified RDMA/CXL
+parallel runner and exercise both current lanes: precopy RDMA full-region
+claims with CXL overflow, and postcopy dirty RDMA contiguous spans with CXL
+fallback.
 
 ## Canonical Command
 
 ```bash
 sudo -n env QEMU_CXL_WARM_ALLOW_UNPRIVILEGED=1 \
 /usr/local/bin/numactl --cpunodebind=4-7 --membind=4-7 \
-/usr/bin/python3 scripts/cxl-hybrid-warm-experiment.py \
+/usr/bin/python3 scripts/rdma_cxl_parallel_experiment.py \
   --keep-dir \
   --pressure remap_xlarge_random_rw \
   --mode hybrid_parallel_rdma_cxl \
-  --threshold-profile balanced \
   --repeat 1 \
   --migration-timeout 120 \
   --trace-profile minimal \
-  --x-cxl-rdma-sidecar-max-inflight-regions 8 \
+  --rdma-pin-all \
   --accel kvm \
-  --in-memory-guest-latency
+  --x-cxl-rdma-sidecar-max-inflight-regions 0 \
+  --postcopy-dirty-rdma \
+  --postcopy-dirty-rdma-min-bytes 65536
 ```
 
 Required points:
@@ -32,19 +34,14 @@ Required points:
 - Keep `--accel kvm`; TCG results are not comparable for guest-stall analysis.
 - Use `remap_xlarge_random_rw`.
 - Use `hybrid_parallel_rdma_cxl` only when measuring the current RDMA+CXL path.
-- Use `--threshold-profile balanced`.
-- RDMA sidecar in-flight parameter is a safety cap. Treat
-  `--x-cxl-rdma-sidecar-max-inflight-regions` as a safety cap for the dynamic
-  RDMA admission window, not as a fixed desired depth or target lane ratio.
-- Do not pass `--x-cxl-rdma-sidecar-max-cover-percent`; dynamic admission
-  ignores fixed coverage and sends overflow to CXL.
+- RDMA sidecar in-flight parameter is an auto hint. Treat
+  `--x-cxl-rdma-sidecar-max-inflight-regions=0` as automatic
+  transport/resource sizing.
+- Keep `--postcopy-dirty-rdma` enabled for converged RDMA/CXL samples. Disable
+  it only for an explicit ablation.
 - Use `--trace-profile minimal` for performance runs.
-- Use destination-side `--in-memory-guest-latency`.
-
-Do not add `--in-memory-guest-latency-source-first` for the current
-destination-stall runs. Source-first mode is useful for source/precopy-only
-diagnostics, but it hides the destination-side handoff window that this
-experiment is meant to measure.
+- The simplified runner writes `summary.json` and `summary.csv` in the run
+  directory. Use those files as the primary result surface.
 
 ## Brake Policy
 
@@ -77,29 +74,35 @@ experiment is explicitly about forced no-brake comparability.
 
 ## Success Checks
 
-For each result directory, treat the run as a valid current-profile sample only
-if these fields hold:
+For each result directory, treat the run as a valid converged sample only if
+these fields hold in `summary.json`:
 
 - `final_status=completed`;
-- `dst_status.running=true` and `dst_status.status=running`;
-- `guest_in_memory_latency.valid=true`;
-- `guest_in_memory_latency.dump_source=primary`;
-- `guest_in_memory_latency.dump_error=null`;
-- `guest_in_memory_latency.partial_dump=null`;
-- `guest_in_memory_latency.marker_samples_read > 0`;
-- destination stderr has no cleanup/UFFD failure after migration completion.
+- `dst_running=true` and `dst_status=running`;
+- `rdma_admission_accepted_regions > 0`;
+- `rdma_postcopy_dirty_completed_bytes > 0`;
+- `rdma_postcopy_dirty_stale_pages = 0` for correctness samples;
+- `rdma_admission_overflow_cxl_regions >= 0`;
+- `rdma_postcopy_dirty_overflow_cxl_spans >= 0`;
+- `stderr_error_count = 0`.
 
-If `dump_source=fallback`, the run may still be useful for source-side
-diagnostics, but do not use it for destination-side guest-stall distribution.
+## Postcopy Dirty RDMA Variant
+
+Postcopy dirty RDMA is no longer a separate optional variant for the converged
+profile. It is part of the current RDMA/CXL parallel architecture. The ablation
+command is the canonical command plus `--no-postcopy-dirty-rdma`; compare it
+only against a same-branch run collected with the same trace profile and
+resource hints.
 
 ## Recent Reference Runs
 
 The following runs used the current profile after the destination dump cleanup
 fixes:
 
-After dynamic admission lands, historical `8/50` runs remain useful only as
-fixed-policy baselines; new runs should report dynamic window, SQ cap, goodput
-EWMA, BDP estimate, and CXL overflow counts.
+After dynamic admission and postcopy dirty RDMA converge, historical fixed
+policy runs remain useful only as baselines. New runs should report dynamic
+window, SQ cap, BDP estimate, RDMA accepted/overflow counts, postcopy dirty
+RDMA completed bytes/spans, and CXL fallback counts.
 
 | run directory | status | dump | total ms | setup ms | precopy ms | postcopy ms | corrected stall ms | note |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |

@@ -75,13 +75,12 @@ cxl_hybrid_rdma_bulk_skip(uint64_t region_index, uint64_t page, const char *reas
 cxl_rdma_sidecar_connect_start(const char *host, const char *port) "host=%s port=%s"
 cxl_rdma_sidecar_connect_complete(uint64_t time_ns) "time_ns=%" PRIu64
 cxl_rdma_sidecar_register(uint64_t bytes) "bytes=%" PRIu64
-cxl_rdma_sidecar_schedule(uint64_t region, uint64_t bytes) "region=%" PRIu64 " bytes=%" PRIu64
-cxl_rdma_sidecar_post(uint64_t region, uint64_t local_addr, uint64_t remote_addr, uint64_t bytes) "region=%" PRIu64 " local=0x%" PRIx64 " remote=0x%" PRIx64 " bytes=%" PRIu64
-cxl_rdma_sidecar_complete(uint64_t region, uint64_t bytes) "region=%" PRIu64 " bytes=%" PRIu64
+cxl_rdma_sidecar_schedule(uint64_t claim_id, uint32_t kind, uint64_t region, uint64_t bytes) "claim=%" PRIu64 " kind=%u region=%" PRIu64 " bytes=%" PRIu64
+cxl_rdma_sidecar_post(uint64_t claim_id, uint32_t kind, uint64_t region, uint64_t local_addr, uint64_t remote_addr, uint64_t bytes) "claim=%" PRIu64 " kind=%u region=%" PRIu64 " local=0x%" PRIx64 " remote=0x%" PRIx64 " bytes=%" PRIu64
+cxl_rdma_sidecar_complete(uint64_t claim_id, uint32_t kind, uint64_t region, uint64_t bytes) "claim=%" PRIu64 " kind=%u region=%" PRIu64 " bytes=%" PRIu64
 cxl_rdma_sidecar_stale(uint64_t region, uint64_t bytes, bool cxl_race_lost) "region=%" PRIu64 " bytes=%" PRIu64 " cxl_race_lost=%d"
-cxl_rdma_sidecar_failed(uint64_t region) "region=%" PRIu64
+cxl_rdma_sidecar_failed(uint64_t claim_id, uint32_t kind, uint64_t region) "claim=%" PRIu64 " kind=%u region=%" PRIu64
 cxl_rdma_sidecar_no_candidate(void) ""
-cxl_rdma_sidecar_budget_skip(void) ""
 cxl_hybrid_rdma_ready(uint64_t region_index, uint64_t pages) "region=%" PRIu64 " pages=%" PRIu64
 cxl_hybrid_rdma_invalidate(uint64_t region_index, uint64_t pages) "region=%" PRIu64 " pages=%" PRIu64
 cxl_hybrid_rdma_cxl_republish(uint64_t region_index, uint64_t pages) "region=%" PRIu64 " pages=%" PRIu64

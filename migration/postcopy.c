@@ -122,8 +122,48 @@ bool migration_postcopy_cxl_should_drain_rdma_before_precopy_complete(
            state == MIGRATION_STATUS_ACTIVE;
 }
 
+bool migration_postcopy_cxl_should_try_dirty_rdma_before_ram_stream(
+    bool in_postcopy,
+    bool hybrid_mode,
+    CXLHybridPhase phase,
+    bool postcopy_dirty_rdma_enabled,
+    bool dirty_rdma_candidate)
+{
+    return in_postcopy &&
+           hybrid_mode &&
+           phase == CXL_HYBRID_PHASE_POSTCOPY_WARM &&
+           postcopy_dirty_rdma_enabled &&
+           dirty_rdma_candidate;
+}
+
+unsigned long migration_postcopy_cxl_dirty_rdma_next_ram_stream_page(
+    unsigned long page,
+    uint32_t claimed_pages)
+{
+    if (!claimed_pages) {
+        return page;
+    }
+    if (claimed_pages > ULONG_MAX - page) {
+        return ULONG_MAX;
+    }
+    return page + claimed_pages;
+}
+
 bool migration_postcopy_uffd_copy_result_satisfied(int ret,
                                                    bool allow_existing)
 {
     return ret == 0 || (allow_existing && ret == -EEXIST);
+}
+
+bool migration_postcopy_cleanup_unregister_result_satisfied(int ret,
+                                                            bool hybrid_cxl)
+{
+    return ret == 0 || (hybrid_cxl && ret == -EINVAL);
+}
+
+bool migration_postcopy_timeline_marker_skip_guest_write(
+    bool incoming_postcopy,
+    CXLGuestTimelineEvent event)
+{
+    return incoming_postcopy && event == CXL_GUEST_TIMELINE_EVENT_DST_STARTED;
 }

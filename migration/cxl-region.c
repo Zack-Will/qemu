@@ -75,6 +75,39 @@ uint8_t cxl_hybrid_calculate_source_remap_coverage(uint64_t staged_pages,
     return (remapped_pages * 100) / staged_pages;
 }
 
+bool cxl_hybrid_dst_remap_offset_page_index(uint64_t total_pages,
+                                            uint64_t block_first_page,
+                                            ram_addr_t block_used_length,
+                                            ram_addr_t offset,
+                                            uint64_t target_page_size,
+                                            size_t *page_idxp)
+{
+    uint64_t block_page;
+    uint64_t page_idx;
+
+    if (!page_idxp || !total_pages ||
+        !target_page_size || !is_power_of_2(target_page_size) ||
+        !QEMU_IS_ALIGNED(offset, target_page_size)) {
+        return false;
+    }
+    if (offset > block_used_length ||
+        target_page_size > block_used_length - offset) {
+        return false;
+    }
+
+    block_page = offset / target_page_size;
+    if (block_first_page > UINT64_MAX - block_page) {
+        return false;
+    }
+    page_idx = block_first_page + block_page;
+    if (page_idx >= total_pages || page_idx != (size_t)page_idx) {
+        return false;
+    }
+
+    *page_idxp = page_idx;
+    return true;
+}
+
 CXLHybridSwitchDecision cxl_hybrid_switch_decide(
     const CXLHybridSwitchPolicyInput *input)
 {
@@ -194,6 +227,51 @@ bool cxl_hybrid_warm_page_eligible_for_push(
            (!warm_sent_bmap || !test_bit(page_idx, warm_sent_bmap)) &&
            (!dst_sent_bmap || !test_bit(page_idx, dst_sent_bmap)) &&
            (!cxl_visible_bmap || !test_bit(page_idx, cxl_visible_bmap));
+}
+
+void cxl_hybrid_dirty_requeue_page_for_push(
+    unsigned long *warm_sent_bmap,
+    unsigned long *dst_sent_bmap,
+    unsigned long *cxl_visible_bmap,
+    unsigned long *remaining_bmap,
+    unsigned long *warm_dirty_bmap,
+    size_t page_idx,
+    bool migrated)
+{
+    if (warm_sent_bmap) {
+        clear_bit_atomic(page_idx, warm_sent_bmap);
+    }
+    if (dst_sent_bmap) {
+        clear_bit_atomic(page_idx, dst_sent_bmap);
+    }
+    if (cxl_visible_bmap) {
+        clear_bit_atomic(page_idx, cxl_visible_bmap);
+    }
+    if (warm_dirty_bmap) {
+        set_bit_atomic(page_idx, warm_dirty_bmap);
+    }
+    if (migrated && remaining_bmap) {
+        set_bit_atomic(page_idx, remaining_bmap);
+    }
+}
+
+uint32_t cxl_hybrid_rdma_postcopy_span_max_pages_for_test(
+    uint64_t target_page_size,
+    uint64_t block_used_length,
+    uint64_t block_offset)
+{
+    uint64_t tail;
+    uint64_t bytes;
+
+    if (!target_page_size ||
+        !is_power_of_2(target_page_size) ||
+        block_offset >= block_used_length) {
+        return 0;
+    }
+
+    tail = block_used_length - block_offset;
+    bytes = MIN(tail, (uint64_t)CXL_HYBRID_POSTCOPY_RDMA_MERGE_MAX);
+    return bytes / target_page_size;
 }
 
 bool cxl_hybrid_clean_remap_budget_allows(uint64_t budget_bytes,
@@ -410,35 +488,10 @@ bool cxl_hybrid_rdma_sidecar_try_start_region(
         return false;
     }
 
-    if (state->max_accepted_regions &&
-        state->accepted_regions >= state->max_accepted_regions) {
-        cxl_hybrid_account_rdma_sidecar_budget_skip();
-        return false;
-    }
-
     set_bit(region_index, state->candidate_bmap);
     set_bit(region_index, state->inflight_bmap);
     state->accepted_regions++;
     return true;
-}
-
-void cxl_hybrid_rdma_sidecar_configure_budget_for_test(
-    CXLHybridRDMASidecarState *state,
-    uint64_t max_inflight_regions,
-    uint64_t max_cover_percent)
-{
-    uint64_t cover_regions;
-
-    if (!state) {
-        return;
-    }
-
-    state->max_accepted_regions = 0;
-    if (max_cover_percent && state->total_regions) {
-        cover_regions = DIV_ROUND_UP(state->total_regions * max_cover_percent,
-                                     100);
-        state->max_accepted_regions = cover_regions;
-    }
 }
 
 bool cxl_hybrid_rdma_sidecar_pick_pending_region_for_test(
@@ -780,24 +833,30 @@ void cxl_hybrid_account_rdma_sidecar_registered(uint64_t bytes)
     trace_cxl_rdma_sidecar_register(bytes);
 }
 
-void cxl_hybrid_account_rdma_sidecar_posted(uint64_t region_index,
+void cxl_hybrid_account_rdma_sidecar_posted(uint64_t claim_id,
+                                            uint64_t region_index,
                                             uint64_t bytes)
 {
     qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
                 rdma_sidecar_posted_regions);
     qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
                 rdma_sidecar_posted_bytes, bytes);
-    trace_cxl_rdma_sidecar_schedule(region_index, bytes);
+    trace_cxl_rdma_sidecar_schedule(
+        claim_id, CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION,
+        region_index, bytes);
 }
 
-void cxl_hybrid_account_rdma_sidecar_completed(uint64_t region_index,
+void cxl_hybrid_account_rdma_sidecar_completed(uint64_t claim_id,
+                                               uint64_t region_index,
                                                uint64_t bytes)
 {
     qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
                 rdma_sidecar_completed_regions);
     qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
                 rdma_sidecar_completed_bytes, bytes);
-    trace_cxl_rdma_sidecar_complete(region_index, bytes);
+    trace_cxl_rdma_sidecar_complete(
+        claim_id, CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION,
+        region_index, bytes);
 }
 
 void cxl_hybrid_account_rdma_sidecar_stale(uint64_t region_index,
@@ -812,11 +871,15 @@ void cxl_hybrid_account_rdma_sidecar_stale(uint64_t region_index,
     trace_cxl_rdma_sidecar_stale(region_index, bytes, cxl_race_lost);
 }
 
-void cxl_hybrid_account_rdma_sidecar_failed(uint64_t region_index)
+void cxl_hybrid_account_rdma_sidecar_failed_no_trace(uint64_t region_index)
 {
     qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed_regions);
     qatomic_set(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed, true);
-    trace_cxl_rdma_sidecar_failed(region_index);
+}
+
+void cxl_hybrid_account_rdma_sidecar_failed(uint64_t region_index)
+{
+    cxl_hybrid_account_rdma_sidecar_failed_no_trace(region_index);
 }
 
 void cxl_hybrid_account_rdma_sidecar_no_candidate(void)
@@ -826,20 +889,10 @@ void cxl_hybrid_account_rdma_sidecar_no_candidate(void)
     trace_cxl_rdma_sidecar_no_candidate();
 }
 
-void cxl_hybrid_account_rdma_sidecar_budget_skip(void)
-{
-    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
-                rdma_sidecar_budget_skip_events);
-    trace_cxl_rdma_sidecar_budget_skip();
-}
-
-void cxl_hybrid_set_rdma_sidecar_budget_stats(uint32_t max_inflight,
-                                              uint8_t max_cover_percent)
+void cxl_hybrid_set_rdma_sidecar_inflight_hint(uint32_t max_inflight)
 {
     qatomic_set(&cxl_hybrid_rdma_sidecar_stats.
                 rdma_sidecar_max_inflight_regions, max_inflight);
-    qatomic_set(&cxl_hybrid_rdma_sidecar_stats.
-                rdma_sidecar_max_cover_percent, max_cover_percent);
 }
 
 void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats)
@@ -878,15 +931,9 @@ void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats)
     stats->rdma_sidecar_no_candidate_events =
         qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
                      rdma_sidecar_no_candidate_events);
-    stats->rdma_sidecar_budget_skip_events =
-        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
-                     rdma_sidecar_budget_skip_events);
     stats->rdma_sidecar_max_inflight_regions =
         qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
                      rdma_sidecar_max_inflight_regions);
-    stats->rdma_sidecar_max_cover_percent =
-        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
-                     rdma_sidecar_max_cover_percent);
     stats->rdma_sidecar_failed =
         qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed);
     stats->rdma_ready_regions =
@@ -911,15 +958,6 @@ void cxl_hybrid_rdma_sidecar_global_init(uint64_t total_regions,
     cxl_hybrid_rdma_sidecar_state_init_for_test(&cxl_hybrid_rdma_sidecar_state,
                                                 total_regions,
                                                 pages_per_region);
-}
-
-void cxl_hybrid_rdma_sidecar_global_configure_budget(
-    uint32_t max_inflight,
-    uint8_t max_cover_percent)
-{
-    cxl_hybrid_rdma_sidecar_configure_budget_for_test(
-        &cxl_hybrid_rdma_sidecar_state, max_inflight, max_cover_percent);
-    cxl_hybrid_set_rdma_sidecar_budget_stats(max_inflight, max_cover_percent);
 }
 
 void cxl_hybrid_rdma_sidecar_global_destroy(void)

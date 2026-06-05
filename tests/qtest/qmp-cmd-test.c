@@ -473,7 +473,7 @@ static void qmp_expect_generic_error_desc_and_unref(QDict *resp,
     qobject_unref(resp);
 }
 
-static void test_migrate_set_parameters_cxl_rdma_sidecar_budgets(void)
+static void test_migrate_set_parameters_cxl_rdma_sidecar_resources(void)
 {
     QTestState *qts;
     QDict *resp;
@@ -484,7 +484,6 @@ static void test_migrate_set_parameters_cxl_rdma_sidecar_budgets(void)
     resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
                     "  'arguments': {"
                     "    'x-cxl-rdma-sidecar-max-inflight-regions': 3,"
-                    "    'x-cxl-rdma-sidecar-max-cover-percent': 50,"
                     "    'x-cxl-rdma-sidecar-region-bytes': 1048576 } }");
     g_assert_nonnull(resp);
     g_assert(qdict_haskey(resp, "return"));
@@ -497,8 +496,6 @@ static void test_migrate_set_parameters_cxl_rdma_sidecar_budgets(void)
     g_assert_cmpint(qdict_get_int(
                     ret, "x-cxl-rdma-sidecar-max-inflight-regions"), ==, 3);
     g_assert_cmpint(qdict_get_int(
-                    ret, "x-cxl-rdma-sidecar-max-cover-percent"), ==, 50);
-    g_assert_cmpint(qdict_get_int(
                     ret, "x-cxl-rdma-sidecar-region-bytes"), ==, 1048576);
     qobject_unref(resp);
 
@@ -506,17 +503,16 @@ static void test_migrate_set_parameters_cxl_rdma_sidecar_budgets(void)
                     "  'arguments': {"
                     "    'x-cxl-rdma-sidecar-max-inflight-regions': 0 } }");
     g_assert_nonnull(resp);
-    qmp_expect_generic_error_desc_and_unref(
-        resp,
-        "x-cxl-rdma-sidecar-max-inflight-regions must be at least 1");
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
 
-    resp = qtest_qmp(qts, "{ 'execute': 'migrate-set-parameters',"
-                    "  'arguments': {"
-                    "    'x-cxl-rdma-sidecar-max-cover-percent': 101 } }");
+    resp = qtest_qmp(qts, "{ 'execute': 'query-migrate-parameters' }");
     g_assert_nonnull(resp);
-    qmp_expect_generic_error_desc_and_unref(
-        resp,
-        "x-cxl-rdma-sidecar-max-cover-percent must be between 0 and 100");
+    ret = qdict_get_qdict(resp, "return");
+    g_assert_nonnull(ret);
+    g_assert_cmpint(qdict_get_int(
+                    ret, "x-cxl-rdma-sidecar-max-inflight-regions"), ==, 0);
+    qobject_unref(resp);
 
     qtest_quit(qts);
 }
@@ -626,6 +622,41 @@ static void test_query_migrate_cxl_schema_loop_stats(void)
     assert_schema_object_has_member(cxl_type, "clean-remap-prefault-bytes");
     assert_schema_object_has_member(cxl_type, "clean-remap-prefault-time-ns");
     assert_schema_object_has_member(cxl_type, "clean-remap-prefault-errors");
+    assert_schema_object_has_member(cxl_type,
+                                    "page-state-cxl-worker-precopy-bytes");
+    assert_schema_object_has_member(cxl_type,
+                                    "page-state-cxl-worker-precopy-time-ns");
+    assert_schema_object_has_member(cxl_type,
+                                    "page-state-cxl-worker-postcopy-bytes");
+    assert_schema_object_has_member(cxl_type,
+                                    "page-state-cxl-worker-postcopy-time-ns");
+    assert_schema_object_has_member(cxl_type,
+                                    "page-state-rdma-completed-pages");
+    assert_schema_object_has_member(cxl_type,
+                                    "page-state-rdma-precopy-completed-bytes");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-precopy-completed-time-ns");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-precopy-active-time-ns");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-precopy-transport-completed-time-ns");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-precopy-transport-active-time-ns");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-precopy-publish-time-ns");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-postcopy-dirty-completed-bytes");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-postcopy-dirty-completed-time-ns");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-postcopy-dirty-active-time-ns");
+    assert_schema_object_has_member(
+        cxl_type,
+        "page-state-rdma-postcopy-dirty-transport-completed-time-ns");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-postcopy-dirty-transport-active-time-ns");
+    assert_schema_object_has_member(
+        cxl_type, "page-state-rdma-postcopy-dirty-publish-time-ns");
 
     qmp_schema_cleanup(&schema);
 }
@@ -670,8 +701,8 @@ int main(int argc, char *argv[])
                    test_migrate_set_parameters_cxl_backing_rate);
     qtest_add_func("qmp/migrate-set-parameters/cxl-clean-remap",
                    test_migrate_set_parameters_cxl_clean_remap);
-    qtest_add_func("qmp/migrate-set-parameters/cxl-rdma-sidecar-budgets",
-                   test_migrate_set_parameters_cxl_rdma_sidecar_budgets);
+    qtest_add_func("qmp/migrate-set-parameters/cxl-rdma-sidecar-resources",
+                   test_migrate_set_parameters_cxl_rdma_sidecar_resources);
     qtest_add_func("qmp/migrate-set-parameters/cxl-rdma-sidecar-address-required",
                    test_migrate_set_parameters_cxl_rdma_sidecar_requires_address);
     qtest_add_func("qmp/query-migrate/cxl-schema-loop-stats",

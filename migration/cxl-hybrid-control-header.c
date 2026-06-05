@@ -332,6 +332,23 @@ bool cxl_hybrid_control_page_requires_destination_install(
     return true;
 }
 
+bool cxl_hybrid_control_page_requires_dst_local_wake(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    bool received)
+{
+    CXLHybridPageLocation location = CXL_HYBRID_PAGE_LOCATION_NONE;
+
+    return !received &&
+           cxl_hybrid_control_page_location(hdr, visible_bitmap, page_state,
+                                            page_index, generation,
+                                            &location) &&
+           location == CXL_HYBRID_PAGE_LOCATION_DST_LOCAL;
+}
+
 bool cxl_hybrid_control_page_requires_postcopy_discard(
     const CXLHybridControlHeader *hdr,
     const unsigned long *visible_bitmap,
@@ -393,6 +410,25 @@ bool cxl_hybrid_control_cxl_remap_span(const CXLHybridControlHeader *hdr,
 bool cxl_hybrid_fault_place_result_satisfied(int ret, bool received)
 {
     return ret == 0 || (ret == -EEXIST && received);
+}
+
+bool cxl_hybrid_cleanup_place_result_satisfied(int ret, bool received,
+                                               bool remapped)
+{
+    return cxl_hybrid_fault_place_result_satisfied(ret, received) ||
+           (ret == -ENOENT && (received || remapped));
+}
+
+CXLHybridCleanupInstallAction cxl_hybrid_cleanup_install_action(bool received,
+                                                                bool remapped)
+{
+    if (received) {
+        return CXL_HYBRID_CLEANUP_INSTALL_SKIP;
+    }
+    if (remapped) {
+        return CXL_HYBRID_CLEANUP_INSTALL_MARK_RECEIVED;
+    }
+    return CXL_HYBRID_CLEANUP_INSTALL_COPY;
 }
 
 bool cxl_hybrid_control_region_visible(const CXLHybridControlHeader *hdr,
@@ -582,6 +618,50 @@ bool cxl_hybrid_control_complete_rdma_page_visible_generation(
     smp_mb_release();
     set_bit_atomic(page_index, visible_bitmap);
     return true;
+}
+
+void cxl_hybrid_control_complete_rdma_pages_for_test(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t total_pages,
+    CXLHybridRDMAPageDescriptor *desc,
+    uint32_t *completedp,
+    uint32_t *stalep)
+{
+    uint32_t limit;
+
+    if (!hdr || !visible_bitmap || !page_state ||
+        !desc || desc->first_page >= total_pages) {
+        return;
+    }
+
+    limit = MIN(desc->nr_pages, total_pages - desc->first_page);
+    for (uint32_t i = 0; i < limit; i++) {
+        if (!cxl_hybrid_rdma_descriptor_page_claimed(desc, i)) {
+            continue;
+        }
+        if (cxl_hybrid_control_complete_rdma_page_visible_generation(
+                hdr, visible_bitmap, page_state,
+                desc->first_page + i, desc->generation, &desc->claims[i])) {
+            if (desc->completed_bmap) {
+                set_bit(i, desc->completed_bmap);
+            }
+            desc->completed_pages++;
+            if (completedp) {
+                (*completedp)++;
+            }
+        } else {
+            if (desc->stale_bmap) {
+                set_bit(i, desc->stale_bmap);
+            }
+            desc->stale_pages++;
+            if (stalep) {
+                (*stalep)++;
+            }
+        }
+        clear_bit(i, desc->claimed_bmap);
+    }
 }
 
 bool cxl_hybrid_control_complete_zero_page_visible_generation(

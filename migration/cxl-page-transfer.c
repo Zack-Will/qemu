@@ -87,41 +87,6 @@ int cxl_hybrid_fault_request_completed_status(
     return -ENOENT;
 }
 
-CXLHybridTransferClass cxl_hybrid_scheduler_choose_zero_page_lane(
-    const CXLHybridSchedulerPolicy *policy)
-{
-    (void)policy;
-
-    return CXL_HYBRID_TRANSFER_CXL_LOW;
-}
-
-CXLHybridTransferClass cxl_hybrid_scheduler_choose_bulk_lane(
-    const CXLHybridSchedulerPolicy *policy,
-    uint64_t page_index)
-{
-    uint64_t total_share;
-
-    if (!policy || !policy->rdma_budget_pages) {
-        return CXL_HYBRID_TRANSFER_CXL_LOW;
-    }
-    if (!policy->cxl_background_pages) {
-        return CXL_HYBRID_TRANSFER_RDMA_BULK;
-    }
-    if (policy->rdma_budget_pages == policy->cxl_background_pages) {
-        return (page_index & 1) ? CXL_HYBRID_TRANSFER_RDMA_BULK :
-               CXL_HYBRID_TRANSFER_CXL_LOW;
-    }
-
-    total_share = policy->rdma_budget_pages + policy->cxl_background_pages;
-    if (!total_share || total_share < policy->rdma_budget_pages) {
-        return CXL_HYBRID_TRANSFER_CXL_LOW;
-    }
-
-    return (page_index % total_share) < policy->cxl_background_pages ?
-           CXL_HYBRID_TRANSFER_CXL_LOW :
-           CXL_HYBRID_TRANSFER_RDMA_BULK;
-}
-
 void cxl_hybrid_transfer_queue_init_for_test(CXLHybridTransferQueue *queue)
 {
     int i;
@@ -347,14 +312,57 @@ bool cxl_hybrid_rdma_descriptor_page_claimed(
            test_bit(page_offset, desc->claimed_bmap);
 }
 
+bool cxl_hybrid_rdma_descriptor_page_completed(
+    const CXLHybridRDMAPageDescriptor *desc,
+    uint32_t page_offset)
+{
+    return desc && desc->completed_bmap && page_offset < desc->nr_pages &&
+           test_bit(page_offset, desc->completed_bmap);
+}
+
+bool cxl_hybrid_rdma_descriptor_page_stale(
+    const CXLHybridRDMAPageDescriptor *desc,
+    uint32_t page_offset)
+{
+    return desc && desc->stale_bmap && page_offset < desc->nr_pages &&
+           test_bit(page_offset, desc->stale_bmap);
+}
+
 void cxl_hybrid_rdma_descriptor_destroy(CXLHybridRDMAPageDescriptor *desc)
 {
     if (!desc) {
         return;
     }
     g_free(desc->claimed_bmap);
+    g_free(desc->completed_bmap);
+    g_free(desc->stale_bmap);
     g_free(desc->claims);
     memset(desc, 0, sizeof(*desc));
+}
+
+void cxl_hybrid_rdma_descriptor_reclaim(CXLHybridRDMAPageDescriptor *desc,
+                                        uint64_t *page_state,
+                                        uint64_t total_pages)
+{
+    uint32_t limit;
+
+    if (!desc) {
+        return;
+    }
+
+    if (page_state && desc->claims && desc->claimed_bmap &&
+        desc->first_page < total_pages) {
+        limit = MIN(desc->nr_pages, total_pages - desc->first_page);
+        for (uint32_t i = 0; i < limit; i++) {
+            if (!cxl_hybrid_rdma_descriptor_page_claimed(desc, i)) {
+                continue;
+            }
+            cxl_hybrid_page_state_drop_claim(&page_state[desc->first_page + i],
+                                             &desc->claims[i]);
+        }
+    }
+
+    cxl_hybrid_rdma_descriptor_destroy(desc);
 }
 
 bool cxl_hybrid_rdma_descriptor_claim_pages_for_test(
@@ -365,16 +373,26 @@ bool cxl_hybrid_rdma_descriptor_claim_pages_for_test(
     uint32_t nr_pages,
     uint32_t generation)
 {
-    if (!desc || !page_state || !nr_pages ||
+    if (!desc) {
+        return false;
+    }
+    if (!page_state) {
+        cxl_hybrid_rdma_descriptor_destroy(desc);
+        return false;
+    }
+    if (!nr_pages ||
         first_page >= total_pages || nr_pages > total_pages - first_page) {
+        cxl_hybrid_rdma_descriptor_reclaim(desc, page_state, total_pages);
         return false;
     }
 
-    cxl_hybrid_rdma_descriptor_destroy(desc);
+    cxl_hybrid_rdma_descriptor_reclaim(desc, page_state, total_pages);
     desc->first_page = first_page;
     desc->nr_pages = nr_pages;
     desc->generation = generation;
     desc->claimed_bmap = bitmap_new(nr_pages);
+    desc->completed_bmap = bitmap_new(nr_pages);
+    desc->stale_bmap = bitmap_new(nr_pages);
     desc->claims = g_new0(CXLHybridPageClaim, nr_pages);
 
     for (uint32_t i = 0; i < nr_pages; i++) {
@@ -391,6 +409,65 @@ bool cxl_hybrid_rdma_descriptor_claim_pages_for_test(
         return false;
     }
 
+    return true;
+}
+
+bool cxl_hybrid_rdma_descriptor_claim_contiguous_for_test(
+    CXLHybridRDMAPageDescriptor *desc,
+    uint64_t *page_state,
+    uint64_t total_pages,
+    uint64_t first_page,
+    uint32_t max_pages,
+    uint32_t generation,
+    uint32_t *claimedp)
+{
+    uint32_t limit;
+
+    if (claimedp) {
+        *claimedp = 0;
+    }
+    if (!desc) {
+        return false;
+    }
+    if (!page_state) {
+        cxl_hybrid_rdma_descriptor_destroy(desc);
+        return false;
+    }
+    if (!max_pages || first_page >= total_pages) {
+        cxl_hybrid_rdma_descriptor_reclaim(desc, page_state, total_pages);
+        return false;
+    }
+
+    cxl_hybrid_rdma_descriptor_reclaim(desc, page_state, total_pages);
+
+    limit = MIN((uint64_t)max_pages, total_pages - first_page);
+    desc->first_page = first_page;
+    desc->nr_pages = limit;
+    desc->generation = generation;
+    desc->claimed_bmap = bitmap_new(limit);
+    desc->completed_bmap = bitmap_new(limit);
+    desc->stale_bmap = bitmap_new(limit);
+    desc->claims = g_new0(CXLHybridPageClaim, limit);
+
+    for (uint32_t i = 0; i < limit; i++) {
+        if (!cxl_hybrid_page_state_claim_for_rdma(&page_state[first_page + i],
+                                                  generation,
+                                                  &desc->claims[i])) {
+            break;
+        }
+        set_bit(i, desc->claimed_bmap);
+        desc->claimed_pages++;
+    }
+
+    if (!desc->claimed_pages) {
+        cxl_hybrid_rdma_descriptor_destroy(desc);
+        return false;
+    }
+
+    desc->nr_pages = desc->claimed_pages;
+    if (claimedp) {
+        *claimedp = desc->claimed_pages;
+    }
     return true;
 }
 
@@ -412,8 +489,14 @@ void cxl_hybrid_rdma_descriptor_complete_pages_for_test(
         }
         if (cxl_hybrid_page_state_complete_rdma(
                 &page_state[desc->first_page + i], &desc->claims[i])) {
+            if (desc->completed_bmap) {
+                set_bit(i, desc->completed_bmap);
+            }
             desc->completed_pages++;
         } else {
+            if (desc->stale_bmap) {
+                set_bit(i, desc->stale_bmap);
+            }
             desc->stale_pages++;
         }
         clear_bit(i, desc->claimed_bmap);
@@ -489,4 +572,21 @@ void cxl_hybrid_rdma_bulk_claim_release(CXLHybridRDMABulkClaim *claim)
     cxl_hybrid_rdma_descriptor_destroy(claim->page_desc);
     g_free(claim->page_desc);
     claim->page_desc = NULL;
+}
+
+bool cxl_hybrid_rdma_claim_has_region_ownership(
+    const CXLHybridRDMABulkClaim *claim)
+{
+    return claim &&
+           claim->kind == CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION &&
+           claim->region_index != UINT64_MAX;
+}
+
+uint64_t cxl_hybrid_rdma_claim_wrid(
+    const CXLHybridRDMABulkClaim *claim)
+{
+    if (!claim || !claim->claim_id) {
+        return UINT64_MAX;
+    }
+    return claim->claim_id;
 }

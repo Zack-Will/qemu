@@ -10,7 +10,9 @@
 
 #include "qemu/typedefs.h"
 #include "qapi/qapi-types-migration.h"
+#include "qemu/bitmap.h"
 #include "qemu/thread.h"
+#include "qemu/units.h"
 #include "io/channel.h"
 #include "io/task.h"
 #include "channel.h"
@@ -23,6 +25,7 @@
 #define CXL_HYBRID_CTRL_COMPLETION_F_QUIESCE (1U << 0)
 #define CXL_FAULT_REGION_GRANULE_DEFAULT (2 * 1024 * 1024)
 #define CXL_REMAP_GRANULE_DEFAULT (64 * 1024)
+#define CXL_HYBRID_POSTCOPY_RDMA_MERGE_MAX (2 * MiB)
 #define CXL_REMAP_GRANULE_ENV "QEMU_CXL_REMAP_GRANULE"
 #define CXL_CLEAN_REMAP_DEBUG_ENV "QEMU_CXL_CLEAN_REMAP_DEBUG"
 
@@ -120,6 +123,12 @@ typedef enum CXLHybridPageLocation {
     CXL_HYBRID_PAGE_LOCATION_ZERO = 3,
 } CXLHybridPageLocation;
 
+typedef enum CXLHybridCleanupInstallAction {
+    CXL_HYBRID_CLEANUP_INSTALL_COPY = 0,
+    CXL_HYBRID_CLEANUP_INSTALL_SKIP = 1,
+    CXL_HYBRID_CLEANUP_INSTALL_MARK_RECEIVED = 2,
+} CXLHybridCleanupInstallAction;
+
 typedef struct CXLHybridPageClaim {
     uint64_t observed;
     uint32_t generation;
@@ -170,11 +179,6 @@ typedef struct CXLHybridTransferQueue {
     GQueue classes[CXL_HYBRID_TRANSFER_CLASS_COUNT];
     bool lock_ready;
 } CXLHybridTransferQueue;
-
-typedef struct CXLHybridSchedulerPolicy {
-    uint64_t rdma_budget_pages;
-    uint64_t cxl_background_pages;
-} CXLHybridSchedulerPolicy;
 
 typedef struct CXLHybridPageStateSnapshot {
     uint64_t total_pages;
@@ -296,9 +300,7 @@ typedef struct CXLHybridRDMASidecarStats {
     uint64_t rdma_sidecar_cxl_race_lost_regions;
     uint64_t rdma_sidecar_failed_regions;
     uint64_t rdma_sidecar_no_candidate_events;
-    uint64_t rdma_sidecar_budget_skip_events;
     uint32_t rdma_sidecar_max_inflight_regions;
-    uint8_t rdma_sidecar_max_cover_percent;
     bool rdma_sidecar_failed;
     uint64_t rdma_ready_regions;
     uint64_t rdma_ready_pages;
@@ -320,18 +322,24 @@ typedef struct CXLHybridRDMASidecarState {
     uint64_t total_regions;
     uint64_t pages_per_region;
     uint64_t accepted_regions;
-    uint64_t max_accepted_regions;
     CXLHybridRDMASidecarStats stats;
 } CXLHybridRDMASidecarState;
 
 typedef struct CXLHybridRDMAPageDescriptor CXLHybridRDMAPageDescriptor;
+
+typedef enum CXLHybridRDMAClaimKind {
+    CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION = 0,
+    CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN = 1,
+} CXLHybridRDMAClaimKind;
 
 typedef struct CXLHybridRDMABulkClaim {
     RAMBlock *block;
     ram_addr_t block_offset;
     uint64_t global_offset;
     uint64_t cxl_offset;
+    CXLHybridRDMAClaimKind kind;
     uint64_t region_index;
+    uint64_t claim_id;
     uint64_t bytes;
     uint64_t pages;
     uint64_t post_time_ns;
@@ -346,6 +354,8 @@ struct CXLHybridRDMAPageDescriptor {
     uint64_t first_page;
     uint32_t nr_pages;
     unsigned long *claimed_bmap;
+    unsigned long *completed_bmap;
+    unsigned long *stale_bmap;
     CXLHybridPageClaim *claims;
     uint32_t generation;
     uint32_t claimed_pages;
@@ -408,6 +418,10 @@ int cxl_hybrid_try_resolve_fault(MigrationIncomingState *mis, RAMBlock *rb,
                                                    RAMBlock *rb),
                                  Error **errp);
 bool cxl_hybrid_fault_place_result_satisfied(int ret, bool received);
+bool cxl_hybrid_cleanup_place_result_satisfied(int ret, bool received,
+                                               bool remapped);
+CXLHybridCleanupInstallAction cxl_hybrid_cleanup_install_action(bool received,
+                                                                bool remapped);
 int cxl_hybrid_postcopy_install_remaining_pages(
     MigrationIncomingState *mis,
     CXLHybridPostcopyPlacePageFunc place_page,
@@ -464,6 +478,18 @@ bool cxl_hybrid_warm_page_eligible_for_push(
     const unsigned long *dst_sent_bmap,
     const unsigned long *cxl_visible_bmap,
     size_t page_idx);
+void cxl_hybrid_dirty_requeue_page_for_push(
+    unsigned long *warm_sent_bmap,
+    unsigned long *dst_sent_bmap,
+    unsigned long *cxl_visible_bmap,
+    unsigned long *remaining_bmap,
+    unsigned long *warm_dirty_bmap,
+    size_t page_idx,
+    bool migrated);
+uint32_t cxl_hybrid_rdma_postcopy_span_max_pages_for_test(
+    uint64_t target_page_size,
+    uint64_t block_used_length,
+    uint64_t block_offset);
 bool cxl_hybrid_clean_remap_budget_allows(uint64_t budget_bytes,
                                           uint64_t used_bytes,
                                           uint64_t region_len);
@@ -562,10 +588,6 @@ bool cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(
 bool cxl_hybrid_rdma_sidecar_try_start_region(
     CXLHybridRDMASidecarState *state,
     uint64_t region_index);
-void cxl_hybrid_rdma_sidecar_configure_budget_for_test(
-    CXLHybridRDMASidecarState *state,
-    uint64_t max_inflight_regions,
-    uint64_t max_cover_percent);
 bool cxl_hybrid_rdma_sidecar_pick_pending_region_for_test(
     CXLHybridRDMASidecarState *state,
     const unsigned long *dirty_bmap,
@@ -618,14 +640,7 @@ void cxl_hybrid_reset_rdma_sidecar_stats(void);
 void cxl_hybrid_reset_rdma_sidecar_stats_for_test(void);
 void cxl_hybrid_rdma_sidecar_global_init(uint64_t total_regions,
                                          uint64_t pages_per_region);
-void cxl_hybrid_rdma_sidecar_global_configure_budget(uint32_t max_inflight,
-                                                     uint8_t max_cover_percent);
 void cxl_hybrid_rdma_sidecar_global_destroy(void);
-CXLHybridTransferClass cxl_hybrid_scheduler_choose_bulk_lane(
-    const CXLHybridSchedulerPolicy *policy,
-    uint64_t page_index);
-CXLHybridTransferClass cxl_hybrid_scheduler_choose_zero_page_lane(
-    const CXLHybridSchedulerPolicy *policy);
 void cxl_hybrid_account_shadow_bulk_candidate(RAMBlock *block,
                                                ram_addr_t block_offset);
 void cxl_hybrid_account_rdma_ready(uint64_t region_index,
@@ -637,18 +652,19 @@ void cxl_hybrid_account_rdma_cxl_republish(uint64_t region_index,
 void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats);
 void cxl_hybrid_account_rdma_sidecar_connect(uint64_t time_ns);
 void cxl_hybrid_account_rdma_sidecar_registered(uint64_t bytes);
-void cxl_hybrid_account_rdma_sidecar_posted(uint64_t region_index,
+void cxl_hybrid_account_rdma_sidecar_posted(uint64_t claim_id,
+                                            uint64_t region_index,
                                             uint64_t bytes);
-void cxl_hybrid_account_rdma_sidecar_completed(uint64_t region_index,
+void cxl_hybrid_account_rdma_sidecar_completed(uint64_t claim_id,
+                                               uint64_t region_index,
                                                uint64_t bytes);
 void cxl_hybrid_account_rdma_sidecar_stale(uint64_t region_index,
                                            uint64_t bytes,
                                            bool cxl_race_lost);
+void cxl_hybrid_account_rdma_sidecar_failed_no_trace(uint64_t region_index);
 void cxl_hybrid_account_rdma_sidecar_failed(uint64_t region_index);
 void cxl_hybrid_account_rdma_sidecar_no_candidate(void);
-void cxl_hybrid_account_rdma_sidecar_budget_skip(void);
-void cxl_hybrid_set_rdma_sidecar_budget_stats(uint32_t max_inflight,
-                                              uint8_t max_cover_percent);
+void cxl_hybrid_set_rdma_sidecar_inflight_hint(uint32_t max_inflight);
 bool cxl_hybrid_region_is_rdma_owned(uint64_t region_index);
 bool cxl_hybrid_region_try_own_rdma(uint64_t region_index);
 bool cxl_hybrid_region_try_own_cxl(uint64_t region_index);
@@ -667,6 +683,9 @@ bool cxl_hybrid_region_can_use_rdma_bulk(RAMBlock *block,
 bool cxl_hybrid_rdma_bulk_claim_init(CXLHybridRDMABulkClaim *claim,
                                      RAMBlock *block,
                                      ram_addr_t block_offset);
+int cxl_hybrid_try_send_postcopy_rdma_span_for_ram(RAMBlock *block,
+                                                   ram_addr_t block_offset,
+                                                   Error **errp);
 void cxl_hybrid_rdma_drop_bulk_claim(const CXLHybridRDMABulkClaim *claim);
 bool cxl_hybrid_rdma_descriptor_claim_pages_for_test(
     CXLHybridRDMAPageDescriptor *desc,
@@ -675,7 +694,21 @@ bool cxl_hybrid_rdma_descriptor_claim_pages_for_test(
     uint64_t first_page,
     uint32_t nr_pages,
     uint32_t generation);
+bool cxl_hybrid_rdma_descriptor_claim_contiguous_for_test(
+    CXLHybridRDMAPageDescriptor *desc,
+    uint64_t *page_state,
+    uint64_t total_pages,
+    uint64_t first_page,
+    uint32_t max_pages,
+    uint32_t generation,
+    uint32_t *claimedp);
 bool cxl_hybrid_rdma_descriptor_page_claimed(
+    const CXLHybridRDMAPageDescriptor *desc,
+    uint32_t page_offset);
+bool cxl_hybrid_rdma_descriptor_page_completed(
+    const CXLHybridRDMAPageDescriptor *desc,
+    uint32_t page_offset);
+bool cxl_hybrid_rdma_descriptor_page_stale(
     const CXLHybridRDMAPageDescriptor *desc,
     uint32_t page_offset);
 void cxl_hybrid_rdma_descriptor_complete_pages_for_test(
@@ -686,6 +719,9 @@ void cxl_hybrid_rdma_descriptor_drop_pages_for_test(
     CXLHybridRDMAPageDescriptor *desc,
     uint64_t *page_state,
     uint64_t total_pages);
+void cxl_hybrid_rdma_descriptor_reclaim(CXLHybridRDMAPageDescriptor *desc,
+                                        uint64_t *page_state,
+                                        uint64_t total_pages);
 void cxl_hybrid_cxl_descriptor_complete_pages_for_test(
     uint64_t *page_state,
     uint64_t total_pages,
@@ -696,6 +732,10 @@ void cxl_hybrid_cxl_descriptor_complete_pages_for_test(
     uint32_t *stalep);
 void cxl_hybrid_rdma_descriptor_destroy(CXLHybridRDMAPageDescriptor *desc);
 void cxl_hybrid_rdma_bulk_claim_release(CXLHybridRDMABulkClaim *claim);
+bool cxl_hybrid_rdma_claim_has_region_ownership(
+    const CXLHybridRDMABulkClaim *claim);
+uint64_t cxl_hybrid_rdma_claim_wrid(
+    const CXLHybridRDMABulkClaim *claim);
 bool cxl_hybrid_rdma_sidecar_get_backing(void **basep, size_t *sizep);
 bool cxl_hybrid_start_rdma_sidecar(bool incoming, bool wait_for_setup,
                                    Error **errp);
@@ -751,6 +791,8 @@ void cxl_hybrid_cleanup_source(void);
 bool cxl_hybrid_enabled(void);
 CXLHybridPhase cxl_hybrid_phase(void);
 bool cxl_hybrid_init_destination(Error **errp);
+int cxl_hybrid_postcopy_wake_dst_local_pages(MigrationIncomingState *mis,
+                                             Error **errp);
 uint64_t cxl_hybrid_source_staged_pages(void);
 uint8_t cxl_hybrid_source_remap_coverage(void);
 bool cxl_hybrid_clean_remap_enabled(void);
@@ -816,6 +858,12 @@ uint64_t cxl_hybrid_mapped_ram_required_bytes(uint64_t align);
 bool cxl_hybrid_lookup_global_page(size_t page_index,
                                    RAMBlock **blockp,
                                    ram_addr_t *block_offsetp);
+bool cxl_hybrid_dst_remap_offset_page_index(uint64_t total_pages,
+                                            uint64_t block_first_page,
+                                            ram_addr_t block_used_length,
+                                            ram_addr_t offset,
+                                            uint64_t target_page_size,
+                                            size_t *page_idxp);
 int cxl_hybrid_control_init_source(Error **errp);
 int cxl_hybrid_control_init_destination(Error **errp);
 int cxl_hybrid_control_begin_source_run(Error **errp);
@@ -932,6 +980,13 @@ bool cxl_hybrid_control_page_requires_destination_install(
     uint32_t generation,
     bool received,
     CXLHybridPageLocation *locationp);
+bool cxl_hybrid_control_page_requires_dst_local_wake(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    bool received);
 bool cxl_hybrid_control_page_requires_postcopy_discard(
     const CXLHybridControlHeader *hdr,
     const unsigned long *visible_bitmap,
@@ -1004,6 +1059,14 @@ bool cxl_hybrid_control_complete_rdma_page_visible_generation(
     uint64_t page_index,
     uint32_t generation,
     const CXLHybridPageClaim *claim);
+void cxl_hybrid_control_complete_rdma_pages_for_test(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t total_pages,
+    CXLHybridRDMAPageDescriptor *desc,
+    uint32_t *completedp,
+    uint32_t *stalep);
 bool cxl_hybrid_control_complete_zero_page_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
@@ -1074,6 +1137,9 @@ bool cxl_hybrid_ctrl_page_requires_destination_install(
     uint32_t generation,
     bool received,
     CXLHybridPageLocation *locationp);
+bool cxl_hybrid_ctrl_page_requires_dst_local_wake(uint64_t page_index,
+                                                  uint32_t generation,
+                                                  bool received);
 bool cxl_hybrid_ctrl_page_requires_postcopy_discard(uint64_t page_index,
                                                     uint32_t generation);
 bool cxl_hybrid_ctrl_cxl_remap_span(uint64_t fault_page,
@@ -1115,6 +1181,14 @@ bool cxl_hybrid_ctrl_claim_rdma_pages(CXLHybridRDMAPageDescriptor *desc,
                                       uint64_t first_page,
                                       uint32_t nr_pages,
                                       uint32_t generation);
+bool cxl_hybrid_ctrl_claim_rdma_contiguous_pages(
+    CXLHybridRDMAPageDescriptor *desc,
+    RAMBlock *block,
+    ram_addr_t block_offset,
+    uint64_t first_page,
+    uint32_t max_pages,
+    uint32_t generation,
+    uint32_t *claimedp);
 void cxl_hybrid_ctrl_drop_rdma_pages(CXLHybridRDMAPageDescriptor *desc);
 void cxl_hybrid_ctrl_complete_rdma_pages(CXLHybridRDMAPageDescriptor *desc,
                                          uint32_t *completedp,

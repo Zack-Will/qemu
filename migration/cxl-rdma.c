@@ -18,9 +18,22 @@
 #include "trace.h"
 
 #define CXL_RDMA_ADMISSION_MIN_WINDOW 1U
+#define CXL_RDMA_ADMISSION_INITIAL_WINDOW 8U
 #define CXL_RDMA_ADMISSION_EWMA_WEIGHT 8.0
 #define CXL_RDMA_ADMISSION_DROP_GOODPUT_FACTOR 0.80
 #define CXL_RDMA_ADMISSION_DROP_LATENCY_FACTOR 1.10
+#define CXL_RDMA_CLAIM_KIND_COUNT 2
+
+static int cxl_rdma_sidecar_claim_kind_index(CXLHybridRDMAClaimKind kind)
+{
+    switch (kind) {
+    case CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION:
+    case CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN:
+        return kind;
+    default:
+        return -1;
+    }
+}
 
 static uint32_t cxl_rdma_admission_clamp_window(uint32_t value,
                                                 uint32_t cap)
@@ -52,7 +65,9 @@ void cxl_rdma_sidecar_admission_state_init(
     }
     memset(state, 0, sizeof(*state));
     state->sq_capacity_regions = MAX((uint32_t)1, sq_capacity_regions);
-    state->dynamic_window_regions = state->sq_capacity_regions;
+    state->dynamic_window_regions = cxl_rdma_admission_clamp_window(
+        MIN(CXL_RDMA_ADMISSION_INITIAL_WINDOW, state->sq_capacity_regions),
+        state->sq_capacity_regions);
     state->bytes_per_region = bytes_per_region;
 }
 
@@ -258,6 +273,461 @@ void cxl_rdma_sidecar_admission_note_completion(
     }
 }
 
+void cxl_rdma_sidecar_bulk_stats_note_active_epoch(
+    CXLHybridRDMASidecarBulkStats *stats,
+    uint64_t useful_bytes,
+    uint64_t active_time_ns)
+{
+    if (!stats || !useful_bytes || !active_time_ns) {
+        return;
+    }
+
+    qatomic_add(&stats->page_state_rdma_active_time_ns, active_time_ns);
+}
+
+static void cxl_rdma_sidecar_bulk_stats_note_active_bucket_for_kind(
+    CXLHybridRDMASidecarBulkStats *stats,
+    CXLHybridRDMAClaimKind kind,
+    uint64_t useful_bytes,
+    uint64_t active_time_ns)
+{
+    if (!stats || !useful_bytes || !active_time_ns) {
+        return;
+    }
+
+    switch (kind) {
+    case CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION:
+        qatomic_add(&stats->page_state_rdma_precopy_active_time_ns,
+                    active_time_ns);
+        break;
+    case CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN:
+        qatomic_add(&stats->page_state_rdma_postcopy_dirty_active_time_ns,
+                    active_time_ns);
+        break;
+    default:
+        break;
+    }
+}
+
+void cxl_rdma_sidecar_bulk_stats_note_active_epoch_for_kind(
+    CXLHybridRDMASidecarBulkStats *stats,
+    CXLHybridRDMAClaimKind kind,
+    uint64_t useful_bytes,
+    uint64_t active_time_ns)
+{
+    cxl_rdma_sidecar_bulk_stats_note_active_epoch(stats, useful_bytes,
+                                                  active_time_ns);
+    cxl_rdma_sidecar_bulk_stats_note_active_bucket_for_kind(
+        stats, kind, useful_bytes, active_time_ns);
+}
+
+void cxl_rdma_sidecar_bulk_stats_note_transport_active_epoch(
+    CXLHybridRDMASidecarBulkStats *stats,
+    uint64_t useful_bytes,
+    uint64_t active_time_ns)
+{
+    if (!stats || !useful_bytes || !active_time_ns) {
+        return;
+    }
+
+    qatomic_add(&stats->page_state_rdma_transport_active_time_ns,
+                active_time_ns);
+}
+
+static void
+cxl_rdma_sidecar_bulk_stats_note_transport_active_bucket_for_kind(
+    CXLHybridRDMASidecarBulkStats *stats,
+    CXLHybridRDMAClaimKind kind,
+    uint64_t useful_bytes,
+    uint64_t active_time_ns)
+{
+    if (!stats || !useful_bytes || !active_time_ns) {
+        return;
+    }
+
+    switch (kind) {
+    case CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION:
+        qatomic_add(
+            &stats->page_state_rdma_precopy_transport_active_time_ns,
+            active_time_ns);
+        break;
+    case CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN:
+        qatomic_add(
+            &stats->page_state_rdma_postcopy_dirty_transport_active_time_ns,
+            active_time_ns);
+        break;
+    default:
+        break;
+    }
+}
+
+void cxl_rdma_sidecar_bulk_stats_note_transport_active_epoch_for_kind(
+    CXLHybridRDMASidecarBulkStats *stats,
+    CXLHybridRDMAClaimKind kind,
+    uint64_t useful_bytes,
+    uint64_t active_time_ns)
+{
+    cxl_rdma_sidecar_bulk_stats_note_transport_active_epoch(
+        stats, useful_bytes, active_time_ns);
+    cxl_rdma_sidecar_bulk_stats_note_transport_active_bucket_for_kind(
+        stats, kind, useful_bytes, active_time_ns);
+}
+
+void cxl_rdma_sidecar_bulk_stats_note_publish_time(
+    CXLHybridRDMASidecarBulkStats *stats,
+    uint64_t publish_time_ns)
+{
+    if (!stats || !publish_time_ns) {
+        return;
+    }
+
+    qatomic_add(&stats->page_state_rdma_publish_time_ns, publish_time_ns);
+}
+
+static void cxl_rdma_sidecar_bulk_stats_note_completion_for_kind(
+    CXLHybridRDMASidecarBulkStats *stats,
+    CXLHybridRDMAClaimKind kind,
+    uint64_t completed_bytes,
+    uint64_t completed_time_ns,
+    uint64_t transport_completed_time_ns,
+    uint64_t publish_time_ns)
+{
+    if (!stats) {
+        return;
+    }
+
+    qatomic_add(&stats->page_state_rdma_completed_bytes, completed_bytes);
+    qatomic_add(&stats->page_state_rdma_completed_time_ns,
+                completed_time_ns);
+    qatomic_add(&stats->page_state_rdma_transport_completed_time_ns,
+                transport_completed_time_ns);
+    cxl_rdma_sidecar_bulk_stats_note_publish_time(stats, publish_time_ns);
+
+    switch (kind) {
+    case CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION:
+        qatomic_add(&stats->page_state_rdma_precopy_completed_bytes,
+                    completed_bytes);
+        qatomic_add(&stats->page_state_rdma_precopy_completed_time_ns,
+                    completed_time_ns);
+        qatomic_add(
+            &stats->page_state_rdma_precopy_transport_completed_time_ns,
+            transport_completed_time_ns);
+        qatomic_add(&stats->page_state_rdma_precopy_publish_time_ns,
+                    publish_time_ns);
+        break;
+    case CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN:
+        qatomic_add(&stats->page_state_rdma_postcopy_dirty_completed_bytes,
+                    completed_bytes);
+        qatomic_add(
+            &stats->page_state_rdma_postcopy_dirty_completed_time_ns,
+            completed_time_ns);
+        qatomic_add(
+            &stats->page_state_rdma_postcopy_dirty_transport_completed_time_ns,
+            transport_completed_time_ns);
+        qatomic_add(&stats->page_state_rdma_postcopy_dirty_publish_time_ns,
+                    publish_time_ns);
+        break;
+    default:
+        break;
+    }
+}
+
+static void cxl_rdma_sidecar_bulk_stats_note_max_u64(uint64_t *field,
+                                                     uint64_t value)
+{
+    uint64_t old;
+
+    if (!field || !value) {
+        return;
+    }
+
+    old = qatomic_read(field);
+    while (value > old &&
+           qatomic_cmpxchg(field, old, value) != old) {
+        old = qatomic_read(field);
+    }
+}
+
+uint32_t cxl_rdma_sidecar_effective_inflight_capacity(
+    uint64_t total_regions,
+    uint32_t resource_capacity_regions,
+    bool pin_all)
+{
+    uint64_t capacity;
+
+    if (!pin_all) {
+        return 1;
+    }
+
+    capacity = total_regions ? total_regions : 1;
+    capacity = MIN(capacity,
+                   (uint64_t)MAX((uint32_t)1, resource_capacity_regions));
+    return (uint32_t)MIN(capacity, (uint64_t)UINT32_MAX);
+}
+
+bool cxl_rdma_sidecar_schedule_allowed(bool postcopy,
+                                       bool bulk_active,
+                                       bool draining)
+{
+    return !postcopy && (bulk_active || draining);
+}
+
+bool cxl_rdma_sidecar_claim_schedule_allowed(
+    CXLHybridRDMAClaimKind kind,
+    bool postcopy,
+    bool bulk_active,
+    bool draining)
+{
+    switch (kind) {
+    case CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION:
+        return !postcopy && bulk_active && !draining;
+    case CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN:
+        return postcopy && !bulk_active;
+    default:
+        return false;
+    }
+}
+
+static void cxl_rdma_sidecar_postcopy_dirty_reservation_clear(
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation)
+{
+    if (reservation) {
+        memset(reservation, 0, sizeof(*reservation));
+    }
+}
+
+static void cxl_rdma_sidecar_postcopy_dirty_count_claims(
+    const CXLHybridRDMABulkClaim *claims,
+    uint32_t claims_len,
+    uint32_t *wrp,
+    uint64_t *bytesp)
+{
+    uint32_t wr = 0;
+    uint64_t bytes = 0;
+
+    if (claims) {
+        for (uint32_t i = 0; i < claims_len; i++) {
+            if (claims[i].kind != CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN) {
+                continue;
+            }
+
+            wr++;
+            if (bytes > UINT64_MAX - claims[i].bytes) {
+                bytes = UINT64_MAX;
+            } else {
+                bytes += claims[i].bytes;
+            }
+        }
+    }
+
+    if (wrp) {
+        *wrp = wr;
+    }
+    if (bytesp) {
+        *bytesp = bytes;
+    }
+}
+
+void cxl_rdma_sidecar_postcopy_dirty_admission_state_init(
+    CXLHybridRDMAPostcopyDirtyAdmissionState *state,
+    uint32_t max_inflight_wr,
+    uint64_t max_inflight_bytes,
+    uint64_t min_span_bytes)
+{
+    if (!state) {
+        return;
+    }
+
+    memset(state, 0, sizeof(*state));
+    state->max_inflight_wr = MAX((uint32_t)1, max_inflight_wr);
+    state->max_inflight_bytes = MAX((uint64_t)TARGET_PAGE_SIZE,
+                                    max_inflight_bytes);
+    state->min_span_bytes = MAX((uint64_t)TARGET_PAGE_SIZE,
+                                min_span_bytes);
+}
+
+CXLHybridRDMAPostcopyDirtyAdmissionSnapshot
+cxl_rdma_sidecar_postcopy_dirty_admission_snapshot(
+    const CXLHybridRDMAPostcopyDirtyAdmissionState *state,
+    bool running,
+    bool postcopy,
+    bool bulk_active,
+    bool draining,
+    bool failed,
+    uint64_t span_bytes,
+    uint32_t queue_wr,
+    uint32_t inflight_wr,
+    uint64_t queue_bytes,
+    uint64_t inflight_bytes)
+{
+    CXLHybridRDMAPostcopyDirtyAdmissionSnapshot snap = { 0 };
+    uint64_t outstanding_bytes;
+    uint64_t outstanding_wr;
+
+    if (!state) {
+        return snap;
+    }
+
+    outstanding_wr = (uint64_t)queue_wr + inflight_wr + state->reserved_wr;
+    if (outstanding_wr > UINT32_MAX) {
+        outstanding_wr = UINT32_MAX;
+    }
+    outstanding_bytes = queue_bytes + inflight_bytes;
+    if (outstanding_bytes < queue_bytes ||
+        outstanding_bytes > UINT64_MAX - state->reserved_bytes) {
+        outstanding_bytes = UINT64_MAX;
+    } else {
+        outstanding_bytes += state->reserved_bytes;
+    }
+
+    snap.max_inflight_wr = state->max_inflight_wr;
+    snap.queue_wr = queue_wr;
+    snap.inflight_wr = inflight_wr;
+    snap.reserved_wr = state->reserved_wr;
+    snap.outstanding_wr = outstanding_wr;
+    snap.max_inflight_bytes = state->max_inflight_bytes;
+    snap.queue_bytes = queue_bytes;
+    snap.inflight_bytes = inflight_bytes;
+    snap.reserved_bytes = state->reserved_bytes;
+    snap.outstanding_bytes = outstanding_bytes;
+    snap.min_span_bytes = state->min_span_bytes;
+    snap.accepted_spans = state->accepted_spans;
+    snap.overflow_cxl_spans = state->overflow_cxl_spans;
+    snap.min_span_cxl_spans = state->min_span_cxl_spans;
+    snap.accept_rdma =
+        running && postcopy && !bulk_active && !failed &&
+        span_bytes >= state->min_span_bytes &&
+        outstanding_wr < state->max_inflight_wr &&
+        outstanding_bytes <= state->max_inflight_bytes &&
+        span_bytes <= state->max_inflight_bytes - outstanding_bytes;
+    return snap;
+}
+
+bool cxl_rdma_sidecar_postcopy_dirty_admission_try_reserve(
+    CXLHybridRDMAPostcopyDirtyAdmissionState *state,
+    bool running,
+    bool postcopy,
+    bool bulk_active,
+    bool draining,
+    bool failed,
+    uint64_t span_bytes,
+    uint32_t queue_wr,
+    uint32_t inflight_wr,
+    uint64_t queue_bytes,
+    uint64_t inflight_bytes,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation,
+    CXLHybridRDMAPostcopyDirtyAdmissionSnapshot *snapshot)
+{
+    CXLHybridRDMAPostcopyDirtyAdmissionSnapshot snap;
+
+    cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+    if (!state || !reservation) {
+        return false;
+    }
+
+    snap = cxl_rdma_sidecar_postcopy_dirty_admission_snapshot(
+        state, running, postcopy, bulk_active, draining, failed, span_bytes,
+        queue_wr, inflight_wr, queue_bytes, inflight_bytes);
+    if (!snap.accept_rdma) {
+        if (span_bytes && span_bytes < state->min_span_bytes) {
+            state->min_span_cxl_spans++;
+        } else {
+            state->overflow_cxl_spans++;
+        }
+        if (snapshot) {
+            *snapshot = cxl_rdma_sidecar_postcopy_dirty_admission_snapshot(
+                state, running, postcopy, bulk_active, draining, failed,
+                span_bytes, queue_wr, inflight_wr, queue_bytes,
+                inflight_bytes);
+        }
+        return false;
+    }
+
+    state->reserved_wr++;
+    state->reserved_bytes += span_bytes;
+    state->accepted_spans++;
+    reservation->valid = true;
+    reservation->bytes = span_bytes;
+    if (snapshot) {
+        *snapshot = cxl_rdma_sidecar_postcopy_dirty_admission_snapshot(
+            state, running, postcopy, bulk_active, draining, failed,
+            span_bytes, queue_wr, inflight_wr, queue_bytes, inflight_bytes);
+    }
+    return true;
+}
+
+bool cxl_rdma_sidecar_postcopy_dirty_admission_try_reserve_for_claims_for_test(
+    CXLHybridRDMAPostcopyDirtyAdmissionState *state,
+    bool running,
+    bool postcopy,
+    bool bulk_active,
+    bool draining,
+    bool failed,
+    uint64_t span_bytes,
+    const CXLHybridRDMABulkClaim *queued_claims,
+    uint32_t queued_claims_len,
+    const CXLHybridRDMABulkClaim *inflight_claims,
+    uint32_t inflight_claims_len,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation,
+    CXLHybridRDMAPostcopyDirtyAdmissionSnapshot *snapshot)
+{
+    uint32_t queue_wr = 0;
+    uint32_t inflight_wr = 0;
+    uint64_t queue_bytes = 0;
+    uint64_t inflight_bytes = 0;
+
+    cxl_rdma_sidecar_postcopy_dirty_count_claims(
+        queued_claims, queued_claims_len, &queue_wr, &queue_bytes);
+    cxl_rdma_sidecar_postcopy_dirty_count_claims(
+        inflight_claims, inflight_claims_len, &inflight_wr, &inflight_bytes);
+
+    return cxl_rdma_sidecar_postcopy_dirty_admission_try_reserve(
+        state, running, postcopy, bulk_active, draining, failed, span_bytes,
+        queue_wr, inflight_wr, queue_bytes, inflight_bytes, reservation,
+        snapshot);
+}
+
+void cxl_rdma_sidecar_postcopy_dirty_admission_cancel_reserve(
+    CXLHybridRDMAPostcopyDirtyAdmissionState *state,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation)
+{
+    if (!state || !reservation || !reservation->valid) {
+        return;
+    }
+
+    assert(state->reserved_wr > 0);
+    assert(state->reserved_bytes >= reservation->bytes);
+    state->reserved_wr--;
+    state->reserved_bytes -= reservation->bytes;
+    cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+}
+
+void cxl_rdma_sidecar_postcopy_dirty_admission_consume_reserve(
+    CXLHybridRDMAPostcopyDirtyAdmissionState *state,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation)
+{
+    cxl_rdma_sidecar_postcopy_dirty_admission_cancel_reserve(state,
+                                                             reservation);
+}
+
+bool cxl_rdma_sidecar_should_wait_for_sq_room_for_test(int post_send_ret,
+                                                       uint32_t inflight_len)
+{
+    return post_send_ret == ENOMEM && inflight_len > 0;
+}
+
+bool cxl_rdma_sidecar_should_poll_after_cq_wait_for_test(int wait_ret)
+{
+    return wait_ret >= 0;
+}
+
+bool cxl_rdma_sidecar_should_retry_after_stale_cq_event_for_test(
+    int wait_ret,
+    int completion_ret)
+{
+    return wait_ret > 0 && completion_ret == 0;
+}
+
 #ifdef CONFIG_RDMA
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -271,6 +741,7 @@ void cxl_rdma_sidecar_admission_note_completion(
 #define CXL_RDMA_SIDECAR_VERSION 1
 #define CXL_RDMA_RESOLVE_TIMEOUT_MS 10000
 #define CXL_RDMA_CQ_DEPTH 1024
+#define CXL_RDMA_POSTCOPY_DIRTY_MIN_SPAN_BYTES_DEFAULT (64 * 1024)
 
 typedef struct CXLRDMASidecarHello {
     uint32_t magic;
@@ -308,7 +779,7 @@ typedef struct CXLRDMASidecarContext {
     uint64_t bytes_per_region;
     uint64_t pages_per_region;
     uint32_t max_inflight_regions;
-    uint8_t max_cover_percent;
+    uint64_t postcopy_dirty_min_span_bytes;
     bool pin_all;
     bool src_mr_inflight;
     bool draining;
@@ -319,8 +790,18 @@ typedef struct CXLRDMASidecarContext {
     CXLHybridRDMABulkClaim *inflight_claims;
     uint32_t inflight_capacity;
     uint32_t inflight_len;
+    uint64_t next_claim_id;
+    uint64_t rdma_active_start_ns;
+    uint64_t rdma_active_completed_bytes;
+    uint32_t rdma_active_inflight_by_kind[CXL_RDMA_CLAIM_KIND_COUNT];
+    uint64_t rdma_active_start_ns_by_kind[CXL_RDMA_CLAIM_KIND_COUNT];
+    uint64_t rdma_active_completed_bytes_by_kind[CXL_RDMA_CLAIM_KIND_COUNT];
     CXLHybridRDMASidecarAdmissionState admission;
+    CXLHybridRDMAPostcopyDirtyAdmissionState postcopy_dirty_admission;
     uint64_t admission_owner;
+    uint64_t postcopy_dirty_admission_owner;
+    uint64_t queue_bytes;
+    uint64_t inflight_bytes;
     struct rdma_event_channel *channel;
     struct rdma_cm_id *listen_id;
     struct rdma_cm_id *cm_id;
@@ -353,6 +834,34 @@ typedef struct CXLRDMASidecarDestinationRegister {
 static CXLRDMASidecarContext *cxl_rdma_sidecar;
 static uint64_t cxl_rdma_sidecar_admission_owner_counter;
 
+static void cxl_rdma_sidecar_apply_transport_capacity(
+    CXLRDMASidecarContext *ctx,
+    uint32_t capacity)
+{
+    uint64_t postcopy_dirty_window_bytes;
+
+    capacity = MAX((uint32_t)1, capacity);
+    assert(!ctx->queue_len);
+    assert(!ctx->inflight_len);
+
+    ctx->queue_capacity = MIN(ctx->queue_capacity, capacity);
+    ctx->inflight_capacity = MIN(ctx->inflight_capacity, capacity);
+    cxl_rdma_sidecar_admission_state_init(&ctx->admission,
+                                          ctx->inflight_capacity,
+                                          ctx->bytes_per_region);
+    if (ctx->inflight_capacity &&
+        ctx->bytes_per_region <= UINT64_MAX / ctx->inflight_capacity) {
+        postcopy_dirty_window_bytes =
+            ctx->bytes_per_region * (uint64_t)ctx->inflight_capacity;
+    } else {
+        postcopy_dirty_window_bytes = UINT64_MAX;
+    }
+    cxl_rdma_sidecar_postcopy_dirty_admission_state_init(
+        &ctx->postcopy_dirty_admission, ctx->inflight_capacity,
+        postcopy_dirty_window_bytes,
+        ctx->postcopy_dirty_min_span_bytes);
+}
+
 static uint64_t cxl_rdma_sidecar_next_admission_owner(void)
 {
     uint64_t owner;
@@ -362,6 +871,44 @@ static uint64_t cxl_rdma_sidecar_next_admission_owner(void)
     } while (!owner);
 
     return owner;
+}
+
+static uint64_t cxl_rdma_sidecar_next_claim_id(CXLRDMASidecarContext *ctx)
+{
+    uint64_t id = ++ctx->next_claim_id;
+
+    if (!id) {
+        id = ++ctx->next_claim_id;
+    }
+    return id;
+}
+
+static void cxl_rdma_sidecar_add_queue_bytes(CXLRDMASidecarContext *ctx,
+                                             uint64_t bytes)
+{
+    assert(ctx->queue_bytes <= UINT64_MAX - bytes);
+    ctx->queue_bytes += bytes;
+}
+
+static void cxl_rdma_sidecar_sub_queue_bytes(CXLRDMASidecarContext *ctx,
+                                             uint64_t bytes)
+{
+    assert(ctx->queue_bytes >= bytes);
+    ctx->queue_bytes -= bytes;
+}
+
+static void cxl_rdma_sidecar_add_inflight_bytes(CXLRDMASidecarContext *ctx,
+                                                uint64_t bytes)
+{
+    assert(ctx->inflight_bytes <= UINT64_MAX - bytes);
+    ctx->inflight_bytes += bytes;
+}
+
+static void cxl_rdma_sidecar_sub_inflight_bytes(CXLRDMASidecarContext *ctx,
+                                                uint64_t bytes)
+{
+    assert(ctx->inflight_bytes >= bytes);
+    ctx->inflight_bytes -= bytes;
 }
 
 static void cxl_rdma_sidecar_drop_claim(CXLRDMASidecarContext *ctx,
@@ -398,7 +945,6 @@ static void cxl_rdma_sidecar_mark_failed(CXLRDMASidecarContext *ctx,
         return;
     }
 
-    cxl_hybrid_account_rdma_sidecar_failed(UINT64_MAX);
     if (err) {
         if (ctx->ops.propagate_error) {
             ctx->ops.propagate_error(error_copy(err), ctx->ops.opaque);
@@ -667,6 +1213,8 @@ static int cxl_rdma_sidecar_alloc_pd_cq_qp(CXLRDMASidecarContext *ctx,
                                            Error **errp)
 {
     struct ibv_qp_init_attr attr = { 0 };
+    struct ibv_device_attr device_attr = { 0 };
+    uint32_t max_send_wr;
 
     ctx->pd = ibv_alloc_pd(ctx->cm_id->verbs);
     if (!ctx->pd) {
@@ -691,7 +1239,14 @@ static int cxl_rdma_sidecar_alloc_pd_cq_qp(CXLRDMASidecarContext *ctx,
         return -1;
     }
 
-    attr.cap.max_send_wr = MAX((uint32_t)1, ctx->max_inflight_regions);
+    max_send_wr = MAX((uint32_t)1, ctx->inflight_capacity);
+    if (!ibv_query_device(ctx->cm_id->verbs, &device_attr) &&
+        device_attr.max_qp_wr > 0) {
+        max_send_wr = MIN(max_send_wr, (uint32_t)device_attr.max_qp_wr);
+    }
+    cxl_rdma_sidecar_apply_transport_capacity(ctx, max_send_wr);
+
+    attr.cap.max_send_wr = ctx->inflight_capacity;
     attr.cap.max_recv_wr = 2;
     attr.cap.max_send_sge = 1;
     attr.cap.max_recv_sge = 1;
@@ -1063,6 +1618,7 @@ static int G_GNUC_UNUSED cxl_rdma_sidecar_post_write(
     struct ibv_sge sge;
     struct ibv_send_wr wr = { 0 };
     struct ibv_send_wr *bad_wr = NULL;
+    uint64_t wrid;
     int ret;
 
     if (!ctx || !ctx->qp || !claim) {
@@ -1078,6 +1634,7 @@ static int G_GNUC_UNUSED cxl_rdma_sidecar_post_write(
         cxl_rdma_sidecar_register_source_region(ctx, claim, errp)) {
         return -1;
     }
+    wrid = cxl_hybrid_rdma_claim_wrid(claim);
 
     sge = (struct ibv_sge) {
         .addr = (uintptr_t)claim->src,
@@ -1092,7 +1649,7 @@ static int G_GNUC_UNUSED cxl_rdma_sidecar_post_write(
         return -1;
     }
     wr = (struct ibv_send_wr) {
-        .wr_id = claim->region_index,
+        .wr_id = wrid,
         .sg_list = &sge,
         .num_sge = 1,
         .opcode = IBV_WR_RDMA_WRITE,
@@ -1103,21 +1660,43 @@ static int G_GNUC_UNUSED cxl_rdma_sidecar_post_write(
 
     ret = ibv_post_send(ctx->qp, &wr, &bad_wr);
     if (ret) {
+        uint32_t inflight_len;
+
         if (!ctx->pin_all) {
             ctx->src_mr_inflight = false;
+        }
+        qemu_mutex_lock(&ctx->lock);
+        inflight_len = ctx->inflight_len;
+        qemu_mutex_unlock(&ctx->lock);
+        if (cxl_rdma_sidecar_should_wait_for_sq_room_for_test(
+                ret, inflight_len)) {
+            return -EAGAIN;
         }
         error_setg_errno(errp, ret, "RDMA sidecar ibv_post_send failed");
         return -1;
     }
-    cxl_hybrid_account_rdma_sidecar_posted(claim->region_index, claim->bytes);
-    trace_cxl_rdma_sidecar_post(claim->region_index, (uintptr_t)claim->src,
+    if (claim->kind == CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN) {
+        qatomic_inc(&ctx->stats.rdma_sidecar_postcopy_dirty_posted_spans);
+        qatomic_add(&ctx->stats.rdma_sidecar_postcopy_dirty_posted_bytes,
+                    claim->bytes);
+        cxl_rdma_sidecar_bulk_stats_note_max_u64(
+            &ctx->stats.rdma_sidecar_postcopy_dirty_max_span_bytes,
+            claim->bytes);
+    } else if (cxl_hybrid_rdma_claim_has_region_ownership(claim)) {
+        cxl_hybrid_account_rdma_sidecar_posted(claim->claim_id,
+                                               claim->region_index,
+                                               claim->bytes);
+    }
+    trace_cxl_rdma_sidecar_post(wrid, claim->kind, claim->region_index,
+                                (uintptr_t)claim->src,
                                 wr.wr.rdma.remote_addr, claim->bytes);
     return 0;
 }
 
 static int G_GNUC_UNUSED cxl_rdma_sidecar_poll_completion(
     CXLRDMASidecarContext *ctx,
-    uint64_t *region_index,
+    uint64_t *claim_id,
+    uint64_t *cqe_time_ns,
     Error **errp)
 {
     struct ibv_wc wc;
@@ -1135,10 +1714,9 @@ static int G_GNUC_UNUSED cxl_rdma_sidecar_poll_completion(
         if (!ctx->pin_all) {
             ctx->src_mr_inflight = false;
         }
-        if (region_index) {
-            *region_index = wc.wr_id;
+        if (claim_id) {
+            *claim_id = wc.wr_id;
         }
-        cxl_hybrid_account_rdma_sidecar_failed(wc.wr_id);
         error_setg(errp, "RDMA sidecar write failed: %s",
                    ibv_wc_status_str(wc.status));
         return -1;
@@ -1147,14 +1725,74 @@ static int G_GNUC_UNUSED cxl_rdma_sidecar_poll_completion(
     if (!ctx->pin_all) {
         ctx->src_mr_inflight = false;
     }
-    if (region_index) {
-        *region_index = wc.wr_id;
+    if (claim_id) {
+        *claim_id = wc.wr_id;
     }
-    qatomic_inc(&ctx->stats.rdma_bulk_regions);
-    qatomic_add(&ctx->stats.rdma_bulk_bytes, ctx->bytes_per_region);
-    cxl_hybrid_account_rdma_sidecar_completed(wc.wr_id,
-                                              ctx->bytes_per_region);
+    if (cqe_time_ns) {
+        *cqe_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
     return 1;
+}
+
+static int cxl_rdma_sidecar_arm_cq_event(CXLRDMASidecarContext *ctx,
+                                         Error **errp)
+{
+    if (!ctx || !ctx->comp_channel) {
+        return 0;
+    }
+
+    if (ibv_req_notify_cq(ctx->cq, 0)) {
+        error_setg_errno(errp, errno,
+                         "RDMA sidecar ibv_req_notify_cq failed");
+        return -1;
+    }
+    return 1;
+}
+
+static int cxl_rdma_sidecar_wait_cq_event(CXLRDMASidecarContext *ctx,
+                                          Error **errp)
+{
+    struct ibv_cq *cq = NULL;
+    void *cq_context = NULL;
+    struct pollfd pfd;
+    int ret;
+
+    if (!ctx || !ctx->comp_channel) {
+        return 0;
+    }
+
+    pfd = (struct pollfd) {
+        .fd = ctx->comp_channel->fd,
+        .events = POLLIN,
+    };
+    ret = poll(&pfd, 1, 10);
+    if (ret < 0) {
+        error_setg_errno(errp, errno,
+                         "RDMA sidecar failed to poll CQ event channel");
+        return -1;
+    }
+    if (ret == 0) {
+        return 0;
+    }
+
+    if (ibv_get_cq_event(ctx->comp_channel, &cq, &cq_context)) {
+        error_setg_errno(errp, errno,
+                         "RDMA sidecar ibv_get_cq_event failed");
+        return -1;
+    }
+    ibv_ack_cq_events(cq, 1);
+    return 1;
+}
+
+static uint32_t cxl_rdma_sidecar_snapshot_inflight_len(
+    CXLRDMASidecarContext *ctx)
+{
+    uint32_t inflight_len;
+
+    qemu_mutex_lock(&ctx->lock);
+    inflight_len = ctx->inflight_len;
+    qemu_mutex_unlock(&ctx->lock);
+    return inflight_len;
 }
 
 static void cxl_rdma_sidecar_backoff(CXLRDMASidecarContext *ctx, int ms)
@@ -1164,6 +1802,12 @@ static void cxl_rdma_sidecar_backoff(CXLRDMASidecarContext *ctx, int ms)
         qemu_cond_timedwait(&ctx->cond, &ctx->lock, ms);
     }
     qemu_mutex_unlock(&ctx->lock);
+}
+
+static uint32_t cxl_rdma_sidecar_inflight_capacity(
+    const CXLRDMASidecarContext *ctx)
+{
+    return MAX((uint32_t)1, ctx->inflight_capacity);
 }
 
 static bool cxl_rdma_sidecar_dequeue_bulk_claim(CXLRDMASidecarContext *ctx,
@@ -1176,69 +1820,152 @@ static bool cxl_rdma_sidecar_dequeue_bulk_claim(CXLRDMASidecarContext *ctx,
 
     qemu_mutex_lock(&ctx->lock);
     while (!ctx->stop && !ctx->queue_len) {
+        if (ctx->inflight_len) {
+            break;
+        }
         qemu_cond_timedwait(&ctx->cond, &ctx->lock, 1);
 
         running = !ctx->ops.migration_running ||
                   ctx->ops.migration_running(ctx->ops.opaque);
-        postcopy = ctx->ops.migration_postcopy &&
-                   ctx->ops.migration_postcopy(ctx->ops.opaque);
         failed = ctx->ops.migration_failed &&
                  ctx->ops.migration_failed(ctx->ops.opaque);
-        bulk_active = !ctx->ops.bulk_active ||
-                      ctx->ops.bulk_active(ctx->ops.opaque);
-        if (!running || postcopy || failed || !bulk_active) {
+        if (!running || failed) {
             break;
         }
     }
 
-    if (!ctx->stop && !ctx->draining && ctx->queue_len) {
-        *claim = ctx->queue[ctx->queue_head];
+    while (!ctx->stop && ctx->queue_len) {
+        CXLHybridRDMABulkClaim head = ctx->queue[ctx->queue_head];
+        CXLHybridRDMASidecarAdmissionSnapshot precopy_snap;
+        bool allowed;
+        bool capacity;
+
+        postcopy = ctx->ops.migration_postcopy &&
+                   ctx->ops.migration_postcopy(ctx->ops.opaque);
+        bulk_active = !ctx->ops.bulk_active ||
+                      ctx->ops.bulk_active(ctx->ops.opaque);
+        allowed = cxl_rdma_sidecar_claim_schedule_allowed(
+            head.kind, postcopy, bulk_active, ctx->draining);
+        capacity = ctx->inflight_len < cxl_rdma_sidecar_inflight_capacity(ctx);
+        switch (head.kind) {
+        case CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION:
+            precopy_snap = cxl_rdma_sidecar_admission_snapshot(
+                &ctx->admission,
+                ctx->running && !ctx->stop && !ctx->incoming,
+                bulk_active,
+                ctx->draining,
+                ctx->failed,
+                postcopy,
+                ctx->queue_len,
+                ctx->inflight_len);
+            capacity = capacity &&
+                       ctx->inflight_len < precopy_snap.dynamic_window_regions;
+            break;
+        case CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN:
+        {
+            uint32_t dirty_inflight_wr = 0;
+            uint64_t dirty_inflight_bytes = 0;
+
+            cxl_rdma_sidecar_postcopy_dirty_count_claims(
+                ctx->inflight_claims, ctx->inflight_len, &dirty_inflight_wr,
+                &dirty_inflight_bytes);
+            capacity =
+                capacity &&
+                dirty_inflight_wr <
+                ctx->postcopy_dirty_admission.max_inflight_wr &&
+                head.bytes <=
+                ctx->postcopy_dirty_admission.max_inflight_bytes -
+                MIN(dirty_inflight_bytes,
+                    ctx->postcopy_dirty_admission.max_inflight_bytes);
+            break;
+        }
+        default:
+            allowed = false;
+            break;
+        }
+
+        if (allowed && capacity) {
+            *claim = head;
+            ctx->queue_head = (ctx->queue_head + 1) % ctx->queue_capacity;
+            ctx->queue_len--;
+            cxl_rdma_sidecar_sub_queue_bytes(ctx, head.bytes);
+            qemu_mutex_unlock(&ctx->lock);
+            return true;
+        }
+        if (allowed) {
+            break;
+        }
+
         ctx->queue_head = (ctx->queue_head + 1) % ctx->queue_capacity;
         ctx->queue_len--;
+        cxl_rdma_sidecar_sub_queue_bytes(ctx, head.bytes);
         qemu_mutex_unlock(&ctx->lock);
-        return true;
+        cxl_rdma_sidecar_drop_claim(ctx, &head);
+        qemu_mutex_lock(&ctx->lock);
     }
 
     qemu_mutex_unlock(&ctx->lock);
     return false;
 }
 
-static uint32_t cxl_rdma_sidecar_inflight_capacity(
-    const CXLRDMASidecarContext *ctx)
-{
-    if (!ctx->pin_all) {
-        return 1;
-    }
-    return MAX((uint32_t)1, ctx->inflight_capacity);
-}
-
 static void cxl_rdma_sidecar_add_inflight_claim(
     CXLRDMASidecarContext *ctx,
     const CXLHybridRDMABulkClaim *claim)
 {
+    int kind_index = cxl_rdma_sidecar_claim_kind_index(claim->kind);
+
     qemu_mutex_lock(&ctx->lock);
     assert(ctx->inflight_len < ctx->inflight_capacity);
+    if (!ctx->inflight_len) {
+        ctx->rdma_active_start_ns = claim->post_time_ns;
+        ctx->rdma_active_completed_bytes = 0;
+    }
+    if (kind_index >= 0) {
+        if (!ctx->rdma_active_inflight_by_kind[kind_index]) {
+            ctx->rdma_active_start_ns_by_kind[kind_index] =
+                claim->post_time_ns;
+            ctx->rdma_active_completed_bytes_by_kind[kind_index] = 0;
+        }
+        ctx->rdma_active_inflight_by_kind[kind_index]++;
+    }
     ctx->inflight_claims[ctx->inflight_len++] = *claim;
+    cxl_rdma_sidecar_add_inflight_bytes(ctx, claim->bytes);
     qemu_cond_broadcast(&ctx->cond);
     qemu_mutex_unlock(&ctx->lock);
 }
 
 static bool cxl_rdma_sidecar_finish_inflight_claim(
     CXLRDMASidecarContext *ctx,
-    uint64_t region_index,
-    CXLHybridRDMABulkClaim *claim)
+    uint64_t claim_id,
+    CXLHybridRDMABulkClaim *claim,
+    bool *drained)
 {
     bool found = false;
 
+    if (drained) {
+        *drained = false;
+    }
     qemu_mutex_lock(&ctx->lock);
     for (uint32_t i = 0; i < ctx->inflight_len; i++) {
-        if (ctx->inflight_claims[i].region_index == region_index) {
+        if (ctx->inflight_claims[i].claim_id == claim_id) {
+            uint64_t claim_bytes = ctx->inflight_claims[i].bytes;
+            int kind_index = cxl_rdma_sidecar_claim_kind_index(
+                ctx->inflight_claims[i].kind);
+
             if (claim) {
                 *claim = ctx->inflight_claims[i];
+            }
+            if (kind_index >= 0) {
+                assert(ctx->rdma_active_inflight_by_kind[kind_index] > 0);
+                ctx->rdma_active_inflight_by_kind[kind_index]--;
             }
             ctx->inflight_claims[i] =
                 ctx->inflight_claims[ctx->inflight_len - 1];
             ctx->inflight_len--;
+            cxl_rdma_sidecar_sub_inflight_bytes(ctx, claim_bytes);
+            if (drained) {
+                *drained = ctx->inflight_len == 0;
+            }
             found = true;
             break;
         }
@@ -1265,6 +1992,13 @@ static void cxl_rdma_sidecar_drop_inflight_claims(
         claims[i] = ctx->inflight_claims[i];
     }
     ctx->inflight_len = 0;
+    ctx->inflight_bytes = 0;
+    memset(ctx->rdma_active_inflight_by_kind, 0,
+           sizeof(ctx->rdma_active_inflight_by_kind));
+    memset(ctx->rdma_active_start_ns_by_kind, 0,
+           sizeof(ctx->rdma_active_start_ns_by_kind));
+    memset(ctx->rdma_active_completed_bytes_by_kind, 0,
+           sizeof(ctx->rdma_active_completed_bytes_by_kind));
     qemu_cond_broadcast(&ctx->cond);
     qemu_mutex_unlock(&ctx->lock);
 
@@ -1294,6 +2028,52 @@ static bool cxl_rdma_sidecar_runtime_bulk_active(CXLRDMASidecarContext *ctx)
     return !ctx->ops.bulk_active || ctx->ops.bulk_active(ctx->ops.opaque);
 }
 
+static void cxl_rdma_sidecar_postcopy_dirty_count_context_locked(
+    CXLRDMASidecarContext *ctx,
+    uint32_t *queue_wrp,
+    uint32_t *inflight_wrp,
+    uint64_t *queue_bytesp,
+    uint64_t *inflight_bytesp)
+{
+    uint32_t queue_wr = 0;
+    uint64_t queue_bytes = 0;
+
+    if (ctx) {
+        for (uint32_t i = 0; i < ctx->queue_len; i++) {
+            CXLHybridRDMABulkClaim *queued =
+                &ctx->queue[(ctx->queue_head + i) % ctx->queue_capacity];
+
+            if (queued->kind != CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN) {
+                continue;
+            }
+            queue_wr++;
+            if (queue_bytes > UINT64_MAX - queued->bytes) {
+                queue_bytes = UINT64_MAX;
+            } else {
+                queue_bytes += queued->bytes;
+            }
+        }
+
+        cxl_rdma_sidecar_postcopy_dirty_count_claims(
+            ctx->inflight_claims, ctx->inflight_len, inflight_wrp,
+            inflight_bytesp);
+    } else {
+        if (inflight_wrp) {
+            *inflight_wrp = 0;
+        }
+        if (inflight_bytesp) {
+            *inflight_bytesp = 0;
+        }
+    }
+
+    if (queue_wrp) {
+        *queue_wrp = queue_wr;
+    }
+    if (queue_bytesp) {
+        *queue_bytesp = queue_bytes;
+    }
+}
+
 static bool cxl_rdma_sidecar_admission_reservation_matches(
     CXLRDMASidecarContext *ctx,
     CXLHybridRDMASidecarAdmissionReservation *reservation)
@@ -1304,6 +2084,21 @@ static bool cxl_rdma_sidecar_admission_reservation_matches(
     }
     if (reservation->owner != ctx->admission_owner) {
         cxl_rdma_sidecar_admission_reservation_clear(reservation);
+        return false;
+    }
+    return true;
+}
+
+static bool cxl_rdma_sidecar_postcopy_dirty_reservation_matches(
+    CXLRDMASidecarContext *ctx,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation)
+{
+    if (!ctx || !reservation || !reservation->valid) {
+        cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+        return false;
+    }
+    if (reservation->owner != ctx->postcopy_dirty_admission_owner) {
+        cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
         return false;
     }
     return true;
@@ -1400,6 +2195,89 @@ void cxl_rdma_sidecar_cancel_bulk_admission(
     qemu_mutex_unlock(&ctx->lock);
 }
 
+bool cxl_rdma_sidecar_try_reserve_postcopy_dirty_admission(
+    const CXLHybridRDMABulkClaim *claim,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation,
+    CXLHybridRDMAPostcopyDirtyAdmissionSnapshot *snapshot)
+{
+    CXLRDMASidecarContext *ctx = cxl_rdma_sidecar;
+    bool accepted;
+    bool postcopy;
+    bool bulk_active;
+    uint32_t dirty_queue_wr = 0;
+    uint32_t dirty_inflight_wr = 0;
+    uint64_t dirty_queue_bytes = 0;
+    uint64_t dirty_inflight_bytes = 0;
+
+    if (snapshot) {
+        memset(snapshot, 0, sizeof(*snapshot));
+    }
+    if (!reservation) {
+        return false;
+    }
+    cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+    if (!claim ||
+        claim->kind != CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN ||
+        !claim->bytes ||
+        !ctx) {
+        return false;
+    }
+
+    qemu_mutex_lock(&ctx->lock);
+    postcopy = ctx->ops.migration_postcopy &&
+               ctx->ops.migration_postcopy(ctx->ops.opaque);
+    bulk_active = cxl_rdma_sidecar_runtime_bulk_active(ctx);
+    cxl_rdma_sidecar_postcopy_dirty_count_context_locked(
+        ctx, &dirty_queue_wr, &dirty_inflight_wr, &dirty_queue_bytes,
+        &dirty_inflight_bytes);
+    accepted = cxl_rdma_sidecar_postcopy_dirty_admission_try_reserve(
+        &ctx->postcopy_dirty_admission,
+        ctx->running && !ctx->stop && !ctx->incoming,
+        postcopy,
+        bulk_active,
+        ctx->draining,
+        ctx->failed,
+        claim->bytes,
+        dirty_queue_wr,
+        dirty_inflight_wr,
+        dirty_queue_bytes,
+        dirty_inflight_bytes,
+        reservation,
+        snapshot);
+    if (accepted) {
+        reservation->owner = ctx->postcopy_dirty_admission_owner;
+    } else {
+        cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+    }
+    qemu_mutex_unlock(&ctx->lock);
+    return accepted;
+}
+
+void cxl_rdma_sidecar_cancel_postcopy_dirty_admission(
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation)
+{
+    CXLRDMASidecarContext *ctx = cxl_rdma_sidecar;
+
+    if (!reservation) {
+        return;
+    }
+    if (!ctx || !reservation->valid) {
+        cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+        return;
+    }
+
+    qemu_mutex_lock(&ctx->lock);
+    if (!cxl_rdma_sidecar_postcopy_dirty_reservation_matches(ctx,
+                                                             reservation)) {
+        qemu_mutex_unlock(&ctx->lock);
+        return;
+    }
+    cxl_rdma_sidecar_postcopy_dirty_admission_cancel_reserve(
+        &ctx->postcopy_dirty_admission, reservation);
+    qemu_cond_broadcast(&ctx->cond);
+    qemu_mutex_unlock(&ctx->lock);
+}
+
 bool cxl_rdma_sidecar_enqueue_reserved_bulk_claim(
     const CXLHybridRDMABulkClaim *claim,
     CXLHybridRDMASidecarAdmissionReservation *reservation)
@@ -1438,6 +2316,65 @@ bool cxl_rdma_sidecar_enqueue_reserved_bulk_claim(
     tail = (ctx->queue_head + ctx->queue_len) % ctx->queue_capacity;
     ctx->queue[tail] = *claim;
     ctx->queue_len++;
+    cxl_rdma_sidecar_add_queue_bytes(ctx, claim->bytes);
+    qemu_cond_broadcast(&ctx->cond);
+    qemu_mutex_unlock(&ctx->lock);
+    return true;
+}
+
+bool cxl_rdma_sidecar_enqueue_reserved_postcopy_dirty_claim(
+    const CXLHybridRDMABulkClaim *claim,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation)
+{
+    CXLRDMASidecarContext *ctx = cxl_rdma_sidecar;
+    bool bulk_active;
+    bool postcopy;
+    uint32_t tail;
+
+    if (!reservation) {
+        return false;
+    }
+    if (!ctx || !claim ||
+        claim->kind != CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN ||
+        !claim->bytes ||
+        !reservation->valid) {
+        cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+        return false;
+    }
+
+    qemu_mutex_lock(&ctx->lock);
+    if (!cxl_rdma_sidecar_postcopy_dirty_reservation_matches(ctx,
+                                                             reservation)) {
+        qemu_mutex_unlock(&ctx->lock);
+        return false;
+    }
+    if (reservation->bytes != claim->bytes) {
+        cxl_rdma_sidecar_postcopy_dirty_admission_cancel_reserve(
+            &ctx->postcopy_dirty_admission, reservation);
+        qemu_mutex_unlock(&ctx->lock);
+        return false;
+    }
+    bulk_active = cxl_rdma_sidecar_runtime_bulk_active(ctx);
+    postcopy = ctx->ops.migration_postcopy &&
+               ctx->ops.migration_postcopy(ctx->ops.opaque);
+    if (ctx->incoming || !ctx->running || ctx->failed || ctx->stop ||
+        !cxl_rdma_sidecar_claim_schedule_allowed(claim->kind, postcopy,
+                                                 bulk_active,
+                                                 ctx->draining) ||
+        !ctx->queue_capacity ||
+        ctx->queue_len >= ctx->queue_capacity) {
+        cxl_rdma_sidecar_postcopy_dirty_admission_cancel_reserve(
+            &ctx->postcopy_dirty_admission, reservation);
+        qemu_mutex_unlock(&ctx->lock);
+        return false;
+    }
+
+    cxl_rdma_sidecar_postcopy_dirty_admission_consume_reserve(
+        &ctx->postcopy_dirty_admission, reservation);
+    tail = (ctx->queue_head + ctx->queue_len) % ctx->queue_capacity;
+    ctx->queue[tail] = *claim;
+    ctx->queue_len++;
+    cxl_rdma_sidecar_add_queue_bytes(ctx, claim->bytes);
     qemu_cond_broadcast(&ctx->cond);
     qemu_mutex_unlock(&ctx->lock);
     return true;
@@ -1459,67 +2396,224 @@ bool cxl_rdma_sidecar_enqueue_bulk_claim(
 
 static int cxl_rdma_sidecar_poll_inflight_completion(
     CXLRDMASidecarContext *ctx,
+    Error **errp);
+
+static int cxl_rdma_sidecar_poll_or_wait_one_completion(
+    CXLRDMASidecarContext *ctx,
     Error **errp)
 {
-    CXLHybridRDMABulkClaim claim = { 0 };
-    uint64_t region_index = UINT64_MAX;
-    uint32_t completed_pages = 0;
-    uint32_t stale_pages = 0;
-    uint64_t completed_time_ns = 0;
-    uint64_t page_bytes;
     int ret;
 
-    ret = cxl_rdma_sidecar_poll_completion(ctx, &region_index, errp);
-    if (ret <= 0) {
+    ret = cxl_rdma_sidecar_poll_inflight_completion(ctx, errp);
+    if (ret != 0) {
         return ret;
     }
 
-    if (!cxl_rdma_sidecar_finish_inflight_claim(ctx, region_index, &claim)) {
+    while (true) {
+        int wait_ret;
+
+        ret = cxl_rdma_sidecar_arm_cq_event(ctx, errp);
+        if (ret <= 0) {
+            return ret;
+        }
+
+        ret = cxl_rdma_sidecar_poll_inflight_completion(ctx, errp);
+        if (ret != 0) {
+            return ret;
+        }
+
+        wait_ret = cxl_rdma_sidecar_wait_cq_event(ctx, errp);
+        if (!cxl_rdma_sidecar_should_poll_after_cq_wait_for_test(wait_ret)) {
+            return wait_ret;
+        }
+
+        ret = cxl_rdma_sidecar_poll_inflight_completion(ctx, errp);
+        if (!cxl_rdma_sidecar_should_retry_after_stale_cq_event_for_test(
+                wait_ret, ret)) {
+            return ret;
+        }
+    }
+}
+
+static int cxl_rdma_sidecar_poll_inflight_completion(
+    CXLRDMASidecarContext *ctx,
+    Error **errp)
+{
+    CXLHybridRDMABulkClaim claim = { 0 };
+    uint64_t claim_id = UINT64_MAX;
+    uint32_t completed_pages = 0;
+    uint32_t stale_pages = 0;
+    uint64_t completed_time_ns = 0;
+    uint64_t transport_completed_time_ns = 0;
+    uint64_t completed_bytes = 0;
+    uint64_t page_bytes;
+    uint64_t cqe_time_ns = 0;
+    uint64_t now_ns = 0;
+    uint64_t active_time_ns = 0;
+    uint64_t transport_active_time_ns = 0;
+    uint64_t publish_time_ns = 0;
+    uint64_t active_completed_bytes = 0;
+    uint64_t kind_active_completed_bytes = 0;
+    int kind_index;
+    bool drained = false;
+    int ret;
+
+    ret = cxl_rdma_sidecar_poll_completion(ctx, &claim_id, &cqe_time_ns,
+                                           errp);
+    if (ret == 0) {
+        return ret;
+    }
+    if (ret < 0 && claim_id == UINT64_MAX) {
+        return ret;
+    }
+
+    if (!cxl_rdma_sidecar_finish_inflight_claim(ctx, claim_id, &claim,
+                                                &drained)) {
+        if (ret < 0) {
+            return ret;
+        }
         error_setg(errp,
-                   "RDMA sidecar completion for unknown region %" PRIu64,
-                   region_index);
+                   "RDMA sidecar completion for unknown claim %" PRIu64,
+                   claim_id);
         return -1;
+    }
+    if (ret < 0) {
+        if (cxl_hybrid_rdma_claim_has_region_ownership(&claim)) {
+            cxl_hybrid_account_rdma_sidecar_failed_no_trace(
+                claim.region_index);
+        }
+        trace_cxl_rdma_sidecar_failed(claim.claim_id, claim.kind,
+                                      claim.region_index);
+        cxl_rdma_sidecar_drop_claim(ctx, &claim);
+        return ret;
+    }
+    if (cxl_hybrid_rdma_claim_has_region_ownership(&claim)) {
+        qatomic_inc(&ctx->stats.rdma_bulk_regions);
+        qatomic_add(&ctx->stats.rdma_bulk_bytes, claim.bytes);
+        cxl_hybrid_account_rdma_sidecar_completed(claim.claim_id,
+                                                  claim.region_index,
+                                                  claim.bytes);
     }
     if (claim.page_desc && ctx->ops.complete_bulk_claim) {
         ctx->ops.complete_bulk_claim(&claim, &completed_pages, &stale_pages,
                                      ctx->ops.opaque);
+        now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         if (claim.post_time_ns) {
-            completed_time_ns =
-                qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - claim.post_time_ns;
+            completed_time_ns = now_ns - claim.post_time_ns;
+            if (cqe_time_ns > claim.post_time_ns) {
+                transport_completed_time_ns =
+                    cqe_time_ns - claim.post_time_ns;
+            }
+        }
+        if (cqe_time_ns && now_ns > cqe_time_ns) {
+            publish_time_ns = now_ns - cqe_time_ns;
         }
         qatomic_add(&ctx->stats.page_state_rdma_completed_pages,
                     completed_pages);
-        page_bytes = ctx->pages_per_region ?
-            ctx->bytes_per_region / ctx->pages_per_region : 0;
-        qatomic_add(&ctx->stats.page_state_rdma_completed_bytes,
-                    (uint64_t)completed_pages * page_bytes);
-        qatomic_add(&ctx->stats.page_state_rdma_completed_time_ns,
-                    completed_time_ns);
+        if (claim.kind == CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN) {
+            completed_bytes = (uint64_t)completed_pages * TARGET_PAGE_SIZE;
+            qatomic_inc(
+                &ctx->stats.rdma_sidecar_postcopy_dirty_completed_spans);
+            qatomic_add(
+                &ctx->stats.rdma_sidecar_postcopy_dirty_completed_pages,
+                completed_pages);
+            qatomic_add(
+                &ctx->stats.rdma_sidecar_postcopy_dirty_completed_bytes,
+                completed_bytes);
+            qatomic_add(
+                &ctx->stats.rdma_sidecar_postcopy_dirty_stale_pages,
+                stale_pages);
+        } else {
+            page_bytes = ctx->pages_per_region ?
+                ctx->bytes_per_region / ctx->pages_per_region : 0;
+            completed_bytes = (uint64_t)completed_pages * page_bytes;
+        }
+        cxl_rdma_sidecar_bulk_stats_note_completion_for_kind(
+            &ctx->stats, claim.kind, completed_bytes, completed_time_ns,
+            transport_completed_time_ns, publish_time_ns);
         qatomic_add(&ctx->stats.page_state_rdma_stale_pages, stale_pages);
-        if (completed_pages && completed_time_ns) {
+        if (claim.kind == CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION &&
+            completed_bytes && transport_completed_time_ns) {
             qemu_mutex_lock(&ctx->lock);
             cxl_rdma_sidecar_admission_note_completion(
-                &ctx->admission,
-                (uint64_t)completed_pages * page_bytes,
-                completed_time_ns);
+                &ctx->admission, completed_bytes,
+                transport_completed_time_ns);
             qemu_mutex_unlock(&ctx->lock);
         }
+        kind_index = cxl_rdma_sidecar_claim_kind_index(claim.kind);
+        if (kind_index >= 0) {
+            qemu_mutex_lock(&ctx->lock);
+            if (completed_bytes) {
+                ctx->rdma_active_completed_bytes_by_kind[kind_index] +=
+                    completed_bytes;
+            }
+            kind_active_completed_bytes =
+                ctx->rdma_active_completed_bytes_by_kind[kind_index];
+            if (!ctx->rdma_active_inflight_by_kind[kind_index] &&
+                ctx->rdma_active_start_ns_by_kind[kind_index]) {
+                if (kind_active_completed_bytes &&
+                    now_ns > ctx->rdma_active_start_ns_by_kind[kind_index]) {
+                    active_time_ns =
+                        now_ns - ctx->rdma_active_start_ns_by_kind[kind_index];
+                    transport_active_time_ns = 0;
+                    if (cqe_time_ns >
+                        ctx->rdma_active_start_ns_by_kind[kind_index]) {
+                        transport_active_time_ns =
+                            cqe_time_ns -
+                            ctx->rdma_active_start_ns_by_kind[kind_index];
+                    }
+                    cxl_rdma_sidecar_bulk_stats_note_active_bucket_for_kind(
+                        &ctx->stats, claim.kind, kind_active_completed_bytes,
+                        active_time_ns);
+                    cxl_rdma_sidecar_bulk_stats_note_transport_active_bucket_for_kind(
+                        &ctx->stats, claim.kind, kind_active_completed_bytes,
+                        transport_active_time_ns);
+                }
+                ctx->rdma_active_start_ns_by_kind[kind_index] = 0;
+                ctx->rdma_active_completed_bytes_by_kind[kind_index] = 0;
+            }
+            qemu_mutex_unlock(&ctx->lock);
+        }
+        if (drained) {
+            qemu_mutex_lock(&ctx->lock);
+            ctx->rdma_active_completed_bytes += completed_bytes;
+            active_completed_bytes = ctx->rdma_active_completed_bytes;
+            if (active_completed_bytes &&
+                ctx->rdma_active_start_ns &&
+                now_ns > ctx->rdma_active_start_ns) {
+                active_time_ns = now_ns - ctx->rdma_active_start_ns;
+                if (cqe_time_ns > ctx->rdma_active_start_ns) {
+                    transport_active_time_ns =
+                        cqe_time_ns - ctx->rdma_active_start_ns;
+                }
+                cxl_rdma_sidecar_bulk_stats_note_active_epoch(
+                    &ctx->stats,
+                    active_completed_bytes,
+                    active_time_ns);
+                cxl_rdma_sidecar_bulk_stats_note_transport_active_epoch(
+                    &ctx->stats,
+                    active_completed_bytes,
+                    transport_active_time_ns);
+            }
+            ctx->rdma_active_start_ns = 0;
+            ctx->rdma_active_completed_bytes = 0;
+            qemu_mutex_unlock(&ctx->lock);
+        } else if (completed_bytes) {
+            qemu_mutex_lock(&ctx->lock);
+            ctx->rdma_active_completed_bytes += completed_bytes;
+            qemu_mutex_unlock(&ctx->lock);
+        }
+    } else if (drained) {
+        qemu_mutex_lock(&ctx->lock);
+        ctx->rdma_active_start_ns = 0;
+        ctx->rdma_active_completed_bytes = 0;
+        qemu_mutex_unlock(&ctx->lock);
     }
-    cxl_hybrid_region_drop_rdma(claim.region_index);
+    if (cxl_hybrid_rdma_claim_has_region_ownership(&claim)) {
+        cxl_hybrid_region_drop_rdma(claim.region_index);
+    }
     cxl_hybrid_rdma_bulk_claim_release(&claim);
     return 1;
-}
-
-static bool cxl_rdma_sidecar_can_schedule_more(CXLRDMASidecarContext *ctx)
-{
-    bool can_schedule;
-
-    qemu_mutex_lock(&ctx->lock);
-    can_schedule = !ctx->draining &&
-                   ctx->inflight_len <
-                   cxl_rdma_sidecar_inflight_capacity(ctx);
-    qemu_mutex_unlock(&ctx->lock);
-    return can_schedule;
 }
 
 static void cxl_rdma_sidecar_source_loop(CXLRDMASidecarContext *ctx)
@@ -1528,12 +2622,8 @@ static void cxl_rdma_sidecar_source_loop(CXLRDMASidecarContext *ctx)
         Error *local_err = NULL;
         bool running = !ctx->ops.migration_running ||
                        ctx->ops.migration_running(ctx->ops.opaque);
-        bool postcopy = ctx->ops.migration_postcopy &&
-                        ctx->ops.migration_postcopy(ctx->ops.opaque);
         bool failed = ctx->ops.migration_failed &&
                       ctx->ops.migration_failed(ctx->ops.opaque);
-        bool bulk_active = !ctx->ops.bulk_active ||
-                           ctx->ops.bulk_active(ctx->ops.opaque);
         bool made_progress = false;
         int ret;
 
@@ -1549,19 +2639,45 @@ static void cxl_rdma_sidecar_source_loop(CXLRDMASidecarContext *ctx)
         }
         made_progress = ret > 0;
 
-        while (!postcopy && bulk_active &&
-               cxl_rdma_sidecar_can_schedule_more(ctx)) {
+        while (true) {
             CXLHybridRDMABulkClaim claim = { 0 };
 
             if (!cxl_rdma_sidecar_dequeue_bulk_claim(ctx, &claim)) {
                 break;
             }
 
-            trace_cxl_rdma_sidecar_schedule(claim.region_index, claim.bytes);
+            if (!claim.claim_id) {
+                claim.claim_id = cxl_rdma_sidecar_next_claim_id(ctx);
+            }
             claim.post_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-            if (cxl_rdma_sidecar_post_write(ctx, &claim, &local_err) < 0) {
+            ret = cxl_rdma_sidecar_post_write(ctx, &claim, &local_err);
+            if (ret == -EAGAIN) {
+                ret = cxl_rdma_sidecar_poll_or_wait_one_completion(ctx,
+                                                                   &local_err);
+                if (ret <= 0) {
+                    if (!local_err) {
+                        error_setg(&local_err,
+                                   "RDMA sidecar ibv_post_send ENOMEM and no completion became available");
+                    }
+                    ret = -1;
+                } else {
+                    made_progress = true;
+                    claim.post_time_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                    ret = cxl_rdma_sidecar_post_write(ctx, &claim, &local_err);
+                    if (ret == -EAGAIN && !local_err) {
+                        error_setg(&local_err,
+                                   "RDMA sidecar ibv_post_send ENOMEM after retry");
+                    }
+                }
+            }
+            if (ret < 0) {
                 cxl_rdma_sidecar_drop_claim(ctx, &claim);
-                cxl_hybrid_account_rdma_sidecar_failed(claim.region_index);
+                if (cxl_hybrid_rdma_claim_has_region_ownership(&claim)) {
+                    cxl_hybrid_account_rdma_sidecar_failed_no_trace(
+                        claim.region_index);
+                }
+                trace_cxl_rdma_sidecar_failed(claim.claim_id, claim.kind,
+                                              claim.region_index);
                 cxl_rdma_sidecar_mark_failed(ctx, local_err);
                 return;
             }
@@ -1570,6 +2686,18 @@ static void cxl_rdma_sidecar_source_loop(CXLRDMASidecarContext *ctx)
         }
 
         if (!made_progress) {
+            if (cxl_rdma_sidecar_snapshot_inflight_len(ctx)) {
+                ret = cxl_rdma_sidecar_poll_or_wait_one_completion(ctx,
+                                                                   &local_err);
+                if (ret < 0) {
+                    cxl_rdma_sidecar_drop_inflight_claims(ctx);
+                    cxl_rdma_sidecar_mark_failed(ctx, local_err);
+                    return;
+                }
+                if (ret > 0 || ctx->comp_channel) {
+                    continue;
+                }
+            }
             cxl_rdma_sidecar_backoff(ctx, 1);
         }
     }
@@ -1592,6 +2720,8 @@ static void cxl_rdma_sidecar_drop_queued_claims(CXLRDMASidecarContext *ctx)
     }
     ctx->queue_head = 0;
     ctx->queue_len = 0;
+    ctx->queue_bytes = 0;
+    qemu_cond_broadcast(&ctx->cond);
     qemu_mutex_unlock(&ctx->lock);
 
     for (uint32_t i = 0; i < len; i++) {
@@ -1604,6 +2734,7 @@ void cxl_rdma_sidecar_drain_bulk_claims(void)
 {
     CXLRDMASidecarContext *ctx = cxl_rdma_sidecar;
     bool running;
+    bool postcopy;
 
     if (!ctx) {
         return;
@@ -1611,17 +2742,21 @@ void cxl_rdma_sidecar_drain_bulk_claims(void)
 
     qemu_mutex_lock(&ctx->lock);
     running = ctx->running && !ctx->failed && !ctx->stop;
+    postcopy = ctx->ops.migration_postcopy &&
+               ctx->ops.migration_postcopy(ctx->ops.opaque);
     ctx->draining = true;
     qemu_cond_broadcast(&ctx->cond);
-    while (running && ctx->inflight_len) {
+    while (running && !postcopy && (ctx->queue_len || ctx->inflight_len)) {
         qemu_cond_timedwait(&ctx->cond, &ctx->lock, 1);
         running = ctx->running && !ctx->failed && !ctx->stop;
+        postcopy = ctx->ops.migration_postcopy &&
+                   ctx->ops.migration_postcopy(ctx->ops.opaque);
     }
     qemu_mutex_unlock(&ctx->lock);
-    if (!running) {
+    if (!running || postcopy) {
         cxl_rdma_sidecar_drop_inflight_claims(ctx);
+        cxl_rdma_sidecar_drop_queued_claims(ctx);
     }
-    cxl_rdma_sidecar_drop_queued_claims(ctx);
 }
 
 static void cxl_rdma_sidecar_cleanup(CXLRDMASidecarContext *ctx)
@@ -1770,7 +2905,7 @@ static int cxl_rdma_sidecar_start_internal(
     CXLRDMASidecarContext *ctx;
 
     if (!cfg || !cfg->addr || !cfg->total_regions || !cfg->bytes_per_region ||
-        !cfg->pages_per_region || !cfg->max_inflight_regions) {
+        !cfg->pages_per_region) {
         error_setg(errp, "RDMA sidecar configuration is incomplete");
         return -1;
     }
@@ -1793,17 +2928,20 @@ static int cxl_rdma_sidecar_start_internal(
     ctx->bytes_per_region = cfg->bytes_per_region;
     ctx->pages_per_region = cfg->pages_per_region;
     ctx->max_inflight_regions = cfg->max_inflight_regions;
-    ctx->max_cover_percent = cfg->max_cover_percent;
+    ctx->postcopy_dirty_min_span_bytes = cfg->postcopy_dirty_min_span_bytes ?
+        cfg->postcopy_dirty_min_span_bytes :
+        CXL_RDMA_POSTCOPY_DIRTY_MIN_SPAN_BYTES_DEFAULT;
     ctx->pin_all = cfg->pin_all;
-    ctx->queue_capacity = cfg->max_inflight_regions;
+    ctx->inflight_capacity = cxl_rdma_sidecar_effective_inflight_capacity(
+        cfg->total_regions, CXL_RDMA_CQ_DEPTH, cfg->pin_all);
+    ctx->queue_capacity = ctx->inflight_capacity;
     ctx->queue = g_new0(CXLHybridRDMABulkClaim, ctx->queue_capacity);
-    ctx->inflight_capacity = cfg->max_inflight_regions;
     ctx->inflight_claims =
         g_new0(CXLHybridRDMABulkClaim, ctx->inflight_capacity);
-    cxl_rdma_sidecar_admission_state_init(&ctx->admission,
-                                          ctx->inflight_capacity,
-                                          ctx->bytes_per_region);
+    cxl_rdma_sidecar_apply_transport_capacity(ctx, ctx->inflight_capacity);
     ctx->admission_owner = cxl_rdma_sidecar_next_admission_owner();
+    ctx->postcopy_dirty_admission_owner =
+        cxl_rdma_sidecar_next_admission_owner();
     if (cfg->ops) {
         ctx->ops = *cfg->ops;
     }
@@ -1882,7 +3020,23 @@ void cxl_rdma_sidecar_stop(void)
 void cxl_rdma_sidecar_get_stats(CXLHybridRDMASidecarBulkStats *stats)
 {
     CXLRDMASidecarContext *ctx = cxl_rdma_sidecar;
+    CXLHybridRDMASidecarBulkStats *ctx_stats;
     CXLHybridRDMASidecarAdmissionSnapshot snap;
+    CXLHybridRDMAPostcopyDirtyAdmissionSnapshot dirty_snap;
+    uint64_t active_time_ns;
+    uint64_t transport_active_time_ns;
+    uint64_t active_start_ns;
+    uint64_t precopy_active_time_ns;
+    uint64_t precopy_transport_active_time_ns;
+    uint64_t postcopy_dirty_active_time_ns;
+    uint64_t postcopy_dirty_transport_active_time_ns;
+    uint64_t now_ns;
+    uint32_t dirty_queue_wr = 0;
+    uint32_t dirty_inflight_wr = 0;
+    uint64_t dirty_queue_bytes = 0;
+    uint64_t dirty_inflight_bytes = 0;
+    bool bulk_active;
+    bool postcopy;
 
     if (!stats) {
         return;
@@ -1891,33 +3045,151 @@ void cxl_rdma_sidecar_get_stats(CXLHybridRDMASidecarBulkStats *stats)
         memset(stats, 0, sizeof(*stats));
         return;
     }
+    ctx_stats = &ctx->stats;
 
     stats->rdma_bulk_regions =
-        qatomic_read(&ctx->stats.rdma_bulk_regions);
+        qatomic_read(&ctx_stats->rdma_bulk_regions);
     stats->rdma_bulk_bytes =
-        qatomic_read(&ctx->stats.rdma_bulk_bytes);
+        qatomic_read(&ctx_stats->rdma_bulk_bytes);
     stats->page_state_rdma_completed_pages =
-        qatomic_read(&ctx->stats.page_state_rdma_completed_pages);
+        qatomic_read(&ctx_stats->page_state_rdma_completed_pages);
     stats->page_state_rdma_completed_bytes =
-        qatomic_read(&ctx->stats.page_state_rdma_completed_bytes);
+        qatomic_read(&ctx_stats->page_state_rdma_completed_bytes);
     stats->page_state_rdma_completed_time_ns =
-        qatomic_read(&ctx->stats.page_state_rdma_completed_time_ns);
+        qatomic_read(&ctx_stats->page_state_rdma_completed_time_ns);
+    active_time_ns = qatomic_read(&ctx_stats->page_state_rdma_active_time_ns);
+    stats->page_state_rdma_transport_completed_time_ns =
+        qatomic_read(
+            &ctx_stats->page_state_rdma_transport_completed_time_ns);
+    transport_active_time_ns =
+        qatomic_read(&ctx_stats->page_state_rdma_transport_active_time_ns);
+    stats->page_state_rdma_publish_time_ns =
+        qatomic_read(&ctx_stats->page_state_rdma_publish_time_ns);
     stats->page_state_rdma_stale_pages =
-        qatomic_read(&ctx->stats.page_state_rdma_stale_pages);
+        qatomic_read(&ctx_stats->page_state_rdma_stale_pages);
+    stats->page_state_rdma_precopy_completed_bytes =
+        qatomic_read(&ctx_stats->page_state_rdma_precopy_completed_bytes);
+    stats->page_state_rdma_precopy_completed_time_ns =
+        qatomic_read(&ctx_stats->page_state_rdma_precopy_completed_time_ns);
+    precopy_active_time_ns =
+        qatomic_read(&ctx_stats->page_state_rdma_precopy_active_time_ns);
+    stats->page_state_rdma_precopy_transport_completed_time_ns =
+        qatomic_read(
+            &ctx_stats->page_state_rdma_precopy_transport_completed_time_ns);
+    precopy_transport_active_time_ns =
+        qatomic_read(
+            &ctx_stats->page_state_rdma_precopy_transport_active_time_ns);
+    stats->page_state_rdma_precopy_publish_time_ns =
+        qatomic_read(&ctx_stats->page_state_rdma_precopy_publish_time_ns);
+    stats->page_state_rdma_postcopy_dirty_completed_bytes =
+        qatomic_read(
+            &ctx_stats->page_state_rdma_postcopy_dirty_completed_bytes);
+    stats->page_state_rdma_postcopy_dirty_completed_time_ns =
+        qatomic_read(
+            &ctx_stats->page_state_rdma_postcopy_dirty_completed_time_ns);
+    postcopy_dirty_active_time_ns =
+        qatomic_read(
+            &ctx_stats->page_state_rdma_postcopy_dirty_active_time_ns);
+    stats->page_state_rdma_postcopy_dirty_transport_completed_time_ns =
+        qatomic_read(
+            &ctx_stats->
+                page_state_rdma_postcopy_dirty_transport_completed_time_ns);
+    postcopy_dirty_transport_active_time_ns =
+        qatomic_read(
+            &ctx_stats->
+                page_state_rdma_postcopy_dirty_transport_active_time_ns);
+    stats->page_state_rdma_postcopy_dirty_publish_time_ns =
+        qatomic_read(
+            &ctx_stats->page_state_rdma_postcopy_dirty_publish_time_ns);
+    stats->rdma_sidecar_postcopy_dirty_posted_spans =
+        qatomic_read(
+            &ctx_stats->rdma_sidecar_postcopy_dirty_posted_spans);
+    stats->rdma_sidecar_postcopy_dirty_posted_bytes =
+        qatomic_read(
+            &ctx_stats->rdma_sidecar_postcopy_dirty_posted_bytes);
+    stats->rdma_sidecar_postcopy_dirty_completed_spans =
+        qatomic_read(
+            &ctx_stats->rdma_sidecar_postcopy_dirty_completed_spans);
+    stats->rdma_sidecar_postcopy_dirty_completed_bytes =
+        qatomic_read(
+            &ctx_stats->rdma_sidecar_postcopy_dirty_completed_bytes);
+    stats->rdma_sidecar_postcopy_dirty_completed_pages =
+        qatomic_read(
+            &ctx_stats->rdma_sidecar_postcopy_dirty_completed_pages);
+    stats->rdma_sidecar_postcopy_dirty_stale_pages =
+        qatomic_read(
+            &ctx_stats->rdma_sidecar_postcopy_dirty_stale_pages);
+    stats->rdma_sidecar_postcopy_dirty_max_span_bytes =
+        qatomic_read(
+            &ctx_stats->rdma_sidecar_postcopy_dirty_max_span_bytes);
 
     qemu_mutex_lock(&ctx->lock);
+    cxl_rdma_sidecar_postcopy_dirty_count_context_locked(
+        ctx, &dirty_queue_wr, &dirty_inflight_wr, &dirty_queue_bytes,
+        &dirty_inflight_bytes);
+    bulk_active = !ctx->ops.bulk_active ||
+                  ctx->ops.bulk_active(ctx->ops.opaque);
+    postcopy = ctx->ops.migration_postcopy &&
+               ctx->ops.migration_postcopy(ctx->ops.opaque);
     snap = cxl_rdma_sidecar_admission_snapshot(
         &ctx->admission,
         ctx->running && !ctx->stop && !ctx->incoming,
-        !ctx->ops.bulk_active || ctx->ops.bulk_active(ctx->ops.opaque),
+        bulk_active,
         ctx->draining,
         ctx->failed,
-        ctx->ops.migration_postcopy &&
-            ctx->ops.migration_postcopy(ctx->ops.opaque),
+        postcopy,
         ctx->queue_len,
         ctx->inflight_len);
+    dirty_snap = cxl_rdma_sidecar_postcopy_dirty_admission_snapshot(
+        &ctx->postcopy_dirty_admission,
+        ctx->running && !ctx->stop && !ctx->incoming,
+        postcopy,
+        bulk_active,
+        ctx->draining,
+        ctx->failed,
+        0,
+        dirty_queue_wr,
+        dirty_inflight_wr,
+        dirty_queue_bytes,
+        dirty_inflight_bytes);
+    active_start_ns = ctx->rdma_active_start_ns;
+    if (ctx->inflight_len) {
+        now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (active_start_ns && now_ns > active_start_ns) {
+            active_time_ns += now_ns - active_start_ns;
+            transport_active_time_ns += now_ns - active_start_ns;
+        }
+        active_start_ns = ctx->rdma_active_start_ns_by_kind[
+            CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION];
+        if (ctx->rdma_active_inflight_by_kind[
+                CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION] &&
+            active_start_ns && now_ns > active_start_ns) {
+            precopy_active_time_ns += now_ns - active_start_ns;
+            precopy_transport_active_time_ns += now_ns - active_start_ns;
+        }
+        active_start_ns = ctx->rdma_active_start_ns_by_kind[
+            CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN];
+        if (ctx->rdma_active_inflight_by_kind[
+                CXL_HYBRID_RDMA_CLAIM_POSTCOPY_DIRTY_SPAN] &&
+            active_start_ns && now_ns > active_start_ns) {
+            postcopy_dirty_active_time_ns += now_ns - active_start_ns;
+            postcopy_dirty_transport_active_time_ns +=
+                now_ns - active_start_ns;
+        }
+    }
     qemu_mutex_unlock(&ctx->lock);
 
+    stats->page_state_rdma_active_time_ns = active_time_ns;
+    stats->page_state_rdma_transport_active_time_ns =
+        transport_active_time_ns;
+    stats->page_state_rdma_precopy_active_time_ns =
+        precopy_active_time_ns;
+    stats->page_state_rdma_precopy_transport_active_time_ns =
+        precopy_transport_active_time_ns;
+    stats->page_state_rdma_postcopy_dirty_active_time_ns =
+        postcopy_dirty_active_time_ns;
+    stats->page_state_rdma_postcopy_dirty_transport_active_time_ns =
+        postcopy_dirty_transport_active_time_ns;
     stats->rdma_sidecar_dynamic_window_regions =
         snap.dynamic_window_regions;
     stats->rdma_sidecar_sq_capacity_regions = snap.sq_capacity_regions;
@@ -1935,6 +3207,21 @@ void cxl_rdma_sidecar_get_stats(CXLHybridRDMASidecarBulkStats *stats)
         snap.admission_closed_events;
     stats->rdma_sidecar_admission_goodput_drop_events =
         snap.goodput_drop_events;
+    stats->rdma_sidecar_postcopy_dirty_overflow_cxl_spans =
+        dirty_snap.overflow_cxl_spans;
+    stats->rdma_sidecar_postcopy_dirty_min_span_cxl_spans =
+        dirty_snap.min_span_cxl_spans;
+    stats->rdma_sidecar_postcopy_dirty_max_inflight_wr =
+        dirty_snap.max_inflight_wr;
+    stats->rdma_sidecar_postcopy_dirty_queue_wr = dirty_snap.queue_wr;
+    stats->rdma_sidecar_postcopy_dirty_inflight_wr = dirty_snap.inflight_wr;
+    stats->rdma_sidecar_postcopy_dirty_max_inflight_bytes =
+        dirty_snap.max_inflight_bytes;
+    stats->rdma_sidecar_postcopy_dirty_queue_bytes = dirty_snap.queue_bytes;
+    stats->rdma_sidecar_postcopy_dirty_inflight_bytes =
+        dirty_snap.inflight_bytes;
+    stats->rdma_sidecar_postcopy_dirty_min_span_bytes =
+        dirty_snap.min_span_bytes;
 }
 #else
 int cxl_rdma_sidecar_start(const CXLHybridRDMASidecarConfig *cfg,
@@ -1992,6 +3279,32 @@ bool cxl_rdma_sidecar_get_admission_snapshot(
         memset(snapshot, 0, sizeof(*snapshot));
     }
     return false;
+}
+
+bool cxl_rdma_sidecar_try_reserve_postcopy_dirty_admission(
+    const CXLHybridRDMABulkClaim *claim,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation,
+    CXLHybridRDMAPostcopyDirtyAdmissionSnapshot *snapshot)
+{
+    cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+    if (snapshot) {
+        memset(snapshot, 0, sizeof(*snapshot));
+    }
+    return false;
+}
+
+bool cxl_rdma_sidecar_enqueue_reserved_postcopy_dirty_claim(
+    const CXLHybridRDMABulkClaim *claim,
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation)
+{
+    cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
+    return false;
+}
+
+void cxl_rdma_sidecar_cancel_postcopy_dirty_admission(
+    CXLHybridRDMAPostcopyDirtyAdmissionReservation *reservation)
+{
+    cxl_rdma_sidecar_postcopy_dirty_reservation_clear(reservation);
 }
 
 bool cxl_rdma_sidecar_enqueue_bulk_claim(

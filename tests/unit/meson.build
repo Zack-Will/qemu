@@ -124,9 +124,9 @@ endif
 
 if have_system
   tests += {
-    'test-cxl-hybrid-control': [migration],
-    'test-cxl-hybrid-region': [migration],
-    'test-migration-postcopy': [migration],
+    'test-cxl-hybrid-control': ['cxl-target-page-stub.c', migration],
+    'test-cxl-hybrid-region': ['cxl-target-page-stub.c', migration],
+    'test-migration-postcopy': ['cxl-target-page-stub.c', migration],
     'ptimer-test': ['ptimer-test-stubs.c', meson.project_source_root() / 'hw/core/ptimer.c'],
     'test-iov': [],
     'test-migration-downtime': [migration],

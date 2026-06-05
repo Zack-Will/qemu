@@ -643,6 +643,41 @@ static void test_visible_published_pages_need_install_until_received(void)
         &hdr, visible, page_state, 3, generation, false, &location));
 }
 
+static void test_visible_dst_local_pages_need_prerun_wake_until_received(void)
+{
+    CXLHybridControlHeader hdr = { 0 };
+    unsigned long visible[1] = { 0 };
+    uint64_t page_state[4];
+    uint32_t generation = 13;
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible,
+                                       G_N_ELEMENTS(page_state),
+                                       page_state,
+                                       G_N_ELEMENTS(page_state),
+                                       NULL, 0, NULL, 0,
+                                       64 * 1024, 12, generation);
+    cxl_hybrid_control_mark_page_visible_generation(
+        &hdr, visible, page_state, 0, generation,
+        CXL_HYBRID_PAGE_LOCATION_CXL);
+    cxl_hybrid_control_mark_page_visible_generation(
+        &hdr, visible, page_state, 1, generation,
+        CXL_HYBRID_PAGE_LOCATION_DST_LOCAL);
+    cxl_hybrid_control_mark_page_visible_generation(
+        &hdr, visible, page_state, 2, generation,
+        CXL_HYBRID_PAGE_LOCATION_ZERO);
+
+    g_assert_false(cxl_hybrid_control_page_requires_dst_local_wake(
+        &hdr, visible, page_state, 0, generation, false));
+    g_assert_true(cxl_hybrid_control_page_requires_dst_local_wake(
+        &hdr, visible, page_state, 1, generation, false));
+    g_assert_false(cxl_hybrid_control_page_requires_dst_local_wake(
+        &hdr, visible, page_state, 1, generation, true));
+    g_assert_false(cxl_hybrid_control_page_requires_dst_local_wake(
+        &hdr, visible, page_state, 2, generation, false));
+    g_assert_false(cxl_hybrid_control_page_requires_dst_local_wake(
+        &hdr, visible, page_state, 3, generation, false));
+}
+
 static void test_cxl_owned_pages_need_postcopy_discard(void)
 {
     CXLHybridControlHeader hdr = { 0 };
@@ -693,7 +728,37 @@ static void test_fault_place_eexist_requires_received_repair(void)
     g_assert_true(cxl_hybrid_fault_place_result_satisfied(0, false));
     g_assert_true(cxl_hybrid_fault_place_result_satisfied(-EEXIST, true));
     g_assert_false(cxl_hybrid_fault_place_result_satisfied(-EEXIST, false));
+    g_assert_false(cxl_hybrid_fault_place_result_satisfied(-ENOENT, true));
     g_assert_false(cxl_hybrid_fault_place_result_satisfied(-EIO, true));
+}
+
+static void test_cleanup_place_enoent_requires_received_or_remapped(void)
+{
+    g_assert_true(cxl_hybrid_cleanup_place_result_satisfied(0, false, false));
+    g_assert_true(cxl_hybrid_cleanup_place_result_satisfied(-EEXIST, true,
+                                                           false));
+    g_assert_false(cxl_hybrid_cleanup_place_result_satisfied(-EEXIST, false,
+                                                            false));
+    g_assert_true(cxl_hybrid_cleanup_place_result_satisfied(-ENOENT, true,
+                                                           false));
+    g_assert_true(cxl_hybrid_cleanup_place_result_satisfied(-ENOENT, false,
+                                                           true));
+    g_assert_false(cxl_hybrid_cleanup_place_result_satisfied(-ENOENT, false,
+                                                            false));
+    g_assert_false(cxl_hybrid_cleanup_place_result_satisfied(-EIO, true,
+                                                            true));
+}
+
+static void test_cleanup_install_action_skips_copy_for_received_or_remapped(void)
+{
+    g_assert_cmpint(cxl_hybrid_cleanup_install_action(true, false), ==,
+                    CXL_HYBRID_CLEANUP_INSTALL_SKIP);
+    g_assert_cmpint(cxl_hybrid_cleanup_install_action(false, true), ==,
+                    CXL_HYBRID_CLEANUP_INSTALL_MARK_RECEIVED);
+    g_assert_cmpint(cxl_hybrid_cleanup_install_action(true, true), ==,
+                    CXL_HYBRID_CLEANUP_INSTALL_SKIP);
+    g_assert_cmpint(cxl_hybrid_cleanup_install_action(false, false), ==,
+                    CXL_HYBRID_CLEANUP_INSTALL_COPY);
 }
 
 static void test_mark_page_dirty_clears_visible_and_stales_published(void)
@@ -820,6 +885,105 @@ static void test_page_state_dirty_makes_rdma_completion_stale(void)
     g_assert_cmpuint(cxl_hybrid_page_state_kind(slot), ==,
                      CXL_HYBRID_PAGE_STATE_DIRTY);
     g_assert_cmpuint(cxl_hybrid_page_state_dirty_seq(slot), ==, 12);
+}
+
+static void test_rdma_descriptor_completion_records_result_bitmaps(void)
+{
+    uint64_t page_state[4];
+    CXLHybridRDMAPageDescriptor desc = { 0 };
+    uint32_t generation = 15;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_dirty(generation, i + 1);
+    }
+    g_assert_true(cxl_hybrid_rdma_descriptor_claim_pages_for_test(
+        &desc, page_state, G_N_ELEMENTS(page_state), 0, 4, generation));
+    cxl_hybrid_page_state_mark_dirty(&page_state[1], generation, 99);
+
+    cxl_hybrid_rdma_descriptor_complete_pages_for_test(&desc, page_state,
+                                                       G_N_ELEMENTS(page_state));
+
+    g_assert_true(cxl_hybrid_rdma_descriptor_page_completed(&desc, 0));
+    g_assert_false(cxl_hybrid_rdma_descriptor_page_stale(&desc, 0));
+    g_assert_false(cxl_hybrid_rdma_descriptor_page_completed(&desc, 1));
+    g_assert_true(cxl_hybrid_rdma_descriptor_page_stale(&desc, 1));
+    g_assert_true(cxl_hybrid_rdma_descriptor_page_completed(&desc, 2));
+    g_assert_false(cxl_hybrid_rdma_descriptor_page_claimed(&desc, 0));
+    g_assert_false(cxl_hybrid_rdma_descriptor_page_completed(&desc, 4));
+
+    cxl_hybrid_rdma_descriptor_destroy(&desc);
+}
+
+static void test_postcopy_rdma_completion_publishes_dst_local_pages(void)
+{
+    uint64_t page_state[4];
+    unsigned long visible[BITS_TO_LONGS(4)] = { 0 };
+    CXLHybridControlHeader hdr = { 0 };
+    CXLHybridRDMAPageDescriptor desc = { 0 };
+    uint32_t completed = 0;
+    uint32_t stale = 0;
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible,
+                                       G_N_ELEMENTS(page_state),
+                                       page_state,
+                                       G_N_ELEMENTS(page_state),
+                                       NULL, 0, NULL, 0,
+                                       64 * 1024, 12, 21);
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_dirty(21, i + 1);
+    }
+    g_assert_true(cxl_hybrid_rdma_descriptor_claim_contiguous_for_test(
+        &desc, page_state, G_N_ELEMENTS(page_state), 0, 4, 21, NULL));
+
+    cxl_hybrid_control_complete_rdma_pages_for_test(
+        &hdr, visible, page_state, G_N_ELEMENTS(page_state), &desc,
+        &completed, &stale);
+
+    g_assert_cmpuint(completed, ==, 4);
+    g_assert_cmpuint(stale, ==, 0);
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        g_assert_true(cxl_hybrid_page_state_can_consume(
+            page_state[i], 21, CXL_HYBRID_PAGE_LOCATION_DST_LOCAL));
+        g_assert_true(test_bit(i, visible));
+        g_assert_true(cxl_hybrid_rdma_descriptor_page_completed(&desc, i));
+    }
+
+    cxl_hybrid_rdma_descriptor_destroy(&desc);
+}
+
+static void test_postcopy_rdma_stale_page_is_reported_for_retry(void)
+{
+    uint64_t page_state[4];
+    unsigned long visible[BITS_TO_LONGS(4)] = { 0 };
+    CXLHybridControlHeader hdr = { 0 };
+    CXLHybridRDMAPageDescriptor desc = { 0 };
+    uint32_t completed = 0;
+    uint32_t stale = 0;
+
+    cxl_hybrid_control_reset_run_state(&hdr, visible,
+                                       G_N_ELEMENTS(page_state),
+                                       page_state,
+                                       G_N_ELEMENTS(page_state),
+                                       NULL, 0, NULL, 0,
+                                       64 * 1024, 12, 22);
+    for (size_t i = 0; i < G_N_ELEMENTS(page_state); i++) {
+        page_state[i] = cxl_hybrid_page_state_make_dirty(22, i + 1);
+    }
+    g_assert_true(cxl_hybrid_rdma_descriptor_claim_contiguous_for_test(
+        &desc, page_state, G_N_ELEMENTS(page_state), 0, 4, 22, NULL));
+    cxl_hybrid_page_state_mark_dirty(&page_state[2], 22, 99);
+
+    cxl_hybrid_control_complete_rdma_pages_for_test(
+        &hdr, visible, page_state, G_N_ELEMENTS(page_state), &desc,
+        &completed, &stale);
+
+    g_assert_cmpuint(completed, ==, 3);
+    g_assert_cmpuint(stale, ==, 1);
+    g_assert_true(cxl_hybrid_rdma_descriptor_page_stale(&desc, 2));
+    g_assert_cmpuint(cxl_hybrid_page_state_kind(page_state[2]), ==,
+                     CXL_HYBRID_PAGE_STATE_DIRTY);
+
+    cxl_hybrid_rdma_descriptor_destroy(&desc);
 }
 
 static void test_page_state_rejects_double_claim(void)
@@ -2065,8 +2229,14 @@ int main(int argc, char **argv)
                     test_page_location_reports_visible_dst_local);
     g_test_add_func("/cxl-hybrid-control/visible-published-pages-need-install-until-received",
                     test_visible_published_pages_need_install_until_received);
+    g_test_add_func("/cxl-hybrid-control/visible-dst-local-pages-need-prerun-wake-until-received",
+                    test_visible_dst_local_pages_need_prerun_wake_until_received);
     g_test_add_func("/cxl-hybrid-control/fault-place-eexist-requires-received-repair",
                     test_fault_place_eexist_requires_received_repair);
+    g_test_add_func("/cxl-hybrid-control/cleanup-place-enoent-requires-received-or-remapped",
+                    test_cleanup_place_enoent_requires_received_or_remapped);
+    g_test_add_func("/cxl-hybrid-control/cleanup-install-action-skips-copy-for-received-or-remapped",
+                    test_cleanup_install_action_skips_copy_for_received_or_remapped);
     g_test_add_func("/cxl-hybrid-control/mark-page-dirty-clears-visible-and-stales-published",
                     test_mark_page_dirty_clears_visible_and_stales_published);
     g_test_add_func("/cxl-hybrid-control/mark-page-dirty-rejects-generation-mismatch",
@@ -2079,6 +2249,12 @@ int main(int argc, char **argv)
                     test_page_state_drop_claim_restores_dirty);
     g_test_add_func("/cxl-hybrid-control/page-state-dirty-stales-rdma",
                     test_page_state_dirty_makes_rdma_completion_stale);
+    g_test_add_func("/cxl-hybrid-control/rdma-descriptor-completion-records-result-bitmaps",
+                    test_rdma_descriptor_completion_records_result_bitmaps);
+    g_test_add_func("/cxl-hybrid-control/postcopy-rdma-completion-publishes-dst-local-pages",
+                    test_postcopy_rdma_completion_publishes_dst_local_pages);
+    g_test_add_func("/cxl-hybrid-control/postcopy-rdma-stale-page-is-reported-for-retry",
+                    test_postcopy_rdma_stale_page_is_reported_for_retry);
     g_test_add_func("/cxl-hybrid-control/page-state-rejects-double-claim",
                     test_page_state_rejects_double_claim);
     g_test_add_func("/cxl-hybrid-control/page-state-matches-encoded-generation",

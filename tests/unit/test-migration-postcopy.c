@@ -227,6 +227,45 @@ static void test_native_or_postcopy_skips_rdma_precopy_completion_drain(void)
             true, true, MIGRATION_STATUS_POSTCOPY_ACTIVE));
 }
 
+static void test_postcopy_background_ram_tries_dirty_rdma_first(void)
+{
+    g_assert_true(
+        migration_postcopy_cxl_should_try_dirty_rdma_before_ram_stream(
+            true, true, CXL_HYBRID_PHASE_POSTCOPY_WARM, true, true));
+}
+
+static void test_postcopy_background_ram_skips_dirty_rdma_without_candidate(void)
+{
+    g_assert_false(
+        migration_postcopy_cxl_should_try_dirty_rdma_before_ram_stream(
+            true, true, CXL_HYBRID_PHASE_POSTCOPY_WARM, true, false));
+}
+
+static void test_postcopy_background_ram_skips_dirty_rdma_when_disabled(void)
+{
+    g_assert_false(
+        migration_postcopy_cxl_should_try_dirty_rdma_before_ram_stream(
+            true, true, CXL_HYBRID_PHASE_POSTCOPY_WARM, false, true));
+    g_assert_false(
+        migration_postcopy_cxl_should_try_dirty_rdma_before_ram_stream(
+            true, true, CXL_HYBRID_PHASE_PRECOPY_BULK, true, true));
+    g_assert_false(
+        migration_postcopy_cxl_should_try_dirty_rdma_before_ram_stream(
+            false, true, CXL_HYBRID_PHASE_POSTCOPY_WARM, true, true));
+}
+
+static void test_postcopy_background_ram_advances_past_dirty_rdma_span(void)
+{
+    g_assert_cmpuint(
+        migration_postcopy_cxl_dirty_rdma_next_ram_stream_page(42, 7), ==, 49);
+    g_assert_cmpuint(
+        migration_postcopy_cxl_dirty_rdma_next_ram_stream_page(42, 0), ==, 42);
+    g_assert_cmpuint(
+        migration_postcopy_cxl_dirty_rdma_next_ram_stream_page(ULONG_MAX - 2,
+                                                              4),
+        ==, ULONG_MAX);
+}
+
 static void test_uffd_copy_result_allows_existing_only_when_requested(void)
 {
     g_assert_true(migration_postcopy_uffd_copy_result_satisfied(0, false));
@@ -237,6 +276,37 @@ static void test_uffd_copy_result_allows_existing_only_when_requested(void)
         migration_postcopy_uffd_copy_result_satisfied(-EEXIST, true));
     g_assert_false(
         migration_postcopy_uffd_copy_result_satisfied(-EIO, true));
+}
+
+static void test_cleanup_unregister_ignores_einval_only_for_hybrid_cxl(void)
+{
+    g_assert_true(
+        migration_postcopy_cleanup_unregister_result_satisfied(0, false));
+    g_assert_true(
+        migration_postcopy_cleanup_unregister_result_satisfied(0, true));
+    g_assert_false(
+        migration_postcopy_cleanup_unregister_result_satisfied(-EINVAL,
+                                                              false));
+    g_assert_true(
+        migration_postcopy_cleanup_unregister_result_satisfied(-EINVAL,
+                                                              true));
+    g_assert_false(
+        migration_postcopy_cleanup_unregister_result_satisfied(-ENOENT,
+                                                              true));
+}
+
+static void test_dst_started_marker_skips_guest_write_in_incoming_postcopy(void)
+{
+    g_assert_true(migration_postcopy_timeline_marker_skip_guest_write(
+        true, CXL_GUEST_TIMELINE_EVENT_DST_STARTED));
+}
+
+static void test_other_markers_still_write_in_incoming_postcopy(void)
+{
+    g_assert_false(migration_postcopy_timeline_marker_skip_guest_write(
+        true, CXL_GUEST_TIMELINE_EVENT_DST_STARTED_ACK));
+    g_assert_false(migration_postcopy_timeline_marker_skip_guest_write(
+        false, CXL_GUEST_TIMELINE_EVENT_DST_STARTED));
 }
 
 int main(int argc, char **argv)
@@ -300,7 +370,21 @@ int main(int argc, char **argv)
                     test_hybrid_rdma_drains_before_precopy_completion);
     g_test_add_func("/migration/postcopy/native-or-postcopy-skips-rdma-precopy-completion-drain",
                     test_native_or_postcopy_skips_rdma_precopy_completion_drain);
+    g_test_add_func("/migration/postcopy/background-ram-tries-dirty-rdma-first",
+                    test_postcopy_background_ram_tries_dirty_rdma_first);
+    g_test_add_func("/migration/postcopy/background-ram-skips-dirty-rdma-without-candidate",
+                    test_postcopy_background_ram_skips_dirty_rdma_without_candidate);
+    g_test_add_func("/migration/postcopy/background-ram-skips-dirty-rdma-when-disabled",
+                    test_postcopy_background_ram_skips_dirty_rdma_when_disabled);
+    g_test_add_func("/migration/postcopy/background-ram-advances-past-dirty-rdma-span",
+                    test_postcopy_background_ram_advances_past_dirty_rdma_span);
     g_test_add_func("/migration/postcopy/uffd-copy-result-allows-existing-only-when-requested",
                     test_uffd_copy_result_allows_existing_only_when_requested);
+    g_test_add_func("/migration/postcopy/cleanup-unregister-ignores-einval-only-for-hybrid-cxl",
+                    test_cleanup_unregister_ignores_einval_only_for_hybrid_cxl);
+    g_test_add_func("/migration/postcopy/dst-started-marker-skips-guest-write-in-incoming-postcopy",
+                    test_dst_started_marker_skips_guest_write_in_incoming_postcopy);
+    g_test_add_func("/migration/postcopy/other-markers-still-write-in-incoming-postcopy",
+                    test_other_markers_still_write_in_incoming_postcopy);
     return g_test_run();
 }

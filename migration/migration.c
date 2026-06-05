@@ -122,8 +122,13 @@ void cxl_guest_timeline_mark(const char *stage, CXLGuestTimelineEvent event)
     cxl_guest_timeline_seq++;
     payload[0] = cpu_to_le32((uint32_t)event);
     payload[1] = cpu_to_le32(cxl_guest_timeline_seq);
-    cpu_physical_memory_write(cxl_guest_timeline_addr + 16, payload,
-                              sizeof(payload));
+    if (migration_postcopy_timeline_marker_skip_guest_write(
+            postcopy_state_get() == POSTCOPY_INCOMING_RUNNING, event)) {
+        ret = -EAGAIN;
+    } else {
+        cpu_physical_memory_write(cxl_guest_timeline_addr + 16, payload,
+                                  sizeof(payload));
+    }
     trace_cxl_hybrid_guest_timeline_marker(
         stage, cxl_guest_timeline_seq, event, now_ns,
         cxl_guest_timeline_addr, ret);

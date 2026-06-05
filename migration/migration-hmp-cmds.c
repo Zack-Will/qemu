@@ -770,14 +770,19 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         visit_type_uint32(
             v, param, &p->x_cxl_rdma_sidecar_max_inflight_regions, &err);
         break;
-    case MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_MAX_COVER_PERCENT:
-        p->has_x_cxl_rdma_sidecar_max_cover_percent = true;
-        visit_type_uint8(
-            v, param, &p->x_cxl_rdma_sidecar_max_cover_percent, &err);
-        break;
     case MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_REGION_BYTES:
         p->has_x_cxl_rdma_sidecar_region_bytes = true;
         visit_type_size(v, param, &p->x_cxl_rdma_sidecar_region_bytes, &err);
+        break;
+    case MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY:
+        p->has_x_cxl_rdma_sidecar_postcopy_dirty = true;
+        visit_type_bool(v, param,
+                        &p->x_cxl_rdma_sidecar_postcopy_dirty, &err);
+        break;
+    case MIGRATION_PARAMETER_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY_MIN_BYTES:
+        p->has_x_cxl_rdma_sidecar_postcopy_dirty_min_bytes = true;
+        visit_type_size(
+            v, param, &p->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes, &err);
         break;
     case MIGRATION_PARAMETER_CPR_EXEC_COMMAND: {
         /*

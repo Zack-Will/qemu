@@ -673,15 +673,100 @@
 # @page-state-cxl-worker-time-ns: nanoseconds spent copying bytes for
 #     @page-state-cxl-worker-bytes.  (Since 11.0)
 #
+# @page-state-cxl-worker-precopy-bytes: bytes copied by the
+#     page-state CXL lane while the CXL hybrid phase was precopy bulk,
+#     precopy brake, or switching.  (Since 11.0)
+#
+# @page-state-cxl-worker-precopy-time-ns: nanoseconds spent copying
+#     bytes for @page-state-cxl-worker-precopy-bytes.  (Since 11.0)
+#
+# @page-state-cxl-worker-postcopy-bytes: bytes copied by the
+#     page-state CXL lane while the CXL hybrid phase was postcopy
+#     warm.  (Since 11.0)
+#
+# @page-state-cxl-worker-postcopy-time-ns: nanoseconds spent copying
+#     bytes for @page-state-cxl-worker-postcopy-bytes.  (Since 11.0)
+#
 # @page-state-rdma-completed-bytes: bytes completed by RDMA
+#     descriptors and published through page-state.  (Since 11.0)
+#
+# @page-state-rdma-completed-pages: pages completed by RDMA
 #     descriptors and published through page-state.  (Since 11.0)
 #
 # @page-state-rdma-completed-time-ns: nanoseconds from RDMA descriptor
 #     post to completion for completed page-state RDMA descriptors.
 #     (Since 11.0)
 #
+# @page-state-rdma-active-time-ns: cumulative wall-clock nanoseconds
+#     where at least one page-state RDMA descriptor was in flight.
+#     Use this for concurrent RDMA lane goodput.  (Since 11.0)
+#
+# @page-state-rdma-transport-completed-time-ns: cumulative nanoseconds
+#     from RDMA descriptor post to CQE observation.  Excludes
+#     page-state publication.  (Since 11.0)
+#
+# @page-state-rdma-transport-active-time-ns: cumulative wall-clock
+#     nanoseconds from first RDMA descriptor post to last CQE
+#     observation in active RDMA epochs.  Excludes page-state
+#     publication.  (Since 11.0)
+#
+# @page-state-rdma-publish-time-ns: cumulative nanoseconds from RDMA
+#     CQE observation to page-state publication completion.
+#     (Since 11.0)
+#
 # @page-state-rdma-stale-pages: pages whose RDMA descriptor completion
 #     did not match the captured page-state claim.  (Since 11.0)
+#
+# @page-state-rdma-precopy-completed-bytes: bytes completed by
+#     precopy RDMA descriptors and published through page-state.
+#     (Since 11.0)
+#
+# @page-state-rdma-precopy-completed-time-ns: nanoseconds from RDMA
+#     descriptor post to completion for completed precopy page-state
+#     RDMA descriptors.  (Since 11.0)
+#
+# @page-state-rdma-precopy-active-time-ns: cumulative wall-clock
+#     nanoseconds where at least one precopy page-state RDMA
+#     descriptor was in flight.  (Since 11.0)
+#
+# @page-state-rdma-precopy-transport-completed-time-ns: cumulative
+#     nanoseconds from precopy RDMA descriptor post to CQE
+#     observation.  Excludes page-state publication.  (Since 11.0)
+#
+# @page-state-rdma-precopy-transport-active-time-ns: cumulative
+#     wall-clock nanoseconds from first precopy RDMA descriptor post
+#     to last CQE observation in active RDMA epochs.  Excludes
+#     page-state publication.  (Since 11.0)
+#
+# @page-state-rdma-precopy-publish-time-ns: cumulative nanoseconds
+#     from precopy RDMA CQE observation to page-state publication
+#     completion.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-completed-bytes: bytes completed by
+#     postcopy dirty RDMA descriptors and published through
+#     page-state.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-completed-time-ns: nanoseconds from
+#     RDMA descriptor post to completion for completed postcopy dirty
+#     page-state RDMA descriptors.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-active-time-ns: cumulative
+#     wall-clock nanoseconds where at least one postcopy dirty
+#     page-state RDMA descriptor was in flight.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-transport-completed-time-ns:
+#     cumulative nanoseconds from postcopy dirty RDMA descriptor post
+#     to CQE observation.  Excludes page-state publication.
+#     (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-transport-active-time-ns:
+#     cumulative wall-clock nanoseconds from first postcopy dirty RDMA
+#     descriptor post to last CQE observation in active RDMA epochs.
+#     Excludes page-state publication.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-publish-time-ns: cumulative
+#     nanoseconds from postcopy dirty RDMA CQE observation to
+#     page-state publication completion.  (Since 11.0)
 #
 # @page-state-cas-failures: page-state CAS failures observed by active
 #     CXL/RDMA lane completion.  (Since 11.0)
@@ -716,14 +801,8 @@
 # @rdma-sidecar-no-candidate-events: number of scans that found no
 #     RDMA sidecar candidate.  (Since 11.0)
 #
-# @rdma-sidecar-budget-skip-events: number of RDMA sidecar skips due
-#     to configured budget.  (Since 11.0)
-#
 # @rdma-sidecar-max-inflight-regions: configured maximum RDMA sidecar
 #     inflight regions.  (Since 11.0)
-#
-# @rdma-sidecar-max-cover-percent: configured maximum RDMA sidecar
-#     guest coverage percentage.  (Since 11.0)
 #
 # @rdma-sidecar-failed: whether any RDMA sidecar region failed.
 #     (Since 11.0)
@@ -731,8 +810,9 @@
 # @rdma-sidecar-dynamic-window-regions: current dynamic RDMA admission
 #     window in region units.  (Since 11.0)
 #
-# @rdma-sidecar-sq-capacity-regions: RDMA admission hard cap derived
-#     from the configured sidecar SQ/in-flight capacity.  (Since 11.0)
+# @rdma-sidecar-sq-capacity-regions: RDMA admission ceiling derived
+#     from transport resources and migration geometry, not from fixed
+#     lane-ratio policy.  (Since 11.0)
 #
 # @rdma-sidecar-queue-len: queued RDMA sidecar bulk claims.
 #     (Since 11.0)
@@ -760,6 +840,56 @@
 #
 # @rdma-sidecar-admission-goodput-drop-events: dynamic-window
 #     decreases caused by goodput or latency regression.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-posted-spans: postcopy dirty spans
+#     posted to the RDMA sidecar.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-posted-bytes: bytes in posted
+#     postcopy dirty RDMA sidecar spans.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-completed-spans: postcopy dirty spans
+#     completed by the RDMA sidecar.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-completed-bytes: bytes completed in
+#     postcopy dirty RDMA sidecar spans.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-completed-pages: pages completed in
+#     postcopy dirty RDMA sidecar spans.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-stale-pages: pages in completed
+#     postcopy dirty RDMA sidecar spans that were stale.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-overflow-cxl-spans: postcopy dirty
+#     spans sent to CXL because RDMA admission was full or closed.
+#     (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-min-span-cxl-spans: postcopy dirty
+#     spans sent to CXL because they were below the RDMA min-span
+#     threshold.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-max-span-bytes: largest postcopy dirty
+#     span posted to the RDMA sidecar, in bytes.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-max-inflight-wr: postcopy dirty RDMA
+#     admission WR limit.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-queue-wr: queued postcopy dirty RDMA
+#     write requests.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-inflight-wr: in-flight postcopy dirty
+#     RDMA write requests.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-max-inflight-bytes: postcopy dirty
+#     RDMA admission byte limit.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-queue-bytes: bytes queued for
+#     postcopy dirty RDMA sidecar writes.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-inflight-bytes: bytes in in-flight
+#     postcopy dirty RDMA sidecar writes.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-min-span-bytes: configured minimum
+#     postcopy dirty span size admitted to RDMA.  (Since 11.0)
 #
 # @rdma-ready-regions: number of whole fault regions copied by the
 #     hybrid RDMA sidecar and still considered source-current when
@@ -907,6 +1037,32 @@
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
 #     @rdma-bulk-regions, @rdma-bulk-bytes,
+#     @page-state-cxl-worker-bytes, @page-state-cxl-worker-time-ns,
+#     @page-state-cxl-worker-precopy-bytes,
+#     @page-state-cxl-worker-precopy-time-ns,
+#     @page-state-cxl-worker-postcopy-bytes,
+#     @page-state-cxl-worker-postcopy-time-ns,
+#     @page-state-rdma-completed-bytes,
+#     @page-state-rdma-completed-pages,
+#     @page-state-rdma-completed-time-ns,
+#     @page-state-rdma-active-time-ns,
+#     @page-state-rdma-transport-completed-time-ns,
+#     @page-state-rdma-transport-active-time-ns,
+#     @page-state-rdma-publish-time-ns,
+#     @page-state-rdma-stale-pages,
+#     @page-state-rdma-precopy-completed-bytes,
+#     @page-state-rdma-precopy-completed-time-ns,
+#     @page-state-rdma-precopy-active-time-ns,
+#     @page-state-rdma-precopy-transport-completed-time-ns,
+#     @page-state-rdma-precopy-transport-active-time-ns,
+#     @page-state-rdma-precopy-publish-time-ns,
+#     @page-state-rdma-postcopy-dirty-completed-bytes,
+#     @page-state-rdma-postcopy-dirty-completed-time-ns,
+#     @page-state-rdma-postcopy-dirty-active-time-ns,
+#     @page-state-rdma-postcopy-dirty-transport-completed-time-ns,
+#     @page-state-rdma-postcopy-dirty-transport-active-time-ns,
+#     @page-state-rdma-postcopy-dirty-publish-time-ns,
+#     @page-state-cas-failures,
 #     @rdma-sidecar-connect-time-ns,
 #     @rdma-sidecar-registered-bytes,
 #     @rdma-sidecar-posted-regions,
@@ -917,9 +1073,8 @@
 #     @rdma-sidecar-cxl-race-lost-regions,
 #     @rdma-sidecar-failed-regions,
 #     @rdma-sidecar-no-candidate-events,
-#     @rdma-sidecar-budget-skip-events,
 #     @rdma-sidecar-max-inflight-regions,
-#     @rdma-sidecar-max-cover-percent, @rdma-sidecar-failed,
+#     @rdma-sidecar-failed,
 #     @rdma-sidecar-dynamic-window-regions,
 #     @rdma-sidecar-sq-capacity-regions, @rdma-sidecar-queue-len,
 #     @rdma-sidecar-inflight-len,
@@ -930,6 +1085,22 @@
 #     @rdma-sidecar-admission-overflow-cxl-regions,
 #     @rdma-sidecar-admission-closed-events,
 #     @rdma-sidecar-admission-goodput-drop-events,
+#     @rdma-sidecar-postcopy-dirty-posted-spans,
+#     @rdma-sidecar-postcopy-dirty-posted-bytes,
+#     @rdma-sidecar-postcopy-dirty-completed-spans,
+#     @rdma-sidecar-postcopy-dirty-completed-bytes,
+#     @rdma-sidecar-postcopy-dirty-completed-pages,
+#     @rdma-sidecar-postcopy-dirty-stale-pages,
+#     @rdma-sidecar-postcopy-dirty-overflow-cxl-spans,
+#     @rdma-sidecar-postcopy-dirty-min-span-cxl-spans,
+#     @rdma-sidecar-postcopy-dirty-max-span-bytes,
+#     @rdma-sidecar-postcopy-dirty-max-inflight-wr,
+#     @rdma-sidecar-postcopy-dirty-queue-wr,
+#     @rdma-sidecar-postcopy-dirty-inflight-wr,
+#     @rdma-sidecar-postcopy-dirty-max-inflight-bytes,
+#     @rdma-sidecar-postcopy-dirty-queue-bytes,
+#     @rdma-sidecar-postcopy-dirty-inflight-bytes,
+#     @rdma-sidecar-postcopy-dirty-min-span-bytes,
 #     @rdma-ready-regions, @rdma-ready-pages,
 #     @rdma-invalidated-regions, @rdma-ready-pages-lost,
 #     @cxl-republish-regions-due-to-rdma-invalidate,
@@ -1112,11 +1283,53 @@
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'page-state-cxl-worker-time-ns': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-precopy-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-precopy-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-postcopy-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-postcopy-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
             'page-state-rdma-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-completed-pages': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'page-state-rdma-completed-time-ns': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-transport-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-transport-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-publish-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
             'page-state-rdma-stale-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-transport-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-transport-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-publish-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-transport-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-transport-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-publish-time-ns': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'page-state-cas-failures': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
@@ -1140,12 +1353,8 @@
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'rdma-sidecar-no-candidate-events': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
-            'rdma-sidecar-budget-skip-events': {
-                'type': 'uint64', 'features': [ 'unstable' ] },
             'rdma-sidecar-max-inflight-regions': {
                 'type': 'uint32', 'features': [ 'unstable' ] },
-            'rdma-sidecar-max-cover-percent': {
-                'type': 'uint8', 'features': [ 'unstable' ] },
             'rdma-sidecar-failed': { 'type': 'bool',
                                      'features': [ 'unstable' ] },
             'rdma-sidecar-dynamic-window-regions': {
@@ -1169,6 +1378,38 @@
             'rdma-sidecar-admission-closed-events': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'rdma-sidecar-admission-goodput-drop-events': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-posted-spans': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-posted-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-completed-spans': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-completed-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-stale-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-overflow-cxl-spans': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-min-span-cxl-spans': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-max-span-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-max-inflight-wr': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-queue-wr': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-inflight-wr': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-max-inflight-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-queue-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-inflight-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-min-span-bytes': {
                 'type': 'uint64', 'features': [ 'unstable' ] },
             'rdma-ready-regions': { 'type': 'uint64',
                                     'features': [ 'unstable' ] },
@@ -1889,8 +2130,9 @@
 #     @x-cxl-shared-backing, @x-cxl-rdma-sidecar,
 #     @x-cxl-rdma-sidecar-address,
 #     @x-cxl-rdma-sidecar-max-inflight-regions,
-#     @x-cxl-rdma-sidecar-max-cover-percent,
-#     @x-cxl-rdma-sidecar-region-bytes, and
+#     @x-cxl-rdma-sidecar-region-bytes,
+#     @x-cxl-rdma-sidecar-postcopy-dirty,
+#     @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes, and
 #     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
@@ -1958,9 +2200,11 @@
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-rdma-sidecar-max-inflight-regions',
              'features': [ 'unstable' ] },
-           { 'name': 'x-cxl-rdma-sidecar-max-cover-percent',
-             'features': [ 'unstable' ] },
            { 'name': 'x-cxl-rdma-sidecar-region-bytes',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-postcopy-dirty',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-postcopy-dirty-min-bytes',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-fault-resolve-mode',
              'features': [ 'unstable' ] },
@@ -2228,21 +2472,24 @@
 #     primary migration address.  The address transport must be @rdma
 #     when @x-cxl-rdma-sidecar is enabled.  (Since 11.0)
 #
-# @x-cxl-rdma-sidecar-max-inflight-regions: Hard safety cap for the
-#     CXL hybrid RDMA sidecar SQ and dynamic admission window.  It no
+# @x-cxl-rdma-sidecar-max-inflight-regions: Deprecated compatibility
+#     auto hint for older CXL hybrid RDMA sidecar commands.  It
+#     no longer caps RDMA admission or SQ depth; zero is accepted
+#     and means automatic transport/resource sizing.  It also no
 #     longer expresses the desired fixed in-flight depth.  (Since
 #     11.0)
-#
-# @x-cxl-rdma-sidecar-max-cover-percent: Deprecated compatibility
-#     parameter.
-#     It is deprecated; dynamic admission ignores this value.
-#     It routes RDMA overflow to CXL based on runtime sidecar state.
-#     Kept only for compatibility with older experiment commands.
-#     (Since 11.0)
 #
 # @x-cxl-rdma-sidecar-region-bytes: CXL hybrid RDMA sidecar region
 #     size, in bytes.  Zero means implementation default.  Default is
 #     0.  (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-postcopy-dirty: Enable experimental RDMA
+#     sidecar transfer of postcopy dirty spans.  Requires
+#     @x-cxl-rdma-sidecar and remains off by default.  (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes: Minimum postcopy
+#     dirty span size, in bytes, accepted for RDMA sidecar transfer.
+#     Default is 64 KiB.  (Since 11.0)
 #
 # @x-cxl-fault-resolve-mode: Experimental destination fault
 #     resolution policy for CXL hybrid postcopy.  (Since 11.0)
@@ -2268,8 +2515,9 @@
 #     @x-cxl-shared-backing, @x-cxl-rdma-sidecar,
 #     @x-cxl-rdma-sidecar-address,
 #     @x-cxl-rdma-sidecar-max-inflight-regions,
-#     @x-cxl-rdma-sidecar-max-cover-percent,
-#     @x-cxl-rdma-sidecar-region-bytes, and
+#     @x-cxl-rdma-sidecar-region-bytes,
+#     @x-cxl-rdma-sidecar-postcopy-dirty,
+#     @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes, and
 #     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
@@ -2350,9 +2598,11 @@
                 'type': 'MigrationAddress', 'features': [ 'unstable' ] },
             '*x-cxl-rdma-sidecar-max-inflight-regions': {
                 'type': 'uint32', 'features': [ 'unstable' ] },
-            '*x-cxl-rdma-sidecar-max-cover-percent': {
-                'type': 'uint8', 'features': [ 'unstable' ] },
             '*x-cxl-rdma-sidecar-region-bytes': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-postcopy-dirty': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-postcopy-dirty-min-bytes': {
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-fault-resolve-mode': {
                 'type': 'CXLHybridFaultResolveMode',

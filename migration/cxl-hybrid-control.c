@@ -1516,6 +1516,18 @@ bool cxl_hybrid_ctrl_page_requires_destination_install(
         generation, received, locationp);
 }
 
+bool cxl_hybrid_ctrl_page_requires_dst_local_wake(uint64_t page_index,
+                                                  uint32_t generation,
+                                                  bool received)
+{
+    CXLHybridControlState *state = cxl_hybrid_control_destination.hdr ?
+        &cxl_hybrid_control_destination : &cxl_hybrid_control_source;
+
+    return cxl_hybrid_control_page_requires_dst_local_wake(
+        state->hdr, state->visible_bitmap, state->page_state, page_index,
+        generation, received);
+}
+
 bool cxl_hybrid_ctrl_page_requires_postcopy_discard(uint64_t page_index,
                                                     uint32_t generation)
 {
@@ -1733,6 +1745,48 @@ bool cxl_hybrid_ctrl_claim_rdma_pages(CXLHybridRDMAPageDescriptor *desc,
     return true;
 }
 
+bool cxl_hybrid_ctrl_claim_rdma_contiguous_pages(
+    CXLHybridRDMAPageDescriptor *desc,
+    RAMBlock *block,
+    ram_addr_t block_offset,
+    uint64_t first_page,
+    uint32_t max_pages,
+    uint32_t generation,
+    uint32_t *claimedp)
+{
+    CXLHybridControlState *state = &cxl_hybrid_control_source;
+
+    if (claimedp) {
+        *claimedp = 0;
+    }
+    if (!desc) {
+        return false;
+    }
+    if (!state->hdr || !state->page_state) {
+        if (state->page_state) {
+            cxl_hybrid_rdma_descriptor_reclaim(
+                desc, state->page_state, state->page_state_words);
+        } else {
+            cxl_hybrid_rdma_descriptor_destroy(desc);
+        }
+        return false;
+    }
+    if (!cxl_hybrid_control_generation_matches(state->hdr, generation)) {
+        cxl_hybrid_rdma_descriptor_reclaim(
+            desc, state->page_state, state->page_state_words);
+        return false;
+    }
+    if (!cxl_hybrid_rdma_descriptor_claim_contiguous_for_test(
+            desc, state->page_state, state->page_state_words, first_page,
+            max_pages, generation, claimedp)) {
+        return false;
+    }
+
+    desc->block = block;
+    desc->block_offset = block_offset;
+    return true;
+}
+
 void cxl_hybrid_ctrl_drop_rdma_pages(CXLHybridRDMAPageDescriptor *desc)
 {
     CXLHybridControlState *state = &cxl_hybrid_control_source;
@@ -1750,33 +1804,10 @@ void cxl_hybrid_ctrl_complete_rdma_pages(CXLHybridRDMAPageDescriptor *desc,
                                          uint32_t *stalep)
 {
     CXLHybridControlState *state = &cxl_hybrid_control_source;
-    uint32_t limit;
 
-    if (!state->hdr || !state->visible_bitmap || !state->page_state ||
-        !desc || desc->first_page >= state->page_state_words) {
-        return;
-    }
-
-    limit = MIN(desc->nr_pages, state->page_state_words - desc->first_page);
-    for (uint32_t i = 0; i < limit; i++) {
-        if (!cxl_hybrid_rdma_descriptor_page_claimed(desc, i)) {
-            continue;
-        }
-        if (cxl_hybrid_control_complete_rdma_page_visible_generation(
-                state->hdr, state->visible_bitmap, state->page_state,
-                desc->first_page + i, desc->generation, &desc->claims[i])) {
-            desc->completed_pages++;
-            if (completedp) {
-                (*completedp)++;
-            }
-        } else {
-            desc->stale_pages++;
-            if (stalep) {
-                (*stalep)++;
-            }
-        }
-        clear_bit(i, desc->claimed_bmap);
-    }
+    cxl_hybrid_control_complete_rdma_pages_for_test(
+        state->hdr, state->visible_bitmap, state->page_state,
+        state->page_state_words, desc, completedp, stalep);
 }
 
 void cxl_hybrid_ctrl_clear_page_visible(uint64_t page_index)
