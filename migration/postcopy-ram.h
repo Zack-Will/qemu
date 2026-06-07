@@ -73,6 +73,10 @@ void postcopy_discard_send_finish(MigrationState *ms);
  */
 int postcopy_place_page(MigrationIncomingState *mis, void *host, void *from,
                         RAMBlock *rb);
+int postcopy_place_page_allow_existing(MigrationIncomingState *mis, void *host,
+                                       void *from, RAMBlock *rb);
+int postcopy_place_page_cleanup(MigrationIncomingState *mis, void *host,
+                                void *from, RAMBlock *rb);
 
 /*
  * Place a zero page at (host) atomically

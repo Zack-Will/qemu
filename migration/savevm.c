@@ -41,6 +41,7 @@
 #include "ram.h"
 #include "qemu-file.h"
 #include "savevm.h"
+#include "postcopy.h"
 #include "postcopy-ram.h"
 #include "cxl.h"
 #include "qapi/error.h"
@@ -2143,24 +2144,32 @@ static int loadvm_postcopy_ram_handle_discard(MigrationIncomingState *mis,
 static int loadvm_postcopy_handle_listen(MigrationIncomingState *mis,
                                          Error **errp)
 {
-    PostcopyState ps = postcopy_state_set(POSTCOPY_INCOMING_LISTENING);
+    PostcopyState ps = postcopy_state_get();
+    MigrationPostcopyIncomingListenPlan plan =
+        migration_postcopy_incoming_listen_plan(ps);
 
     trace_loadvm_postcopy_handle_listen("enter");
 
-    if (ps != POSTCOPY_INCOMING_ADVISE && ps != POSTCOPY_INCOMING_DISCARD) {
+    if (!plan.valid) {
         error_setg(errp,
                    "CMD_POSTCOPY_LISTEN in wrong postcopy state (%d)", ps);
         return -1;
     }
-    if (ps == POSTCOPY_INCOMING_ADVISE) {
+    if (plan.prepare_discard) {
         /*
          * A rare case, we entered listen without having to do any discards,
          * so do the setup that's normally done at the time of the 1st discard.
          */
         if (migrate_postcopy_ram()) {
-            postcopy_ram_prepare_discard(mis);
+            int ret = postcopy_ram_prepare_discard(mis);
+
+            if (ret) {
+                error_setg(errp, "Failed to prepare for RAM discard: %d", ret);
+                return ret;
+            }
         }
     }
+    postcopy_state_set(plan.ready_state);
 
     trace_loadvm_postcopy_handle_listen("after discard");
 
@@ -2210,8 +2219,34 @@ static void loadvm_postcopy_handle_run_bh(void *opaque)
         trace_vmstate_downtime_checkpoint("dst-postcopy-bh-cache-invalidated");
 
         if (success) {
+            Error *local_err = NULL;
+            int ret;
+
+            ret = cxl_hybrid_postcopy_wake_dst_local_pages(mis, &local_err);
+            if (ret) {
+                MigrationState *s = migrate_get_current();
+
+                loadvm_trace_postcopy_timeline(
+                    mis, "dst-postcopy-bh-dst-local-wake-failed",
+                    UINT64_MAX);
+                if (local_err) {
+                    migrate_error_propagate(s, error_copy(local_err));
+                    error_report_err(local_err);
+                }
+                migrate_set_state(&mis->state, mis->state,
+                                  MIGRATION_STATUS_FAILED);
+                success = false;
+            } else {
+                loadvm_trace_postcopy_timeline(
+                    mis, "dst-postcopy-bh-dst-local-woke", UINT64_MAX);
+            }
+        }
+
+        if (success) {
             vm_start();
             vm_started = true;
+            cxl_guest_timeline_mark("dst-started",
+                                    CXL_GUEST_TIMELINE_EVENT_DST_STARTED);
         }
     } else {
         /* leave it paused and let management decide when to start the CPU */

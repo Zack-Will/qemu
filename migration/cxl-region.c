@@ -9,9 +9,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bitmap.h"
+#include "qemu/atomic.h"
 #include "qemu/host-utils.h"
 #include "qapi/error.h"
 #include "migration/cxl.h"
+#include "trace.h"
 
 bool cxl_hybrid_fault_resolve_mode_emits_burst(
     CXLHybridFaultResolveMode mode)
@@ -29,7 +31,7 @@ uint64_t cxl_hybrid_choose_fault_region_granule(uint64_t align,
         return 0;
     }
 
-    granule = configured ? configured : CXL_REMAP_GRANULE_DEFAULT;
+    granule = configured ? configured : CXL_FAULT_REGION_GRANULE_DEFAULT;
     granule = MAX(align, granule);
     granule = ROUND_UP(granule, align);
     if (total_ram > 0) {
@@ -57,6 +59,288 @@ uint64_t cxl_hybrid_choose_source_remap_granule(uint64_t min_align,
     }
 
     return granule;
+}
+
+uint8_t cxl_hybrid_calculate_source_remap_coverage(uint64_t staged_pages,
+                                                   uint64_t remapped_pages)
+{
+    if (!staged_pages) {
+        return 0;
+    }
+
+    if (remapped_pages >= staged_pages) {
+        return 100;
+    }
+
+    return (remapped_pages * 100) / staged_pages;
+}
+
+bool cxl_hybrid_dst_remap_offset_page_index(uint64_t total_pages,
+                                            uint64_t block_first_page,
+                                            ram_addr_t block_used_length,
+                                            ram_addr_t offset,
+                                            uint64_t target_page_size,
+                                            size_t *page_idxp)
+{
+    uint64_t block_page;
+    uint64_t page_idx;
+
+    if (!page_idxp || !total_pages ||
+        !target_page_size || !is_power_of_2(target_page_size) ||
+        !QEMU_IS_ALIGNED(offset, target_page_size)) {
+        return false;
+    }
+    if (offset > block_used_length ||
+        target_page_size > block_used_length - offset) {
+        return false;
+    }
+
+    block_page = offset / target_page_size;
+    if (block_first_page > UINT64_MAX - block_page) {
+        return false;
+    }
+    page_idx = block_first_page + block_page;
+    if (page_idx >= total_pages || page_idx != (size_t)page_idx) {
+        return false;
+    }
+
+    *page_idxp = page_idx;
+    return true;
+}
+
+CXLHybridSwitchDecision cxl_hybrid_switch_decide(
+    const CXLHybridSwitchPolicyInput *input)
+{
+    CXLHybridSwitchDecision decision = {
+        .action = CXL_HYBRID_SWITCH_ACTION_NONE,
+        .reason = CXL_MIGRATION_SWITCH_REASON_NONE,
+    };
+    bool remap_coverage_trigger;
+    bool brake_coverage_gate;
+    bool bulk_coverage_gate;
+
+    if (!input) {
+        return decision;
+    }
+
+    remap_coverage_trigger = input->remap_coverage_threshold &&
+        input->remap_coverage >= input->remap_coverage_threshold;
+    brake_coverage_gate = input->brake_enabled &&
+        input->remap_coverage_threshold &&
+        input->phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE;
+    bulk_coverage_gate = input->brake_enabled &&
+        input->remap_coverage_threshold &&
+        input->staged_pages &&
+        input->phase == CXL_HYBRID_PHASE_PRECOPY_BULK &&
+        (input->completion_ready || input->remaining_trigger ||
+         input->time_cap_trigger || input->dirty_trigger ||
+         input->gain_trigger || input->max_iters_trigger);
+
+    if (bulk_coverage_gate) {
+        decision.action = CXL_HYBRID_SWITCH_ACTION_ENTER_BRAKE;
+        return decision;
+    }
+
+    if (input->completion_ready &&
+        input->staged_pages &&
+        (input->phase == CXL_HYBRID_PHASE_PRECOPY_BULK ||
+         (input->phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE &&
+          !brake_coverage_gate))) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_PRECOPY_COMPLETE;
+    } else if (input->phase == CXL_HYBRID_PHASE_PRECOPY_BULK &&
+        input->brake_enabled &&
+        !input->remaining_trigger && !input->time_cap_trigger &&
+        (input->dirty_trigger || input->gain_trigger ||
+         input->max_iters_trigger)) {
+        decision.action = CXL_HYBRID_SWITCH_ACTION_ENTER_BRAKE;
+        return decision;
+    }
+
+    if (decision.reason != CXL_MIGRATION_SWITCH_REASON_NONE) {
+        /* Use the completion decision selected before brake entry. */
+    } else if (input->remaining_trigger) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL;
+    } else if (input->time_cap_trigger) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP;
+    } else if (remap_coverage_trigger &&
+               input->phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_REMAP_COVERAGE;
+    } else if (input->dirty_trigger && !input->brake_enabled) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_DIRTY_RATE_HIGH;
+    } else if (input->max_iters_trigger && !brake_coverage_gate) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_MAX_ITERS;
+    } else if (input->gain_trigger && !brake_coverage_gate) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_GAIN_COLLAPSED;
+    }
+
+    if (decision.reason == CXL_MIGRATION_SWITCH_REASON_NONE) {
+        return decision;
+    }
+
+    if (input->brake_enabled &&
+        input->phase == CXL_HYBRID_PHASE_PRECOPY_BRAKE &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_REMAINING_SMALL &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_PRECOPY_TIME_CAP &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_REMAP_COVERAGE &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_PRECOPY_COMPLETE &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_MAX_ITERS &&
+        decision.reason != CXL_MIGRATION_SWITCH_REASON_GAIN_COLLAPSED) {
+        decision.reason = CXL_MIGRATION_SWITCH_REASON_NONE;
+        return decision;
+    }
+
+    decision.action = CXL_HYBRID_SWITCH_ACTION_START_POSTCOPY;
+    return decision;
+}
+
+bool cxl_hybrid_source_remap_region_clean(const unsigned long *migrated_bmap,
+                                          size_t migrated_first_page,
+                                          const unsigned long *dirty_bmap,
+                                          size_t dirty_first_page,
+                                          size_t npages)
+{
+    size_t page;
+
+    if (!migrated_bmap || !dirty_bmap || !npages) {
+        return false;
+    }
+
+    for (page = 0; page < npages; page++) {
+        if (!test_bit(migrated_first_page + page, migrated_bmap)) {
+            return false;
+        }
+    }
+
+    return bitmap_count_one_with_offset(dirty_bmap, dirty_first_page,
+                                        npages) == 0;
+}
+
+bool cxl_hybrid_warm_page_eligible_for_push(
+    const unsigned long *migrated_bmap,
+    const unsigned long *warm_sent_bmap,
+    const unsigned long *dst_sent_bmap,
+    const unsigned long *cxl_visible_bmap,
+    size_t page_idx)
+{
+    return migrated_bmap &&
+           test_bit(page_idx, migrated_bmap) &&
+           (!warm_sent_bmap || !test_bit(page_idx, warm_sent_bmap)) &&
+           (!dst_sent_bmap || !test_bit(page_idx, dst_sent_bmap)) &&
+           (!cxl_visible_bmap || !test_bit(page_idx, cxl_visible_bmap));
+}
+
+void cxl_hybrid_dirty_requeue_page_for_push(
+    unsigned long *warm_sent_bmap,
+    unsigned long *dst_sent_bmap,
+    unsigned long *cxl_visible_bmap,
+    unsigned long *remaining_bmap,
+    unsigned long *warm_dirty_bmap,
+    size_t page_idx,
+    bool migrated)
+{
+    if (warm_sent_bmap) {
+        clear_bit_atomic(page_idx, warm_sent_bmap);
+    }
+    if (dst_sent_bmap) {
+        clear_bit_atomic(page_idx, dst_sent_bmap);
+    }
+    if (cxl_visible_bmap) {
+        clear_bit_atomic(page_idx, cxl_visible_bmap);
+    }
+    if (warm_dirty_bmap) {
+        set_bit_atomic(page_idx, warm_dirty_bmap);
+    }
+    if (migrated && remaining_bmap) {
+        set_bit_atomic(page_idx, remaining_bmap);
+    }
+}
+
+uint32_t cxl_hybrid_rdma_postcopy_span_max_pages_for_test(
+    uint64_t target_page_size,
+    uint64_t block_used_length,
+    uint64_t block_offset)
+{
+    uint64_t tail;
+    uint64_t bytes;
+
+    if (!target_page_size ||
+        !is_power_of_2(target_page_size) ||
+        block_offset >= block_used_length) {
+        return 0;
+    }
+
+    tail = block_used_length - block_offset;
+    bytes = MIN(tail, (uint64_t)CXL_HYBRID_POSTCOPY_RDMA_MERGE_MAX);
+    return bytes / target_page_size;
+}
+
+bool cxl_hybrid_clean_remap_budget_allows(uint64_t budget_bytes,
+                                          uint64_t used_bytes,
+                                          uint64_t region_len)
+{
+    uint64_t effective_budget;
+
+    if (!region_len) {
+        return false;
+    }
+
+    if (budget_bytes == 0) {
+        return used_bytes == 0;
+    }
+
+    effective_budget = MAX(budget_bytes, region_len);
+    return used_bytes <= effective_budget &&
+           region_len <= effective_budget - used_bytes;
+}
+
+bool cxl_hybrid_clean_remap_should_throttle(uint64_t throttle_us,
+                                            bool copied_region)
+{
+    return throttle_us > 0 && copied_region;
+}
+
+bool cxl_hybrid_clean_remap_region_is_candidate(bool epoch_seen,
+                                                bool dirty_now,
+                                                bool already_remapped,
+                                                bool in_flight)
+{
+    return epoch_seen && !dirty_now && !already_remapped && !in_flight;
+}
+
+bool cxl_hybrid_clean_remap_debug_scan_only(const char *mode)
+{
+    return g_strcmp0(mode, "scan-only") == 0;
+}
+
+bool cxl_hybrid_clean_remap_debug_copy_only(const char *mode)
+{
+    return g_strcmp0(mode, "copy-only") == 0;
+}
+
+bool cxl_hybrid_clean_remap_debug_read_only(const char *mode)
+{
+    return g_strcmp0(mode, "read-only") == 0;
+}
+
+bool cxl_hybrid_clean_remap_debug_write_only(const char *mode)
+{
+    return g_strcmp0(mode, "write-only") == 0;
+}
+
+bool cxl_hybrid_clean_remap_debug_defer_remap(const char *mode)
+{
+    return g_strcmp0(mode, "defer-remap") == 0;
+}
+
+bool cxl_hybrid_clean_remap_prefault_valid(CXLCleanRemapPrefaultMode mode)
+{
+    return mode >= 0 && mode < CXL_CLEAN_REMAP_PREFAULT_MODE__MAX;
+}
+
+bool cxl_hybrid_clean_remap_prefault_enabled(CXLCleanRemapPrefaultMode mode)
+{
+    return mode == CXL_CLEAN_REMAP_PREFAULT_MODE_MADVISE ||
+           mode == CXL_CLEAN_REMAP_PREFAULT_MODE_TOUCH;
 }
 
 uint64_t cxl_hybrid_mapped_ram_pages_offset_alignment(
@@ -115,6 +399,672 @@ static bool cxl_hybrid_dst_region_index_valid(
 {
     return state && state->remapped_bmap && state->copy_owned_bmap &&
            state->remapping_bmap && region_index < state->total_regions;
+}
+
+static bool cxl_hybrid_rdma_sidecar_region_index_valid(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    return state && state->candidate_bmap && state->inflight_bmap &&
+           state->ready_bmap && state->stale_bmap &&
+           state->cxl_published_bmap && state->invalidated_bmap &&
+           state->republished_bmap && state->committed_bmap &&
+           region_index < state->total_regions;
+}
+
+static uint64_t cxl_hybrid_rdma_sidecar_region_bytes(
+    const CXLHybridRDMASidecarState *state)
+{
+    return state->pages_per_region * 4096;
+}
+
+static CXLHybridRDMASidecarStats cxl_hybrid_rdma_sidecar_stats;
+static CXLHybridRDMASidecarState cxl_hybrid_rdma_sidecar_state;
+
+void cxl_hybrid_rdma_sidecar_state_init_for_test(
+    CXLHybridRDMASidecarState *state,
+    uint64_t total_regions,
+    uint64_t pages_per_region)
+{
+    if (!state) {
+        return;
+    }
+
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(state);
+    state->total_regions = total_regions;
+    state->pages_per_region = pages_per_region;
+    if (total_regions) {
+        state->candidate_bmap = bitmap_new(total_regions);
+        state->inflight_bmap = bitmap_new(total_regions);
+        state->ready_bmap = bitmap_new(total_regions);
+        state->stale_bmap = bitmap_new(total_regions);
+        state->cxl_published_bmap = bitmap_new(total_regions);
+        state->invalidated_bmap = bitmap_new(total_regions);
+        state->republished_bmap = bitmap_new(total_regions);
+        state->committed_bmap = bitmap_new(total_regions);
+    }
+}
+
+void cxl_hybrid_rdma_sidecar_state_destroy_for_test(
+    CXLHybridRDMASidecarState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    g_free(state->ready_bmap);
+    g_free(state->candidate_bmap);
+    g_free(state->inflight_bmap);
+    g_free(state->stale_bmap);
+    g_free(state->cxl_published_bmap);
+    g_free(state->invalidated_bmap);
+    g_free(state->republished_bmap);
+    g_free(state->committed_bmap);
+    memset(state, 0, sizeof(*state));
+}
+
+bool cxl_hybrid_rdma_sidecar_region_is_rdma_owned(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->inflight_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_try_start_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        test_bit(region_index, state->ready_bmap) ||
+        test_bit(region_index, state->inflight_bmap) ||
+        test_bit(region_index, state->cxl_published_bmap) ||
+        test_bit(region_index, state->committed_bmap) ||
+        test_bit(region_index, state->invalidated_bmap) ||
+        test_bit(region_index, state->stale_bmap)) {
+        return false;
+    }
+
+    set_bit(region_index, state->candidate_bmap);
+    set_bit(region_index, state->inflight_bmap);
+    state->accepted_regions++;
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_pick_pending_region_for_test(
+    CXLHybridRDMASidecarState *state,
+    const unsigned long *dirty_bmap,
+    uint64_t total_pages,
+    uint64_t *region_out)
+{
+    uint64_t region;
+
+    if (!state || !dirty_bmap || !region_out || !state->pages_per_region) {
+        cxl_hybrid_account_rdma_sidecar_no_candidate();
+        return false;
+    }
+
+    for (region = 0; region < state->total_regions; region++) {
+        uint64_t first = region * state->pages_per_region;
+        uint64_t npages;
+
+        if (first >= total_pages) {
+            break;
+        }
+
+        npages = MIN(state->pages_per_region, total_pages - first);
+        if (!bitmap_count_one_with_offset(dirty_bmap, first, npages)) {
+            continue;
+        }
+        if (cxl_hybrid_rdma_sidecar_try_start_region(state, region)) {
+            *region_out = region;
+            return true;
+        }
+    }
+
+    cxl_hybrid_account_rdma_sidecar_no_candidate();
+    return false;
+}
+
+bool cxl_hybrid_rdma_sidecar_try_own_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_try_start_region(state, region_index);
+}
+
+bool cxl_hybrid_rdma_sidecar_try_own_cxl_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_note_cxl_publish(state, region_index);
+}
+
+bool cxl_hybrid_rdma_sidecar_region_is_cxl_owned(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->cxl_published_bmap) ||
+           test_bit(region_index, state->invalidated_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return !test_bit(region_index, state->committed_bmap);
+}
+
+void cxl_hybrid_rdma_sidecar_drop_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return;
+    }
+
+    clear_bit(region_index, state->inflight_bmap);
+    clear_bit(region_index, state->candidate_bmap);
+    clear_bit(region_index, state->ready_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_complete_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        !test_bit(region_index, state->inflight_bmap)) {
+        return false;
+    }
+
+    clear_bit(region_index, state->inflight_bmap);
+    if (test_bit(region_index, state->cxl_published_bmap) ||
+        test_bit(region_index, state->invalidated_bmap) ||
+        test_bit(region_index, state->committed_bmap)) {
+        set_bit(region_index, state->stale_bmap);
+        cxl_hybrid_account_rdma_sidecar_stale(
+            region_index, cxl_hybrid_rdma_sidecar_region_bytes(state),
+            test_bit(region_index, state->cxl_published_bmap));
+        return true;
+    }
+
+    set_bit(region_index, state->ready_bmap);
+    state->stats.rdma_ready_regions++;
+    state->stats.rdma_ready_pages += state->pages_per_region;
+    cxl_hybrid_account_rdma_ready(region_index, state->pages_per_region);
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_mark_ready(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_complete_region(state, region_index);
+}
+
+bool cxl_hybrid_rdma_sidecar_invalidate_ready(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        !test_bit(region_index, state->ready_bmap)) {
+        return false;
+    }
+
+    if (test_and_set_bit(region_index, state->invalidated_bmap)) {
+        return false;
+    }
+
+    state->stats.rdma_invalidated_regions++;
+    state->stats.rdma_ready_pages_lost += state->pages_per_region;
+    clear_bit(region_index, state->ready_bmap);
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_region_ready_current(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->ready_bmap) &&
+           !test_bit(region_index, state->invalidated_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_commit_ready_region(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_ready_current(state, region_index)) {
+        return false;
+    }
+
+    if (test_and_set_bit(region_index, state->committed_bmap)) {
+        return false;
+    }
+
+    clear_bit(region_index, state->ready_bmap);
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_region_committed(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->committed_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_region_invalidated(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->invalidated_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_region_stale(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->stale_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_region_inflight(
+    const CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    return test_bit(region_index, state->inflight_bmap);
+}
+
+bool cxl_hybrid_rdma_sidecar_note_cxl_publish(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index)) {
+        return false;
+    }
+
+    set_bit(region_index, state->cxl_published_bmap);
+    if (test_bit(region_index, state->ready_bmap)) {
+        cxl_hybrid_rdma_sidecar_invalidate_ready(state, region_index);
+    }
+    return true;
+}
+
+bool cxl_hybrid_rdma_sidecar_note_cxl_republish(
+    CXLHybridRDMASidecarState *state,
+    uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_region_index_valid(state, region_index) ||
+        !test_bit(region_index, state->invalidated_bmap)) {
+        return false;
+    }
+
+    if (test_and_set_bit(region_index, state->republished_bmap)) {
+        return false;
+    }
+
+    state->stats.cxl_republish_regions_due_to_rdma_invalidate++;
+    state->stats.cxl_republish_pages_due_to_rdma_invalidate +=
+        state->pages_per_region;
+    return true;
+}
+
+uint64_t cxl_hybrid_rdma_sidecar_invalidate_dirty_ready_regions(
+    CXLHybridRDMASidecarState *state,
+    const unsigned long *dirty_bmap,
+    uint64_t dirty_pages)
+{
+    uint64_t invalidated = 0;
+    unsigned long region_index;
+
+    if (!state || !dirty_bmap || !state->ready_bmap ||
+        !state->pages_per_region || !dirty_pages) {
+        return 0;
+    }
+
+    region_index = find_first_bit(state->ready_bmap, state->total_regions);
+    while (region_index < state->total_regions) {
+        uint64_t first_page = (uint64_t)region_index * state->pages_per_region;
+        uint64_t npages;
+
+        if (first_page >= dirty_pages) {
+            break;
+        }
+
+        npages = MIN(state->pages_per_region, dirty_pages - first_page);
+        if (bitmap_count_one_with_offset(dirty_bmap, first_page, npages) &&
+            cxl_hybrid_rdma_sidecar_invalidate_ready(state, region_index)) {
+            invalidated++;
+        }
+
+        region_index = find_next_bit(state->ready_bmap, state->total_regions,
+                                     region_index + 1);
+    }
+
+    return invalidated;
+}
+
+void cxl_hybrid_rdma_sidecar_get_stats(
+    const CXLHybridRDMASidecarState *state,
+    CXLHybridRDMASidecarStats *stats)
+{
+    if (!stats) {
+        return;
+    }
+
+    *stats = state ? state->stats : (CXLHybridRDMASidecarStats) { 0 };
+}
+
+void cxl_hybrid_reset_rdma_sidecar_stats(void)
+{
+    memset(&cxl_hybrid_rdma_sidecar_stats, 0,
+           sizeof(cxl_hybrid_rdma_sidecar_stats));
+}
+
+void cxl_hybrid_reset_rdma_sidecar_stats_for_test(void)
+{
+    cxl_hybrid_reset_rdma_sidecar_stats();
+}
+
+void cxl_hybrid_account_rdma_ready(uint64_t region_index, uint64_t pages)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_regions);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_pages, pages);
+    trace_cxl_hybrid_rdma_ready(region_index, pages);
+}
+
+void cxl_hybrid_account_rdma_invalidate(uint64_t region_index, uint64_t pages)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_invalidated_regions);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_pages_lost, pages);
+    trace_cxl_hybrid_rdma_invalidate(region_index, pages);
+}
+
+void cxl_hybrid_account_rdma_cxl_republish(uint64_t region_index,
+                                           uint64_t pages)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                cxl_republish_regions_due_to_rdma_invalidate);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                cxl_republish_pages_due_to_rdma_invalidate, pages);
+    trace_cxl_hybrid_rdma_cxl_republish(region_index, pages);
+}
+
+void cxl_hybrid_account_rdma_sidecar_connect(uint64_t time_ns)
+{
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_connect_time_ns, time_ns);
+    trace_cxl_rdma_sidecar_connect_complete(time_ns);
+}
+
+void cxl_hybrid_account_rdma_sidecar_registered(uint64_t bytes)
+{
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_registered_bytes, bytes);
+    trace_cxl_rdma_sidecar_register(bytes);
+}
+
+void cxl_hybrid_account_rdma_sidecar_posted(uint64_t claim_id,
+                                            uint64_t region_index,
+                                            uint64_t bytes)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_posted_regions);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_posted_bytes, bytes);
+    trace_cxl_rdma_sidecar_schedule(
+        claim_id, CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION,
+        region_index, bytes);
+}
+
+void cxl_hybrid_account_rdma_sidecar_completed(uint64_t claim_id,
+                                               uint64_t region_index,
+                                               uint64_t bytes)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_completed_regions);
+    qatomic_add(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_completed_bytes, bytes);
+    trace_cxl_rdma_sidecar_complete(
+        claim_id, CXL_HYBRID_RDMA_CLAIM_PRECOPY_REGION,
+        region_index, bytes);
+}
+
+void cxl_hybrid_account_rdma_sidecar_stale(uint64_t region_index,
+                                           uint64_t bytes,
+                                           bool cxl_race_lost)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_stale_regions);
+    if (cxl_race_lost) {
+        qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                    rdma_sidecar_cxl_race_lost_regions);
+    }
+    trace_cxl_rdma_sidecar_stale(region_index, bytes, cxl_race_lost);
+}
+
+void cxl_hybrid_account_rdma_sidecar_failed_no_trace(uint64_t region_index)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed_regions);
+    qatomic_set(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed, true);
+}
+
+void cxl_hybrid_account_rdma_sidecar_failed(uint64_t region_index)
+{
+    cxl_hybrid_account_rdma_sidecar_failed_no_trace(region_index);
+}
+
+void cxl_hybrid_account_rdma_sidecar_no_candidate(void)
+{
+    qatomic_inc(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_no_candidate_events);
+    trace_cxl_rdma_sidecar_no_candidate();
+}
+
+void cxl_hybrid_set_rdma_sidecar_inflight_hint(uint32_t max_inflight)
+{
+    qatomic_set(&cxl_hybrid_rdma_sidecar_stats.
+                rdma_sidecar_max_inflight_regions, max_inflight);
+}
+
+void cxl_hybrid_get_rdma_sidecar_stats(CXLHybridRDMASidecarStats *stats)
+{
+    if (!stats) {
+        return;
+    }
+
+    stats->rdma_sidecar_connect_time_ns =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_connect_time_ns);
+    stats->rdma_sidecar_registered_bytes =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_registered_bytes);
+    stats->rdma_sidecar_posted_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_posted_regions);
+    stats->rdma_sidecar_posted_bytes =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_posted_bytes);
+    stats->rdma_sidecar_completed_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_completed_regions);
+    stats->rdma_sidecar_completed_bytes =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_completed_bytes);
+    stats->rdma_sidecar_stale_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_stale_regions);
+    stats->rdma_sidecar_cxl_race_lost_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_cxl_race_lost_regions);
+    stats->rdma_sidecar_failed_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_failed_regions);
+    stats->rdma_sidecar_no_candidate_events =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_no_candidate_events);
+    stats->rdma_sidecar_max_inflight_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     rdma_sidecar_max_inflight_regions);
+    stats->rdma_sidecar_failed =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_sidecar_failed);
+    stats->rdma_ready_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_regions);
+    stats->rdma_ready_pages =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_pages);
+    stats->rdma_invalidated_regions =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_invalidated_regions);
+    stats->rdma_ready_pages_lost =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.rdma_ready_pages_lost);
+    stats->cxl_republish_regions_due_to_rdma_invalidate =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     cxl_republish_regions_due_to_rdma_invalidate);
+    stats->cxl_republish_pages_due_to_rdma_invalidate =
+        qatomic_read(&cxl_hybrid_rdma_sidecar_stats.
+                     cxl_republish_pages_due_to_rdma_invalidate);
+}
+
+void cxl_hybrid_rdma_sidecar_global_init(uint64_t total_regions,
+                                         uint64_t pages_per_region)
+{
+    cxl_hybrid_rdma_sidecar_state_init_for_test(&cxl_hybrid_rdma_sidecar_state,
+                                                total_regions,
+                                                pages_per_region);
+}
+
+void cxl_hybrid_rdma_sidecar_global_destroy(void)
+{
+    cxl_hybrid_rdma_sidecar_state_destroy_for_test(
+        &cxl_hybrid_rdma_sidecar_state);
+}
+
+bool cxl_hybrid_region_is_rdma_owned(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_region_is_rdma_owned(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_try_own_rdma(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_try_own_region(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_try_own_cxl(uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_state.total_regions) {
+        return true;
+    }
+
+    return cxl_hybrid_rdma_sidecar_try_own_cxl_region(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_is_cxl_owned(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_region_is_cxl_owned(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_cxl_bulk_allowed(uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_state.total_regions) {
+        return true;
+    }
+
+    return cxl_hybrid_rdma_sidecar_region_cxl_bulk_allowed(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+void cxl_hybrid_region_drop_rdma(uint64_t region_index)
+{
+    cxl_hybrid_rdma_sidecar_drop_region(&cxl_hybrid_rdma_sidecar_state,
+                                        region_index);
+}
+
+void cxl_hybrid_mark_region_rdma_ready(uint64_t region_index)
+{
+    if (!cxl_hybrid_rdma_sidecar_mark_ready(&cxl_hybrid_rdma_sidecar_state,
+                                            region_index)) {
+        return;
+    }
+}
+
+void cxl_hybrid_invalidate_region_rdma_ready(uint64_t region_index)
+{
+    uint64_t pages;
+
+    if (!cxl_hybrid_rdma_sidecar_invalidate_ready(
+            &cxl_hybrid_rdma_sidecar_state, region_index)) {
+        return;
+    }
+
+    pages = cxl_hybrid_rdma_sidecar_state.pages_per_region;
+    cxl_hybrid_account_rdma_invalidate(region_index, pages);
+}
+
+bool cxl_hybrid_region_rdma_ready_current(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_region_ready_current(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_commit_rdma_ready(uint64_t region_index)
+{
+    return cxl_hybrid_rdma_sidecar_commit_ready_region(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_region_note_cxl_republish(uint64_t region_index)
+{
+    if (cxl_hybrid_rdma_sidecar_note_cxl_republish(
+            &cxl_hybrid_rdma_sidecar_state, region_index)) {
+        cxl_hybrid_account_rdma_cxl_republish(
+            region_index, cxl_hybrid_rdma_sidecar_state.pages_per_region);
+        return true;
+    }
+
+    if (cxl_hybrid_rdma_sidecar_region_invalidated(
+            &cxl_hybrid_rdma_sidecar_state, region_index)) {
+        return false;
+    }
+
+    return cxl_hybrid_rdma_sidecar_note_cxl_publish(
+        &cxl_hybrid_rdma_sidecar_state, region_index);
+}
+
+bool cxl_hybrid_rdma_brake_fallback_enabled(bool rdma_sidecar_enabled,
+                                            bool brake_enabled)
+{
+    return rdma_sidecar_enabled && brake_enabled;
 }
 
 void cxl_hybrid_dst_region_state_init_for_test(CXLHybridDstRegionState *state,
@@ -393,4 +1343,19 @@ int cxl_hybrid_fault_region_compute(uint64_t block_global_base,
         .region_index = region_global / granule,
     };
     return 0;
+}
+
+bool cxl_hybrid_fault_region_can_cover(uint64_t block_global_base,
+                                       uint64_t block_used_len,
+                                       uint64_t block_cxl_pages_offset,
+                                       uint64_t fault_block_offset,
+                                       uint64_t granule,
+                                       uint64_t target_page_size)
+{
+    CXLHybridFaultRegionGeometry g = { 0 };
+
+    return cxl_hybrid_fault_region_compute(block_global_base, block_used_len,
+                                           block_cxl_pages_offset,
+                                           fault_block_offset, granule,
+                                           target_page_size, &g, NULL) == 0;
 }

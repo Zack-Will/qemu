@@ -23,6 +23,7 @@
 #include "cxl.h"
 #include "qemu-file.h"
 #include "savevm.h"
+#include "postcopy.h"
 #include "postcopy-ram.h"
 #include "ram.h"
 #include "qapi/error.h"
@@ -740,9 +741,19 @@ static int cleanup_range(RAMBlock *rb, void *opaque)
     range_struct.len = length;
 
     if (ioctl(mis->userfault_fd, UFFDIO_UNREGISTER, &range_struct)) {
-        error_report("%s: userfault unregister %s", __func__, strerror(errno));
+        int ret = -errno;
 
-        return -1;
+        /*
+         * CXL MAP_FIXED remaps can leave holes in the original UFFD
+         * registration.  Treat that as cleanup-complete for this range so the
+         * common path still closes the userfault fd below.
+         */
+        if (!migration_postcopy_cleanup_unregister_result_satisfied(
+                ret, migrate_cxl_hybrid())) {
+            error_report("%s: userfault unregister %s",
+                         __func__, strerror(errno));
+            return -1;
+        }
     }
 
     return 0;
@@ -827,6 +838,13 @@ int postcopy_ram_incoming_cleanup(MigrationIncomingState *mis)
 
     if (mis->have_fault_thread) {
         Error *local_err = NULL;
+
+        if (migrate_cxl_hybrid() &&
+            cxl_hybrid_postcopy_install_remaining_pages(
+                mis, postcopy_place_page_cleanup, &local_err)) {
+            error_report_err(local_err);
+            return -1;
+        }
 
         /* Let the fault thread quit */
         qatomic_set(&mis->fault_thread_quit, 1);
@@ -959,6 +977,8 @@ static int postcopy_request_page(MigrationIncomingState *mis, RAMBlock *rb,
 {
     void *aligned = (void *)(uintptr_t)ROUND_DOWN(haddr, qemu_ram_pagesize(rb));
     Error *local_err = NULL;
+    bool hybrid_mode;
+    bool cxl_fault_supported;
     int ret;
 
     /*
@@ -976,9 +996,15 @@ static int postcopy_request_page(MigrationIncomingState *mis, RAMBlock *rb,
         return received ? 0 : postcopy_place_page_zero(mis, aligned, rb);
     }
 
-    if (migrate_cxl_hybrid()) {
+    hybrid_mode = migrate_cxl_hybrid();
+    cxl_fault_supported = hybrid_mode &&
+        cxl_hybrid_postcopy_fault_can_use_cxl(rb, start);
+
+    if (migration_postcopy_cxl_hybrid_fault_action(
+            hybrid_mode, cxl_fault_supported) ==
+        MIGRATION_POSTCOPY_CXL_HYBRID_FAULT_HANDLE_CXL) {
         ret = cxl_hybrid_wait_and_resolve_fault(mis, rb, start, haddr, tid,
-                                                postcopy_place_page,
+                                                postcopy_place_page_allow_existing,
                                                 &local_err);
         if (ret < 0) {
             error_report_err(local_err);
@@ -987,7 +1013,8 @@ static int postcopy_request_page(MigrationIncomingState *mis, RAMBlock *rb,
         return 0;
     }
 
-    ret = cxl_hybrid_try_resolve_fault(mis, rb, start, postcopy_place_page,
+    ret = cxl_hybrid_try_resolve_fault(mis, rb, start,
+                                       postcopy_place_page_allow_existing,
                                        &local_err);
     if (ret < 0) {
         error_report_err(local_err);
@@ -1411,6 +1438,13 @@ static void *postcopy_ram_fault_thread(void *opaque)
                                                 qemu_ram_get_idstr(rb),
                                                 rb_offset,
                                                 msg.arg.pagefault.feat.ptid);
+            if (trace_event_get_state(
+                    TRACE_POSTCOPY_RAM_FAULT_THREAD_REQUEST_TS)) {
+                trace_postcopy_ram_fault_thread_request_ts(
+                    get_current_ns(), msg.arg.pagefault.address,
+                    qemu_ram_get_idstr(rb), rb_offset,
+                    msg.arg.pagefault.feat.ptid);
+            }
 retry:
             /*
              * Send the request to the source - we want to request one
@@ -1609,14 +1643,30 @@ int postcopy_ram_incoming_setup(MigrationIncomingState *mis)
 }
 
 static int qemu_ufd_copy_ioctl(MigrationIncomingState *mis, void *host_addr,
-                               void *from_addr, uint64_t pagesize, RAMBlock *rb)
+                               void *from_addr, uint64_t pagesize,
+                               RAMBlock *rb, bool allow_existing,
+                               bool allow_missing)
 {
     int userfault_fd = mis->userfault_fd;
     int ret;
 
     if (from_addr) {
-        ret = uffd_copy_page(userfault_fd, host_addr, from_addr, pagesize,
-                             false);
+        if (allow_existing && allow_missing) {
+            ret = uffd_copy_page_suppress_errnos(userfault_fd, host_addr,
+                                                 from_addr, pagesize, false,
+                                                 EEXIST, ENOENT);
+        } else if (allow_existing) {
+            ret = uffd_copy_page_suppress_errno(userfault_fd, host_addr,
+                                                from_addr, pagesize, false,
+                                                EEXIST);
+        } else if (allow_missing) {
+            ret = uffd_copy_page_suppress_errno(userfault_fd, host_addr,
+                                                from_addr, pagesize, false,
+                                                ENOENT);
+        } else {
+            ret = uffd_copy_page(userfault_fd, host_addr, from_addr, pagesize,
+                                 false);
+        }
     } else {
         ret = uffd_zero_page(userfault_fd, host_addr, pagesize, false);
     }
@@ -1633,6 +1683,10 @@ static int qemu_ufd_copy_ioctl(MigrationIncomingState *mis, void *host_addr,
             int left_pages = qatomic_dec_fetch(&mis->page_requested_count);
 
             trace_postcopy_page_req_del(host_addr, mis->page_requested_count);
+            if (trace_event_get_state(TRACE_POSTCOPY_PAGE_REQ_DEL_TS)) {
+                trace_postcopy_page_req_del_ts(
+                    get_current_ns(), host_addr, mis->page_requested_count);
+            }
             /* Order the update of count and read of preempt status */
             smp_mb();
             if (mis->preempt_thread_status == PREEMPT_THREAD_QUIT &&
@@ -1672,6 +1726,10 @@ static int postcopy_mark_requested_page_received(MigrationIncomingState *mis,
     left_pages = qatomic_dec_fetch(&mis->page_requested_count);
 
     trace_postcopy_page_req_del(host_addr, mis->page_requested_count);
+    if (trace_event_get_state(TRACE_POSTCOPY_PAGE_REQ_DEL_TS)) {
+        trace_postcopy_page_req_del_ts(get_current_ns(), host_addr,
+                                       mis->page_requested_count);
+    }
     /* Order the update of count and read of preempt status */
     smp_mb();
     if (mis->preempt_thread_status == PREEMPT_THREAD_QUIT &&
@@ -1808,7 +1866,53 @@ int postcopy_place_page(MigrationIncomingState *mis, void *host, void *from,
      * which would be slightly cheaper, but we'd have to be careful
      * of the order of updating our page state.
      */
-    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb);
+    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb, false, false);
+    if (e) {
+        return e;
+    }
+
+    trace_postcopy_place_page(host);
+    return postcopy_notify_shared_wake(rb,
+                                       qemu_ram_block_host_offset(rb, host));
+}
+
+int postcopy_place_page_allow_existing(MigrationIncomingState *mis, void *host,
+                                       void *from, RAMBlock *rb)
+{
+    size_t pagesize = qemu_ram_pagesize(rb);
+    int e;
+
+    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb, true, false);
+    if (e == -EEXIST) {
+        bool received = false;
+
+        e = postcopy_mark_range_received_and_wake(mis, rb, host, pagesize,
+                                                  host, &received);
+        return e;
+    }
+    if (e) {
+        return e;
+    }
+
+    trace_postcopy_place_page(host);
+    return postcopy_notify_shared_wake(rb,
+                                       qemu_ram_block_host_offset(rb, host));
+}
+
+int postcopy_place_page_cleanup(MigrationIncomingState *mis, void *host,
+                                void *from, RAMBlock *rb)
+{
+    size_t pagesize = qemu_ram_pagesize(rb);
+    int e;
+
+    e = qemu_ufd_copy_ioctl(mis, host, from, pagesize, rb, true, true);
+    if (e == -EEXIST) {
+        bool received = false;
+
+        e = postcopy_mark_range_received_and_wake(mis, rb, host, pagesize,
+                                                  host, &received);
+        return e;
+    }
     if (e) {
         return e;
     }
@@ -1833,7 +1937,7 @@ int postcopy_place_page_zero(MigrationIncomingState *mis, void *host,
      */
     if (qemu_ram_is_uf_zeroable(rb)) {
         int e;
-        e = qemu_ufd_copy_ioctl(mis, host, NULL, pagesize, rb);
+        e = qemu_ufd_copy_ioctl(mis, host, NULL, pagesize, rb, false, false);
         if (e) {
             return e;
         }
@@ -1886,6 +1990,18 @@ int postcopy_ram_incoming_setup(MigrationIncomingState *mis)
 
 int postcopy_place_page(MigrationIncomingState *mis, void *host, void *from,
                         RAMBlock *rb)
+{
+    g_assert_not_reached();
+}
+
+int postcopy_place_page_allow_existing(MigrationIncomingState *mis, void *host,
+                                       void *from, RAMBlock *rb)
+{
+    g_assert_not_reached();
+}
+
+int postcopy_place_page_cleanup(MigrationIncomingState *mis, void *host,
+                                void *from, RAMBlock *rb)
 {
     g_assert_not_reached();
 }
@@ -2341,6 +2457,7 @@ static void *postcopy_listen_thread(void *opaque)
      */
     migrate_set_state(&mis->state, MIGRATION_STATUS_POSTCOPY_ACTIVE,
                                    MIGRATION_STATUS_COMPLETED);
+    migration_incoming_send_rp_shut_once(mis);
 
 out:
     rcu_unregister_thread();

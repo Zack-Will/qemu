@@ -75,13 +75,26 @@
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_MAX_PRECOPY_MS 0
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_MIN_REMAINING 0
 #define DEFAULT_MIGRATE_X_CXL_SWITCH_GAIN_FLOOR 0
+#define DEFAULT_MIGRATE_X_CXL_SWITCH_REMAP_COVERAGE 0
 #define DEFAULT_MIGRATE_X_CXL_BRAKE_ENABLE false
 #define DEFAULT_MIGRATE_X_CXL_BRAKE_REMAP_GRANULE 0
+#define DEFAULT_MIGRATE_X_CXL_BACKING_RATE 0
+#define DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_ENABLE false
+#define DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_COPY_BUDGET 0
+#define DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_THROTTLE_US 0
+#define DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_PREFAULT_MODE \
+    CXL_CLEAN_REMAP_PREFAULT_MODE_OFF
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_RATE 0
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_HEAT_WINDOW_MS 0
 #define DEFAULT_MIGRATE_X_CXL_PREFETCH_BATCH_PAGES 0
 #define DEFAULT_MIGRATE_X_CXL_DST_CACHE_SIZE 0
 #define DEFAULT_MIGRATE_X_CXL_SHARED_BACKING false
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR false
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_INFLIGHT_REGIONS 1
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_REGION_BYTES 0
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY false
+#define DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY_MIN_BYTES (64 * 1024)
+#define DEFAULT_MIGRATE_X_CXL_RDMA_CXL_PRIORITY_THRESHOLD_BYTES 0
 #define DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE \
     CXL_HYBRID_FAULT_RESOLVE_MODE_REGION_REMAP
 
@@ -212,12 +225,32 @@ const Property migration_properties[] = {
     DEFINE_PROP_SIZE("x-cxl-switch-gain-floor", MigrationState,
                       parameters.x_cxl_switch_gain_floor,
                       DEFAULT_MIGRATE_X_CXL_SWITCH_GAIN_FLOOR),
+    DEFINE_PROP_UINT8("x-cxl-switch-remap-coverage", MigrationState,
+                      parameters.x_cxl_switch_remap_coverage,
+                      DEFAULT_MIGRATE_X_CXL_SWITCH_REMAP_COVERAGE),
     DEFINE_PROP_BOOL("x-cxl-brake-enable", MigrationState,
                       parameters.x_cxl_brake_enable,
                       DEFAULT_MIGRATE_X_CXL_BRAKE_ENABLE),
     DEFINE_PROP_SIZE("x-cxl-brake-remap-granule", MigrationState,
                       parameters.x_cxl_brake_remap_granule,
                       DEFAULT_MIGRATE_X_CXL_BRAKE_REMAP_GRANULE),
+    DEFINE_PROP_SIZE("x-cxl-backing-rate", MigrationState,
+                      parameters.x_cxl_backing_rate,
+                      DEFAULT_MIGRATE_X_CXL_BACKING_RATE),
+    DEFINE_PROP_BOOL("x-cxl-clean-remap-enable", MigrationState,
+                      parameters.x_cxl_clean_remap_enable,
+                      DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_ENABLE),
+    DEFINE_PROP_SIZE("x-cxl-clean-remap-copy-budget", MigrationState,
+                      parameters.x_cxl_clean_remap_copy_budget,
+                      DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_COPY_BUDGET),
+    DEFINE_PROP_UINT64("x-cxl-clean-remap-throttle-us", MigrationState,
+                      parameters.x_cxl_clean_remap_throttle_us,
+                      DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_THROTTLE_US),
+    DEFINE_PROP_CXL_CLEAN_REMAP_PREFAULT_MODE(
+                      "x-cxl-clean-remap-prefault-mode",
+                      MigrationState,
+                      parameters.x_cxl_clean_remap_prefault_mode,
+                      DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_PREFAULT_MODE),
     DEFINE_PROP_SIZE("x-cxl-prefetch-rate", MigrationState,
                       parameters.x_cxl_prefetch_rate,
                       DEFAULT_MIGRATE_X_CXL_PREFETCH_RATE),
@@ -233,6 +266,27 @@ const Property migration_properties[] = {
     DEFINE_PROP_BOOL("x-cxl-shared-backing", MigrationState,
                       parameters.x_cxl_shared_backing,
                       DEFAULT_MIGRATE_X_CXL_SHARED_BACKING),
+    DEFINE_PROP_BOOL("x-cxl-rdma-sidecar", MigrationState,
+                      parameters.x_cxl_rdma_sidecar,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR),
+    DEFINE_PROP_UINT32("x-cxl-rdma-sidecar-max-inflight-regions",
+                      MigrationState,
+                      parameters.x_cxl_rdma_sidecar_max_inflight_regions,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_INFLIGHT_REGIONS),
+    DEFINE_PROP_SIZE("x-cxl-rdma-sidecar-region-bytes", MigrationState,
+                      parameters.x_cxl_rdma_sidecar_region_bytes,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_REGION_BYTES),
+    DEFINE_PROP_BOOL("x-cxl-rdma-sidecar-postcopy-dirty", MigrationState,
+                      parameters.x_cxl_rdma_sidecar_postcopy_dirty,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY),
+    DEFINE_PROP_SIZE("x-cxl-rdma-sidecar-postcopy-dirty-min-bytes",
+                      MigrationState,
+                      parameters.x_cxl_rdma_sidecar_postcopy_dirty_min_bytes,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY_MIN_BYTES),
+    DEFINE_PROP_SIZE("x-cxl-rdma-cxl-priority-threshold-bytes",
+                      MigrationState,
+                      parameters.x_cxl_rdma_cxl_priority_threshold_bytes,
+                      DEFAULT_MIGRATE_X_CXL_RDMA_CXL_PRIORITY_THRESHOLD_BYTES),
     DEFINE_PROP_CXL_HYBRID_FAULT_RESOLVE_MODE("x-cxl-fault-resolve-mode",
                       MigrationState,
                       parameters.x_cxl_fault_resolve_mode,
@@ -1002,6 +1056,13 @@ uint64_t migrate_cxl_switch_gain_floor(void)
     return s->parameters.x_cxl_switch_gain_floor;
 }
 
+uint8_t migrate_cxl_switch_remap_coverage(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_switch_remap_coverage;
+}
+
 bool migrate_cxl_brake_enable(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1014,6 +1075,41 @@ uint64_t migrate_cxl_brake_remap_granule(void)
     MigrationState *s = migrate_get_current();
 
     return s->parameters.x_cxl_brake_remap_granule;
+}
+
+uint64_t migrate_cxl_backing_rate(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_backing_rate;
+}
+
+bool migrate_cxl_clean_remap_enable(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_clean_remap_enable;
+}
+
+uint64_t migrate_cxl_clean_remap_copy_budget(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_clean_remap_copy_budget;
+}
+
+uint64_t migrate_cxl_clean_remap_throttle_us(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_clean_remap_throttle_us;
+}
+
+CXLCleanRemapPrefaultMode migrate_cxl_clean_remap_prefault_mode(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_clean_remap_prefault_mode;
 }
 
 uint64_t migrate_cxl_prefetch_rate(void)
@@ -1054,6 +1150,56 @@ bool migrate_cxl_shared_backing(void)
 bool migrate_cxl_shared_bitmap(void)
 {
     return migrate_cxl_shared_backing();
+}
+
+bool migrate_cxl_rdma_sidecar(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return migrate_cxl_hybrid() && s->parameters.x_cxl_rdma_sidecar;
+}
+
+const MigrationAddress *migrate_cxl_rdma_sidecar_address(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_sidecar_address;
+}
+
+uint32_t migrate_cxl_rdma_sidecar_max_inflight_regions(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_sidecar_max_inflight_regions;
+}
+
+uint64_t migrate_cxl_rdma_sidecar_region_bytes(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_sidecar_region_bytes;
+}
+
+bool migrate_cxl_rdma_sidecar_postcopy_dirty(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return migrate_cxl_rdma_sidecar() &&
+           s->parameters.x_cxl_rdma_sidecar_postcopy_dirty;
+}
+
+uint64_t migrate_cxl_rdma_sidecar_postcopy_dirty_min_bytes(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_sidecar_postcopy_dirty_min_bytes;
+}
+
+uint64_t migrate_cxl_rdma_cxl_priority_threshold_bytes(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.x_cxl_rdma_cxl_priority_threshold_bytes;
 }
 
 CXLHybridFaultResolveMode migrate_cxl_fault_resolve_mode(void)
@@ -1238,6 +1384,7 @@ void migrate_tls_opts_free(MigrationParameters *params)
     qapi_free_StrOrNull(params->tls_creds);
     qapi_free_StrOrNull(params->tls_hostname);
     qapi_free_StrOrNull(params->tls_authz);
+    qapi_free_MigrationAddress(params->x_cxl_rdma_sidecar_address);
 }
 
 /* normalize QTYPE_QNULL to QTYPE_QSTRING "" */
@@ -1265,7 +1412,7 @@ static void tls_opt_to_str(StrOrNull *opt)
  */
 static void migrate_mark_all_params_present(MigrationParameters *p)
 {
-    int len, n_str_args = 4; /* tls-*, cxl-path */
+    int len, n_pointer_args = 5; /* tls-*, cxl-path, sidecar address */
     bool *has_fields[] = {
         &p->has_throttle_trigger_threshold, &p->has_cpu_throttle_initial,
         &p->has_cpu_throttle_increment, &p->has_cpu_throttle_tailslow,
@@ -1284,19 +1431,31 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_cxl_switch_max_precopy_ms,
         &p->has_x_cxl_switch_min_remaining,
         &p->has_x_cxl_switch_gain_floor,
+        &p->has_x_cxl_switch_remap_coverage,
         &p->has_x_cxl_brake_enable,
         &p->has_x_cxl_brake_remap_granule,
+        &p->has_x_cxl_backing_rate,
+        &p->has_x_cxl_clean_remap_enable,
+        &p->has_x_cxl_clean_remap_copy_budget,
+        &p->has_x_cxl_clean_remap_throttle_us,
+        &p->has_x_cxl_clean_remap_prefault_mode,
         &p->has_x_cxl_prefetch_rate,
         &p->has_x_cxl_prefetch_heat_window_ms,
         &p->has_x_cxl_prefetch_batch_pages,
         &p->has_x_cxl_dst_cache_size,
         &p->has_x_cxl_shared_backing,
+        &p->has_x_cxl_rdma_sidecar,
+        &p->has_x_cxl_rdma_sidecar_max_inflight_regions,
+        &p->has_x_cxl_rdma_sidecar_region_bytes,
+        &p->has_x_cxl_rdma_sidecar_postcopy_dirty,
+        &p->has_x_cxl_rdma_sidecar_postcopy_dirty_min_bytes,
+        &p->has_x_cxl_rdma_cxl_priority_threshold_bytes,
         &p->has_x_cxl_fault_resolve_mode,
         &p->has_cpr_exec_command,
     };
 
     len = ARRAY_SIZE(has_fields);
-    assert(len + n_str_args == MIGRATION_PARAMETER__MAX);
+    assert(len + n_pointer_args == MIGRATION_PARAMETER__MAX);
 
     for (int i = 0; i < len; i++) {
         *has_fields[i] = true;
@@ -1325,6 +1484,26 @@ MigrationParameters *qmp_query_migrate_parameters(Error **errp)
 
 void migrate_params_init(MigrationParameters *params)
 {
+    params->x_cxl_clean_remap_enable =
+        DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_ENABLE;
+    params->x_cxl_clean_remap_copy_budget =
+        DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_COPY_BUDGET;
+    params->x_cxl_clean_remap_throttle_us =
+        DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_THROTTLE_US;
+    params->x_cxl_clean_remap_prefault_mode =
+        DEFAULT_MIGRATE_X_CXL_CLEAN_REMAP_PREFAULT_MODE;
+    params->x_cxl_rdma_sidecar =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR;
+    params->x_cxl_rdma_sidecar_max_inflight_regions =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_MAX_INFLIGHT_REGIONS;
+    params->x_cxl_rdma_sidecar_region_bytes =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_REGION_BYTES;
+    params->x_cxl_rdma_sidecar_postcopy_dirty =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY;
+    params->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes =
+        DEFAULT_MIGRATE_X_CXL_RDMA_SIDECAR_POSTCOPY_DIRTY_MIN_BYTES;
+    params->x_cxl_rdma_cxl_priority_threshold_bytes =
+        DEFAULT_MIGRATE_X_CXL_RDMA_CXL_PRIORITY_THRESHOLD_BYTES;
     params->x_cxl_fault_resolve_mode =
         DEFAULT_MIGRATE_X_CXL_FAULT_RESOLVE_MODE;
     migrate_mark_all_params_present(params);
@@ -1505,6 +1684,13 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->x_cxl_switch_remap_coverage > 100) {
+        error_setg(errp,
+                   "Option x-cxl-switch-remap-coverage expects a value "
+                   "between 0 and 100");
+        return false;
+    }
+
     if (params->x_cxl_prefetch_batch_pages > INT32_MAX) {
         error_setg(errp,
                    "Option x-cxl-prefetch-batch-pages expects a value no larger than %d",
@@ -1518,6 +1704,47 @@ bool migrate_params_check(MigrationParameters *params, Error **errp)
         error_setg(errp, "Invalid x-cxl-fault-resolve-mode value %d",
                    params->x_cxl_fault_resolve_mode);
         return false;
+    }
+
+    if (params->x_cxl_clean_remap_prefault_mode < 0 ||
+        params->x_cxl_clean_remap_prefault_mode >=
+        CXL_CLEAN_REMAP_PREFAULT_MODE__MAX) {
+        error_setg(errp, "Invalid x-cxl-clean-remap-prefault-mode value %d",
+                   params->x_cxl_clean_remap_prefault_mode);
+        return false;
+    }
+
+    if (params->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes <
+        qemu_target_page_size()) {
+        error_setg(errp,
+                   "x-cxl-rdma-sidecar-postcopy-dirty-min-bytes must be at least the target page size");
+        return false;
+    }
+
+    if (params->x_cxl_rdma_sidecar_postcopy_dirty &&
+        !params->x_cxl_rdma_sidecar) {
+        error_setg(errp,
+                   "x-cxl-rdma-sidecar-postcopy-dirty requires x-cxl-rdma-sidecar");
+        return false;
+    }
+
+    if (params->x_cxl_rdma_sidecar) {
+        if (!migrate_cxl_hybrid()) {
+            error_setg(errp, "x-cxl-rdma-sidecar requires x-cxl-hybrid");
+            return false;
+        }
+        if (!params->x_cxl_rdma_sidecar_address ||
+            params->x_cxl_rdma_sidecar_address->transport !=
+                MIGRATION_ADDRESS_TYPE_RDMA) {
+            error_setg(errp,
+                       "x-cxl-rdma-sidecar requires an RDMA sidecar address");
+            return false;
+        }
+#ifndef CONFIG_RDMA
+        error_setg(errp,
+                   "x-cxl-rdma-sidecar requires QEMU to be built with RDMA support");
+        return false;
+#endif
     }
 
     return true;
@@ -1669,12 +1896,35 @@ static void migrate_params_test_apply(MigrationParameters *params,
     if (params->has_x_cxl_switch_gain_floor) {
         dest->x_cxl_switch_gain_floor = params->x_cxl_switch_gain_floor;
     }
+    if (params->has_x_cxl_switch_remap_coverage) {
+        dest->x_cxl_switch_remap_coverage =
+            params->x_cxl_switch_remap_coverage;
+    }
     if (params->has_x_cxl_brake_enable) {
         dest->x_cxl_brake_enable = params->x_cxl_brake_enable;
     }
     if (params->has_x_cxl_brake_remap_granule) {
         dest->x_cxl_brake_remap_granule =
             params->x_cxl_brake_remap_granule;
+    }
+    if (params->has_x_cxl_backing_rate) {
+        dest->x_cxl_backing_rate = params->x_cxl_backing_rate;
+    }
+    if (params->has_x_cxl_clean_remap_enable) {
+        dest->x_cxl_clean_remap_enable =
+            params->x_cxl_clean_remap_enable;
+    }
+    if (params->has_x_cxl_clean_remap_copy_budget) {
+        dest->x_cxl_clean_remap_copy_budget =
+            params->x_cxl_clean_remap_copy_budget;
+    }
+    if (params->has_x_cxl_clean_remap_throttle_us) {
+        dest->x_cxl_clean_remap_throttle_us =
+            params->x_cxl_clean_remap_throttle_us;
+    }
+    if (params->has_x_cxl_clean_remap_prefault_mode) {
+        dest->x_cxl_clean_remap_prefault_mode =
+            params->x_cxl_clean_remap_prefault_mode;
     }
     if (params->has_x_cxl_prefetch_rate) {
         dest->x_cxl_prefetch_rate = params->x_cxl_prefetch_rate;
@@ -1692,6 +1942,41 @@ static void migrate_params_test_apply(MigrationParameters *params,
     }
     if (params->has_x_cxl_shared_backing) {
         dest->x_cxl_shared_backing = params->x_cxl_shared_backing;
+    }
+    if (params->has_x_cxl_rdma_sidecar) {
+        dest->x_cxl_rdma_sidecar = params->x_cxl_rdma_sidecar;
+    }
+    if (params->x_cxl_rdma_sidecar_address) {
+        dest->x_cxl_rdma_sidecar_address =
+            QAPI_CLONE(MigrationAddress,
+                       params->x_cxl_rdma_sidecar_address);
+    } else if (migrate_get_current()->parameters.x_cxl_rdma_sidecar_address) {
+        dest->x_cxl_rdma_sidecar_address =
+            QAPI_CLONE(MigrationAddress,
+                       migrate_get_current()->parameters.
+                       x_cxl_rdma_sidecar_address);
+    } else {
+        dest->x_cxl_rdma_sidecar_address = NULL;
+    }
+    if (params->has_x_cxl_rdma_sidecar_max_inflight_regions) {
+        dest->x_cxl_rdma_sidecar_max_inflight_regions =
+            params->x_cxl_rdma_sidecar_max_inflight_regions;
+    }
+    if (params->has_x_cxl_rdma_sidecar_region_bytes) {
+        dest->x_cxl_rdma_sidecar_region_bytes =
+            params->x_cxl_rdma_sidecar_region_bytes;
+    }
+    if (params->has_x_cxl_rdma_sidecar_postcopy_dirty) {
+        dest->x_cxl_rdma_sidecar_postcopy_dirty =
+            params->x_cxl_rdma_sidecar_postcopy_dirty;
+    }
+    if (params->has_x_cxl_rdma_sidecar_postcopy_dirty_min_bytes) {
+        dest->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes =
+            params->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes;
+    }
+    if (params->has_x_cxl_rdma_cxl_priority_threshold_bytes) {
+        dest->x_cxl_rdma_cxl_priority_threshold_bytes =
+            params->x_cxl_rdma_cxl_priority_threshold_bytes;
     }
     if (params->has_x_cxl_fault_resolve_mode) {
         dest->x_cxl_fault_resolve_mode = params->x_cxl_fault_resolve_mode;
@@ -1847,12 +2132,35 @@ static void migrate_params_apply(MigrationParameters *params)
         s->parameters.x_cxl_switch_gain_floor =
             params->x_cxl_switch_gain_floor;
     }
+    if (params->has_x_cxl_switch_remap_coverage) {
+        s->parameters.x_cxl_switch_remap_coverage =
+            params->x_cxl_switch_remap_coverage;
+    }
     if (params->has_x_cxl_brake_enable) {
         s->parameters.x_cxl_brake_enable = params->x_cxl_brake_enable;
     }
     if (params->has_x_cxl_brake_remap_granule) {
         s->parameters.x_cxl_brake_remap_granule =
             params->x_cxl_brake_remap_granule;
+    }
+    if (params->has_x_cxl_backing_rate) {
+        s->parameters.x_cxl_backing_rate = params->x_cxl_backing_rate;
+    }
+    if (params->has_x_cxl_clean_remap_enable) {
+        s->parameters.x_cxl_clean_remap_enable =
+            params->x_cxl_clean_remap_enable;
+    }
+    if (params->has_x_cxl_clean_remap_copy_budget) {
+        s->parameters.x_cxl_clean_remap_copy_budget =
+            params->x_cxl_clean_remap_copy_budget;
+    }
+    if (params->has_x_cxl_clean_remap_throttle_us) {
+        s->parameters.x_cxl_clean_remap_throttle_us =
+            params->x_cxl_clean_remap_throttle_us;
+    }
+    if (params->has_x_cxl_clean_remap_prefault_mode) {
+        s->parameters.x_cxl_clean_remap_prefault_mode =
+            params->x_cxl_clean_remap_prefault_mode;
     }
     if (params->has_x_cxl_prefetch_rate) {
         s->parameters.x_cxl_prefetch_rate = params->x_cxl_prefetch_rate;
@@ -1870,6 +2178,36 @@ static void migrate_params_apply(MigrationParameters *params)
     }
     if (params->has_x_cxl_shared_backing) {
         s->parameters.x_cxl_shared_backing = params->x_cxl_shared_backing;
+    }
+    if (params->has_x_cxl_rdma_sidecar) {
+        s->parameters.x_cxl_rdma_sidecar = params->x_cxl_rdma_sidecar;
+    }
+    if (params->x_cxl_rdma_sidecar_address) {
+        qapi_free_MigrationAddress(
+            s->parameters.x_cxl_rdma_sidecar_address);
+        s->parameters.x_cxl_rdma_sidecar_address =
+            QAPI_CLONE(MigrationAddress,
+                       params->x_cxl_rdma_sidecar_address);
+    }
+    if (params->has_x_cxl_rdma_sidecar_max_inflight_regions) {
+        s->parameters.x_cxl_rdma_sidecar_max_inflight_regions =
+            params->x_cxl_rdma_sidecar_max_inflight_regions;
+    }
+    if (params->has_x_cxl_rdma_sidecar_region_bytes) {
+        s->parameters.x_cxl_rdma_sidecar_region_bytes =
+            params->x_cxl_rdma_sidecar_region_bytes;
+    }
+    if (params->has_x_cxl_rdma_sidecar_postcopy_dirty) {
+        s->parameters.x_cxl_rdma_sidecar_postcopy_dirty =
+            params->x_cxl_rdma_sidecar_postcopy_dirty;
+    }
+    if (params->has_x_cxl_rdma_sidecar_postcopy_dirty_min_bytes) {
+        s->parameters.x_cxl_rdma_sidecar_postcopy_dirty_min_bytes =
+            params->x_cxl_rdma_sidecar_postcopy_dirty_min_bytes;
+    }
+    if (params->has_x_cxl_rdma_cxl_priority_threshold_bytes) {
+        s->parameters.x_cxl_rdma_cxl_priority_threshold_bytes =
+            params->x_cxl_rdma_cxl_priority_threshold_bytes;
     }
     if (params->has_x_cxl_fault_resolve_mode) {
         s->parameters.x_cxl_fault_resolve_mode =

@@ -237,6 +237,13 @@
 #
 # @gain-collapsed: recent iteration gain fell below threshold
 #
+# @remap-coverage: source-side CXL remap coverage reached the
+#     configured threshold
+#
+# @precopy-complete: ordinary precopy completion became possible after
+#     source-side remaps were installed, so hybrid switched to
+#     postcopy to consume the remapped regions
+#
 # @manual: manual postcopy request was used
 #
 # Features:
@@ -252,6 +259,8 @@
             { 'name': 'remaining-small', 'features': [ 'unstable' ] },
             { 'name': 'precopy-time-cap', 'features': [ 'unstable' ] },
             { 'name': 'gain-collapsed', 'features': [ 'unstable' ] },
+            { 'name': 'remap-coverage', 'features': [ 'unstable' ] },
+            { 'name': 'precopy-complete', 'features': [ 'unstable' ] },
             { 'name': 'manual', 'features': [ 'unstable' ] } ] }
 
 ##
@@ -281,6 +290,31 @@
             { 'name': 'region-remap', 'features': [ 'unstable' ] },
             { 'name': 'region-remap-fallback-copy',
               'features': [ 'unstable' ] } ] }
+
+##
+# @CXLCleanRemapPrefaultMode:
+#
+# Experimental source-side destination CXL prefault mode for
+# clean-remap copies.
+#
+# @off: do not synchronously prefault clean-remap copy targets
+#
+# @madvise: use MADV_POPULATE_WRITE on each clean-remap copy target
+#     before the source RAM copy
+#
+# @touch: explicitly touch each host page in the clean-remap copy
+#     target before the source RAM copy
+#
+# Features:
+#
+# @unstable: This enum is experimental.
+#
+# Since: 11.0
+##
+{ 'enum': 'CXLCleanRemapPrefaultMode',
+  'data': [ { 'name': 'off', 'features': [ 'unstable' ] },
+            { 'name': 'madvise', 'features': [ 'unstable' ] },
+            { 'name': 'touch', 'features': [ 'unstable' ] } ] }
 
 ##
 # @VfioStats:
@@ -365,6 +399,9 @@
 #
 # @remapped-regions: number of regions currently remapped to CXL
 #
+# @remap-coverage: source remap coverage percentage, measured as
+#     remapped staged pages divided by staged pages
+#
 # @remap-attempts: number of region remap attempts
 #
 # @remap-successes: number of successful region remaps
@@ -402,6 +439,12 @@
 # @backing-write-time-ns: cumulative nanoseconds spent in backing
 #     channel writes
 #
+# @backing-rate-sleep-count: number of source-side CXL backing
+#     pacing sleeps
+#
+# @backing-rate-sleep-time-ns: cumulative nanoseconds spent sleeping
+#     for source-side CXL backing pacing
+#
 # @migrated-bitmap-time-ns: cumulative nanoseconds spent marking
 #     pages as already copied to CXL
 #
@@ -410,6 +453,19 @@
 #
 # @remap-scan-time-ns: cumulative nanoseconds spent scanning covered
 #     ranges for remap candidates
+#
+# @pending-remap-regions: number of source-remap regions currently
+#     pending a clean-remap decision after the most recent scan
+#
+# @clean-pending-remap-regions: number of pending source-remap
+#     regions that were fully staged and clean after the most recent
+#     scan
+#
+# @pending-remap-unmigrated-pages: total pages in pending remap
+#     regions that had not reached CXL after the most recent scan
+#
+# @pending-remap-dirty-pages: total dirty pages in pending remap
+#     regions after the most recent scan
 #
 # @remap-page-check-calls: number of "all pages migrated?" region
 #     checks executed before attempting remap
@@ -421,16 +477,18 @@
 #     `mmap(MAP_FIXED)` remap syscall
 #
 # @remap-copy-bytes: total bytes copied back into the shared backing
-#     while the source guest was paused immediately before remap
+#     while the source guest was paused before remap; clean source
+#     remap keeps this at zero
 #
 # @remap-copy-time-ns: cumulative nanoseconds spent refreshing backing
-#     contents immediately before remap
+#     contents immediately before remap; clean source remap keeps this
+#     at zero
 #
 # @remap-pause-calls: number of short source-guest pauses taken to
-#     refresh backing contents and install remaps safely
+#     sync dirty state and install clean source remaps safely
 #
 # @remap-pause-time-ns: cumulative nanoseconds spent with the source
-#     guest paused for safe remap installation
+#     guest paused for clean-remap dirty sync and installation
 #
 # @dirty-sync-calls: number of dirty-log sync passes timed while CXL
 #     mapped-ram backing was enabled
@@ -440,6 +498,43 @@
 #
 # @dirty-clear-time-ns: cumulative nanoseconds spent clearing dirty
 #     bits for already-remapped pages
+#
+# @clean-remap-scan-calls: number of clean-remap dirty-scan epochs
+#     executed by the source.  (Since 11.0)
+#
+# @clean-remap-candidate-regions: source-remap regions queued because
+#     they were clean across a scan epoch.  (Since 11.0)
+#
+# @clean-remap-copy-bytes: bytes copied from source RAM into CXL
+#     backing by the clean-remap path.  (Since 11.0)
+#
+# @clean-remap-copy-time-ns: nanoseconds spent copying source RAM into
+#     CXL backing by the clean-remap path.  (Since 11.0)
+#
+# @clean-remap-abandoned-dirty: number of candidate regions abandoned
+#     because the final dirty sync found a dirty page.  (Since 11.0)
+#
+# @clean-remap-budget-exhaustions: number of clean-remap drains that
+#     stopped because the copy budget was exhausted.  (Since 11.0)
+#
+# @clean-remap-pending-bytes: bytes still not published/remapped
+#     by the clean-remap source mode.  (Since 11.0)
+#
+# @clean-remap-coverage: clean-remap coverage percentage, measured as
+#     remapped pages divided by total guest RAM pages.  This does
+#     not use the staged-page denominator from @remap-coverage.
+#     (Since 11.0)
+#
+# @clean-remap-prefault-bytes: bytes covered by synchronous
+#     clean-remap copy-target prefault operations.  This is separate
+#     from source-wide background @prefault-bytes.  (Since 11.0)
+#
+# @clean-remap-prefault-time-ns: cumulative nanoseconds spent in
+#     synchronous clean-remap copy-target prefault work.  (Since
+#     11.0)
+#
+# @clean-remap-prefault-errors: number of synchronous clean-remap
+#     copy-target prefault errors.  (Since 11.0)
 #
 # @prefault-bytes: bytes covered by source-side CXL page-data
 #     write-prefault operations
@@ -525,6 +620,10 @@
 # @warm-publish-pages: number of warm-publish operations that copied
 #     pages into shared CXL backing and marked them visible
 #
+# @completion-publish-pages: number of source-side pages already
+#     staged in shared CXL backing and published visible at the
+#     postcopy start boundary without copying
+#
 # @last-iterate-ram-pages: RAM pages transferred during the
 #     most recent migration main-loop iteration
 #
@@ -561,6 +660,262 @@
 #
 # @region-publish-time-ns: cumulative nanoseconds spent handling
 #     source-side full-region publish requests
+#
+# @rdma-bulk-regions: number of whole fault regions accepted by the
+#     measurement-only hybrid RDMA sidecar.  (Since 11.0)
+#
+# @rdma-bulk-bytes: bytes covered by @rdma-bulk-regions.  (Since 11.0)
+#
+# @page-state-cxl-worker-bytes: bytes copied by the page-state CXL
+#     lane.  During the transitional worker rollout this is backed by
+#     the stable CXL memcpy accounting.  (Since 11.0)
+#
+# @page-state-cxl-worker-time-ns: nanoseconds spent copying bytes for
+#     @page-state-cxl-worker-bytes.  (Since 11.0)
+#
+# @page-state-cxl-worker-precopy-bytes: bytes copied by the
+#     page-state CXL lane while the CXL hybrid phase was precopy bulk,
+#     precopy brake, or switching.  (Since 11.0)
+#
+# @page-state-cxl-worker-precopy-time-ns: nanoseconds spent copying
+#     bytes for @page-state-cxl-worker-precopy-bytes.  (Since 11.0)
+#
+# @page-state-cxl-worker-postcopy-bytes: bytes copied by the
+#     page-state CXL lane while the CXL hybrid phase was postcopy
+#     warm.  (Since 11.0)
+#
+# @page-state-cxl-worker-postcopy-time-ns: nanoseconds spent copying
+#     bytes for @page-state-cxl-worker-postcopy-bytes.  (Since 11.0)
+#
+# @page-state-rdma-completed-bytes: bytes completed by RDMA
+#     descriptors and published through page-state.  (Since 11.0)
+#
+# @page-state-rdma-completed-pages: pages completed by RDMA
+#     descriptors and published through page-state.  (Since 11.0)
+#
+# @page-state-rdma-completed-time-ns: nanoseconds from RDMA descriptor
+#     post to completion for completed page-state RDMA descriptors.
+#     (Since 11.0)
+#
+# @page-state-rdma-active-time-ns: cumulative wall-clock nanoseconds
+#     where at least one page-state RDMA descriptor was in flight.
+#     Use this for concurrent RDMA lane goodput.  (Since 11.0)
+#
+# @page-state-rdma-transport-completed-time-ns: cumulative nanoseconds
+#     from RDMA descriptor post to CQE observation.  Excludes
+#     page-state publication.  (Since 11.0)
+#
+# @page-state-rdma-transport-active-time-ns: cumulative wall-clock
+#     nanoseconds from first RDMA descriptor post to last CQE
+#     observation in active RDMA epochs.  Excludes page-state
+#     publication.  (Since 11.0)
+#
+# @page-state-rdma-publish-time-ns: cumulative nanoseconds from RDMA
+#     CQE observation to page-state publication completion.
+#     (Since 11.0)
+#
+# @page-state-rdma-stale-pages: pages whose RDMA descriptor completion
+#     did not match the captured page-state claim.  (Since 11.0)
+#
+# @page-state-rdma-precopy-completed-bytes: bytes completed by
+#     precopy RDMA descriptors and published through page-state.
+#     (Since 11.0)
+#
+# @page-state-rdma-precopy-completed-time-ns: nanoseconds from RDMA
+#     descriptor post to completion for completed precopy page-state
+#     RDMA descriptors.  (Since 11.0)
+#
+# @page-state-rdma-precopy-active-time-ns: cumulative wall-clock
+#     nanoseconds where at least one precopy page-state RDMA
+#     descriptor was in flight.  (Since 11.0)
+#
+# @page-state-rdma-precopy-transport-completed-time-ns: cumulative
+#     nanoseconds from precopy RDMA descriptor post to CQE
+#     observation.  Excludes page-state publication.  (Since 11.0)
+#
+# @page-state-rdma-precopy-transport-active-time-ns: cumulative
+#     wall-clock nanoseconds from first precopy RDMA descriptor post
+#     to last CQE observation in active RDMA epochs.  Excludes
+#     page-state publication.  (Since 11.0)
+#
+# @page-state-rdma-precopy-publish-time-ns: cumulative nanoseconds
+#     from precopy RDMA CQE observation to page-state publication
+#     completion.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-completed-bytes: bytes completed by
+#     postcopy dirty RDMA descriptors and published through
+#     page-state.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-completed-time-ns: nanoseconds from
+#     RDMA descriptor post to completion for completed postcopy dirty
+#     page-state RDMA descriptors.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-active-time-ns: cumulative
+#     wall-clock nanoseconds where at least one postcopy dirty
+#     page-state RDMA descriptor was in flight.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-transport-completed-time-ns:
+#     cumulative nanoseconds from postcopy dirty RDMA descriptor post
+#     to CQE observation.  Excludes page-state publication.
+#     (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-transport-active-time-ns:
+#     cumulative wall-clock nanoseconds from first postcopy dirty RDMA
+#     descriptor post to last CQE observation in active RDMA epochs.
+#     Excludes page-state publication.  (Since 11.0)
+#
+# @page-state-rdma-postcopy-dirty-publish-time-ns: cumulative
+#     nanoseconds from postcopy dirty RDMA CQE observation to
+#     page-state publication completion.  (Since 11.0)
+#
+# @page-state-cas-failures: page-state CAS failures observed by active
+#     CXL/RDMA lane completion.  (Since 11.0)
+#
+# @rdma-sidecar-connect-time-ns: cumulative nanoseconds spent
+#     establishing the RDMA sidecar connection.  (Since 11.0)
+#
+# @rdma-sidecar-registered-bytes: bytes registered for RDMA sidecar
+#     transport.  (Since 11.0)
+#
+# @rdma-sidecar-posted-regions: number of RDMA sidecar region
+#     transfers posted.  (Since 11.0)
+#
+# @rdma-sidecar-posted-bytes: bytes covered by RDMA sidecar posted
+#     transfers.  (Since 11.0)
+#
+# @rdma-sidecar-completed-regions: number of RDMA sidecar region
+#     transfers completed while still useful.  (Since 11.0)
+#
+# @rdma-sidecar-completed-bytes: bytes covered by completed RDMA
+#     sidecar transfers.  (Since 11.0)
+#
+# @rdma-sidecar-stale-regions: number of RDMA sidecar completions
+#     that became stale before use.  (Since 11.0)
+#
+# @rdma-sidecar-cxl-race-lost-regions: number of stale RDMA sidecar
+#     completions where CXL won the region race.  (Since 11.0)
+#
+# @rdma-sidecar-failed-regions: number of RDMA sidecar region
+#     failures.  (Since 11.0)
+#
+# @rdma-sidecar-no-candidate-events: number of scans that found no
+#     RDMA sidecar candidate.  (Since 11.0)
+#
+# @rdma-sidecar-max-inflight-regions: configured maximum RDMA sidecar
+#     inflight regions.  (Since 11.0)
+#
+# @rdma-sidecar-failed: whether any RDMA sidecar region failed.
+#     (Since 11.0)
+#
+# @rdma-sidecar-dynamic-window-regions: current dynamic RDMA admission
+#     window in region units.  (Since 11.0)
+#
+# @rdma-sidecar-sq-capacity-regions: RDMA admission ceiling derived
+#     from transport resources and migration geometry, not from fixed
+#     lane-ratio policy.  (Since 11.0)
+#
+# @rdma-sidecar-queue-len: queued RDMA sidecar bulk claims.
+#     (Since 11.0)
+#
+# @rdma-sidecar-inflight-len: posted RDMA sidecar bulk claims waiting
+#     for completion.  (Since 11.0)
+#
+# @rdma-sidecar-goodput-ewma-bytes-per-ns: EWMA useful RDMA completion
+#     goodput in bytes per nanosecond.  (Since 11.0)
+#
+# @rdma-sidecar-completion-latency-ewma-ns: EWMA post-to-completion
+#     latency for useful RDMA completions.  (Since 11.0)
+#
+# @rdma-sidecar-bdp-estimate-regions: BDP estimate in region units.
+#     (Since 11.0)
+#
+# @rdma-sidecar-admission-accepted-regions: RDMA bulk regions accepted
+#     by dynamic admission.  (Since 11.0)
+#
+# @rdma-sidecar-admission-overflow-cxl-regions: RDMA candidate regions
+#     sent to CXL because the dynamic window was full.  (Since 11.0)
+#
+# @rdma-sidecar-admission-closed-events: admission checks rejected
+#     because RDMA was closed by lifecycle state.  (Since 11.0)
+#
+# @rdma-sidecar-admission-goodput-drop-events: dynamic-window
+#     decreases caused by goodput or latency regression.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-posted-spans: postcopy dirty spans
+#     posted to the RDMA sidecar.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-posted-bytes: bytes in posted
+#     postcopy dirty RDMA sidecar spans.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-completed-spans: postcopy dirty spans
+#     completed by the RDMA sidecar.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-completed-bytes: bytes completed in
+#     postcopy dirty RDMA sidecar spans.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-completed-pages: pages completed in
+#     postcopy dirty RDMA sidecar spans.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-stale-pages: pages in completed
+#     postcopy dirty RDMA sidecar spans that were stale.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-overflow-cxl-spans: postcopy dirty
+#     spans sent to CXL because RDMA admission was full or closed.
+#     (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-min-span-cxl-spans: postcopy dirty
+#     spans sent to CXL because they were below the RDMA min-span
+#     threshold.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-max-span-bytes: largest postcopy dirty
+#     span posted to the RDMA sidecar, in bytes.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-max-inflight-wr: postcopy dirty RDMA
+#     admission WR limit.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-queue-wr: queued postcopy dirty RDMA
+#     write requests.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-inflight-wr: in-flight postcopy dirty
+#     RDMA write requests.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-max-inflight-bytes: postcopy dirty
+#     RDMA admission byte limit.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-queue-bytes: bytes queued for
+#     postcopy dirty RDMA sidecar writes.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-inflight-bytes: bytes in in-flight
+#     postcopy dirty RDMA sidecar writes.  (Since 11.0)
+#
+# @rdma-sidecar-postcopy-dirty-min-span-bytes: configured minimum
+#     postcopy dirty span size admitted to RDMA.  (Since 11.0)
+#
+# @rdma-ready-regions: number of whole fault regions copied by the
+#     hybrid RDMA sidecar and still considered source-current when
+#     marked ready.  (Since 11.0)
+#
+# @rdma-ready-pages: number of guest pages covered by
+#     @rdma-ready-regions.  (Since 11.0)
+#
+# @rdma-invalidated-regions: number of RDMA-ready regions invalidated
+#     because later source dirties made the sidecar copy stale.
+#     (Since 11.0)
+#
+# @rdma-ready-pages-lost: number of guest pages lost from RDMA-ready
+#     state by whole-region invalidation.  (Since 11.0)
+#
+# @cxl-republish-regions-due-to-rdma-invalidate: number of invalidated
+#     RDMA-ready regions later republished by the CXL fallback path.
+#     (Since 11.0)
+#
+# @cxl-republish-pages-due-to-rdma-invalidate: number of CXL fallback
+#     pages republished because RDMA-ready regions became stale.
+#     (Since 11.0)
+#
+# @rdma-invalidate-publish-amplification: CXL fallback pages
+#     republished due to RDMA invalidation divided by
+#     max(@rdma-ready-pages-lost, 1).  (Since 11.0)
 #
 # @publish-memcpy-bytes: bytes copied by source-side CXL publish
 #     memcpy operations
@@ -655,9 +1010,10 @@
 #
 # Features:
 #
-# @unstable: Members @phase, @phase-transitions, @switch-reason,
-#     @switch-iteration, @dst-stage-capacity-bytes,
+# @unstable: Members @remap-coverage, @phase, @phase-transitions,
+#     @switch-reason, @switch-iteration, @dst-stage-capacity-bytes,
 #     @dst-stage-slots, @dst-stage-present-slots,
+#     @clean-remap-coverage,
 #     @dst-fault-hits, @dst-fault-misses,
 #     @dst-fault-read-bytes, @dst-fault-read-time-ns,
 #     @dst-fault-place-successes,
@@ -674,10 +1030,82 @@
 #     @last-iterate-fault-burst-pages, @last-iterate-phase,
 #     @fault-publish-requests, @fault-publish-waits,
 #     @fault-publish-wait-time-ns,
+#     @clean-remap-prefault-bytes, @clean-remap-prefault-time-ns,
+#     @clean-remap-prefault-errors,
 #     @prefault-bytes, @prefault-time-ns,
 #     @prefault-wait-time-ns, @prefault-errors,
 #     @region-publish-requests, @region-publish-pages,
 #     @region-publish-time-ns,
+#     @rdma-bulk-regions, @rdma-bulk-bytes,
+#     @page-state-cxl-worker-bytes, @page-state-cxl-worker-time-ns,
+#     @page-state-cxl-worker-precopy-bytes,
+#     @page-state-cxl-worker-precopy-time-ns,
+#     @page-state-cxl-worker-postcopy-bytes,
+#     @page-state-cxl-worker-postcopy-time-ns,
+#     @page-state-rdma-completed-bytes,
+#     @page-state-rdma-completed-pages,
+#     @page-state-rdma-completed-time-ns,
+#     @page-state-rdma-active-time-ns,
+#     @page-state-rdma-transport-completed-time-ns,
+#     @page-state-rdma-transport-active-time-ns,
+#     @page-state-rdma-publish-time-ns,
+#     @page-state-rdma-stale-pages,
+#     @page-state-rdma-precopy-completed-bytes,
+#     @page-state-rdma-precopy-completed-time-ns,
+#     @page-state-rdma-precopy-active-time-ns,
+#     @page-state-rdma-precopy-transport-completed-time-ns,
+#     @page-state-rdma-precopy-transport-active-time-ns,
+#     @page-state-rdma-precopy-publish-time-ns,
+#     @page-state-rdma-postcopy-dirty-completed-bytes,
+#     @page-state-rdma-postcopy-dirty-completed-time-ns,
+#     @page-state-rdma-postcopy-dirty-active-time-ns,
+#     @page-state-rdma-postcopy-dirty-transport-completed-time-ns,
+#     @page-state-rdma-postcopy-dirty-transport-active-time-ns,
+#     @page-state-rdma-postcopy-dirty-publish-time-ns,
+#     @page-state-cas-failures,
+#     @rdma-sidecar-connect-time-ns,
+#     @rdma-sidecar-registered-bytes,
+#     @rdma-sidecar-posted-regions,
+#     @rdma-sidecar-posted-bytes,
+#     @rdma-sidecar-completed-regions,
+#     @rdma-sidecar-completed-bytes,
+#     @rdma-sidecar-stale-regions,
+#     @rdma-sidecar-cxl-race-lost-regions,
+#     @rdma-sidecar-failed-regions,
+#     @rdma-sidecar-no-candidate-events,
+#     @rdma-sidecar-max-inflight-regions,
+#     @rdma-sidecar-failed,
+#     @rdma-sidecar-dynamic-window-regions,
+#     @rdma-sidecar-sq-capacity-regions, @rdma-sidecar-queue-len,
+#     @rdma-sidecar-inflight-len,
+#     @rdma-sidecar-goodput-ewma-bytes-per-ns,
+#     @rdma-sidecar-completion-latency-ewma-ns,
+#     @rdma-sidecar-bdp-estimate-regions,
+#     @rdma-sidecar-admission-accepted-regions,
+#     @rdma-sidecar-admission-overflow-cxl-regions,
+#     @rdma-sidecar-admission-closed-events,
+#     @rdma-sidecar-admission-goodput-drop-events,
+#     @rdma-sidecar-postcopy-dirty-posted-spans,
+#     @rdma-sidecar-postcopy-dirty-posted-bytes,
+#     @rdma-sidecar-postcopy-dirty-completed-spans,
+#     @rdma-sidecar-postcopy-dirty-completed-bytes,
+#     @rdma-sidecar-postcopy-dirty-completed-pages,
+#     @rdma-sidecar-postcopy-dirty-stale-pages,
+#     @rdma-sidecar-postcopy-dirty-overflow-cxl-spans,
+#     @rdma-sidecar-postcopy-dirty-min-span-cxl-spans,
+#     @rdma-sidecar-postcopy-dirty-max-span-bytes,
+#     @rdma-sidecar-postcopy-dirty-max-inflight-wr,
+#     @rdma-sidecar-postcopy-dirty-queue-wr,
+#     @rdma-sidecar-postcopy-dirty-inflight-wr,
+#     @rdma-sidecar-postcopy-dirty-max-inflight-bytes,
+#     @rdma-sidecar-postcopy-dirty-queue-bytes,
+#     @rdma-sidecar-postcopy-dirty-inflight-bytes,
+#     @rdma-sidecar-postcopy-dirty-min-span-bytes,
+#     @rdma-ready-regions, @rdma-ready-pages,
+#     @rdma-invalidated-regions, @rdma-ready-pages-lost,
+#     @cxl-republish-regions-due-to-rdma-invalidate,
+#     @cxl-republish-pages-due-to-rdma-invalidate,
+#     @rdma-invalidate-publish-amplification,
 #     @publish-memcpy-bytes, @publish-memcpy-time-ns,
 #     @stream-publish-ranges, @stream-publish-pages,
 #     @stream-publish-time-ns, @stream-publish-local-bitmap-time-ns,
@@ -710,6 +1138,8 @@
             'remap-granule': 'uint64',
             'total-regions': 'uint64',
             'remapped-regions': 'uint64',
+            'remap-coverage': { 'type': 'uint8',
+                                'features': [ 'unstable' ] },
             'remap-attempts': 'uint64',
             'remap-successes': 'uint64',
             'remap-failures': 'uint64',
@@ -723,9 +1153,19 @@
             'backing-write-calls': 'uint64',
             'backing-write-bytes': 'uint64',
             'backing-write-time-ns': 'uint64',
+            'backing-rate-sleep-count': 'uint64',
+            'backing-rate-sleep-time-ns': 'uint64',
             'migrated-bitmap-time-ns': 'uint64',
             'remap-scan-calls': 'uint64',
             'remap-scan-time-ns': 'uint64',
+            'pending-remap-regions': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'clean-pending-remap-regions': { 'type': 'uint64',
+                                             'features': [ 'unstable' ] },
+            'pending-remap-unmigrated-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'pending-remap-dirty-pages': { 'type': 'uint64',
+                                           'features': [ 'unstable' ] },
             'remap-page-check-calls': 'uint64',
             'remap-page-check-time-ns': 'uint64',
             'remap-syscall-time-ns': 'uint64',
@@ -736,6 +1176,21 @@
             'dirty-sync-calls': 'uint64',
             'dirty-sync-time-ns': 'uint64',
             'dirty-clear-time-ns': 'uint64',
+            'clean-remap-scan-calls': 'uint64',
+            'clean-remap-candidate-regions': 'uint64',
+            'clean-remap-copy-bytes': 'uint64',
+            'clean-remap-copy-time-ns': 'uint64',
+            'clean-remap-abandoned-dirty': 'uint64',
+            'clean-remap-budget-exhaustions': 'uint64',
+            'clean-remap-pending-bytes': 'uint64',
+            'clean-remap-coverage': { 'type': 'uint8',
+                                      'features': [ 'unstable' ] },
+            'clean-remap-prefault-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'clean-remap-prefault-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'clean-remap-prefault-errors': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
             'prefault-bytes': { 'type': 'uint64',
                                 'features': [ 'unstable' ] },
             'prefault-time-ns': { 'type': 'uint64',
@@ -794,6 +1249,8 @@
                                       'features': [ 'unstable' ] },
             'warm-publish-pages': { 'type': 'uint64',
                                     'features': [ 'unstable' ] },
+            'completion-publish-pages': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
             'last-iterate-ram-pages': { 'type': 'uint64',
                                         'features': [ 'unstable' ] },
             'last-iterate-staged-pages-delta': { 'type': 'uint64',
@@ -818,6 +1275,156 @@
                                       'features': [ 'unstable' ] },
             'region-publish-time-ns': { 'type': 'uint64',
                                         'features': [ 'unstable' ] },
+            'rdma-bulk-regions': { 'type': 'uint64',
+                                   'features': [ 'unstable' ] },
+            'rdma-bulk-bytes': { 'type': 'uint64',
+                                 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-precopy-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-precopy-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-postcopy-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cxl-worker-postcopy-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-completed-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-transport-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-transport-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-publish-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-stale-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-transport-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-transport-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-precopy-publish-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-transport-completed-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-transport-active-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-rdma-postcopy-dirty-publish-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'page-state-cas-failures': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-connect-time-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-registered-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-posted-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-posted-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-completed-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-stale-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-cxl-race-lost-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-failed-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-no-candidate-events': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-max-inflight-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-failed': { 'type': 'bool',
+                                     'features': [ 'unstable' ] },
+            'rdma-sidecar-dynamic-window-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-sq-capacity-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-queue-len': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-inflight-len': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-goodput-ewma-bytes-per-ns': {
+                'type': 'number', 'features': [ 'unstable' ] },
+            'rdma-sidecar-completion-latency-ewma-ns': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-bdp-estimate-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-admission-accepted-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-admission-overflow-cxl-regions': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-admission-closed-events': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-admission-goodput-drop-events': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-posted-spans': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-posted-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-completed-spans': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-completed-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-completed-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-stale-pages': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-overflow-cxl-spans': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-min-span-cxl-spans': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-max-span-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-max-inflight-wr': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-queue-wr': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-inflight-wr': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-max-inflight-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-queue-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-inflight-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-sidecar-postcopy-dirty-min-span-bytes': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-ready-regions': { 'type': 'uint64',
+                                    'features': [ 'unstable' ] },
+            'rdma-ready-pages': { 'type': 'uint64',
+                                  'features': [ 'unstable' ] },
+            'rdma-invalidated-regions': { 'type': 'uint64',
+                                          'features': [ 'unstable' ] },
+            'rdma-ready-pages-lost': { 'type': 'uint64',
+                                       'features': [ 'unstable' ] },
+            'cxl-republish-regions-due-to-rdma-invalidate': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'cxl-republish-pages-due-to-rdma-invalidate': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            'rdma-invalidate-publish-amplification': {
+                'type': 'number', 'features': [ 'unstable' ] },
             'publish-memcpy-bytes': { 'type': 'uint64',
                                       'features': [ 'unstable' ] },
             'publish-memcpy-time-ns': { 'type': 'uint64',
@@ -1512,11 +2119,22 @@
 #     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
 #     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
 #     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
-#     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
-#     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
-#     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
-#     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
-#     experimental.
+#     @x-cxl-switch-remap-coverage, @x-cxl-brake-enable,
+#     @x-cxl-brake-remap-granule, @x-cxl-backing-rate,
+#     @x-cxl-clean-remap-enable, @x-cxl-clean-remap-copy-budget,
+#     @x-cxl-clean-remap-throttle-us,
+#     @x-cxl-clean-remap-prefault-mode,
+#     @x-cxl-prefetch-rate,
+#     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
+#     @x-cxl-dst-cache-size,
+#     @x-cxl-shared-backing, @x-cxl-rdma-sidecar,
+#     @x-cxl-rdma-sidecar-address,
+#     @x-cxl-rdma-sidecar-max-inflight-regions,
+#     @x-cxl-rdma-sidecar-region-bytes,
+#     @x-cxl-rdma-sidecar-postcopy-dirty,
+#     @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes,
+#     @x-cxl-rdma-cxl-priority-threshold-bytes, and
+#     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
 ##
@@ -1551,9 +2169,21 @@
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-switch-gain-floor',
              'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-switch-remap-coverage',
+             'features': [ 'unstable' ] },
            { 'name': 'x-cxl-brake-enable',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-brake-remap-granule',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-backing-rate',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-clean-remap-enable',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-clean-remap-copy-budget',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-clean-remap-throttle-us',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-clean-remap-prefault-mode',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-prefetch-rate',
              'features': [ 'unstable' ] },
@@ -1564,6 +2194,20 @@
            { 'name': 'x-cxl-dst-cache-size',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-shared-backing',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-address',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-max-inflight-regions',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-region-bytes',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-postcopy-dirty',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-sidecar-postcopy-dirty-min-bytes',
+             'features': [ 'unstable' ] },
+           { 'name': 'x-cxl-rdma-cxl-priority-threshold-bytes',
              'features': [ 'unstable' ] },
            { 'name': 'x-cxl-fault-resolve-mode',
              'features': [ 'unstable' ] },
@@ -1765,6 +2409,11 @@
 #     required to justify another bulk precopy round.  Zero disables
 #     this threshold.  (Since 11.0)
 #
+# @x-cxl-switch-remap-coverage: Source remap coverage percentage, from
+#     0 to 100, required before brake phase may switch to postcopy.
+#     Coverage is remapped staged pages divided by staged pages.  Zero
+#     disables this threshold.  (Since 11.0)
+#
 # @x-cxl-brake-enable: Enable the hybrid brake phase that keeps
 #     source-side CXL write redirection active before postcopy
 #     switchover.  Default is false.  (Since 11.0)
@@ -1772,6 +2421,27 @@
 # @x-cxl-brake-remap-granule: Override for the hybrid brake remap
 #     granule, in bytes.  Zero means automatic selection.  (Since
 #     11.0)
+#
+# @x-cxl-backing-rate: Maximum source-side CXL mapped-RAM backing
+#     write rate, in bytes per second.  Zero means no explicit CXL
+#     backing write cap.  (Since 11.0)
+#
+# @x-cxl-clean-remap-enable: Enable experimental clean-remap-only CXL
+#     hybrid precopy.  When enabled, source precopy scans dirty
+#     state and drains clean source-remap regions instead of
+#     bulk-copying every RAM page.  Default is false.  (Since 11.0)
+#
+# @x-cxl-clean-remap-copy-budget: Maximum bytes copied from source
+#     RAM to CXL backing by one clean-remap drain.  Zero means one
+#     source-remap region per drain.  (Since 11.0)
+#
+# @x-cxl-clean-remap-throttle-us: Microseconds to sleep after each
+#     source-remap region copied by a clean-remap drain.  Zero means
+#     no explicit clean-remap burst throttle.  (Since 11.0)
+#
+# @x-cxl-clean-remap-prefault-mode: Source-side synchronous
+#     clean-remap copy-target prefault mode.  Default is @off.
+#     (Since 11.0)
 #
 # @x-cxl-prefetch-rate: Maximum rate, in bytes per second, for
 #     background hybrid warm push into destination CXL staging.  Zero
@@ -1795,6 +2465,42 @@
 #     and visibility state to be observed consistently across
 #     endpoints.  Default is false.  (Since 11.0)
 #
+# @x-cxl-rdma-sidecar: Enable the experimental CXL hybrid RDMA
+#     sidecar.  The sidecar is valid only when @x-cxl-hybrid is
+#     enabled and remains off by default.  (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-address: Secondary RDMA endpoint used by the
+#     experimental CXL hybrid RDMA sidecar.  This is not the main
+#     migration URI; the main migration stream continues to use the
+#     primary migration address.  The address transport must be @rdma
+#     when @x-cxl-rdma-sidecar is enabled.  (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-max-inflight-regions: Deprecated compatibility
+#     auto hint for older CXL hybrid RDMA sidecar commands.  It
+#     no longer caps RDMA admission or SQ depth; zero is accepted
+#     and means automatic transport/resource sizing.  It also no
+#     longer expresses the desired fixed in-flight depth.  (Since
+#     11.0)
+#
+# @x-cxl-rdma-sidecar-region-bytes: CXL hybrid RDMA sidecar region
+#     size, in bytes.  Zero means implementation default.  Default is
+#     0.  (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-postcopy-dirty: Enable experimental RDMA
+#     sidecar transfer of postcopy dirty spans.  Requires
+#     @x-cxl-rdma-sidecar and remains off by default.  (Since 11.0)
+#
+# @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes: Minimum postcopy
+#     dirty span size, in bytes, accepted for RDMA sidecar transfer.
+#     Default is 64 KiB.  (Since 11.0)
+#
+# @x-cxl-rdma-cxl-priority-threshold-bytes: CXL queue low-watermark
+#     threshold, in bytes.  When nonzero and the pending CXL transfer
+#     queue bytes are below this value, CXL/RDMA hybrid migration
+#     prefers the CXL lane before RDMA for precopy bulk and postcopy
+#     dirty dispatch.  Default is 0, which disables this priority
+#     override.  (Since 11.0)
+#
 # @x-cxl-fault-resolve-mode: Experimental destination fault
 #     resolution policy for CXL hybrid postcopy.  (Since 11.0)
 #
@@ -1808,11 +2514,22 @@
 #     @x-vcpu-dirty-limit-period, @x-cxl-switch-dirty-threshold,
 #     @x-cxl-switch-max-iters, @x-cxl-switch-max-precopy-ms,
 #     @x-cxl-switch-min-remaining, @x-cxl-switch-gain-floor,
-#     @x-cxl-brake-enable, @x-cxl-brake-remap-granule,
-#     @x-cxl-prefetch-rate, @x-cxl-prefetch-heat-window-ms,
-#     @x-cxl-prefetch-batch-pages, @x-cxl-dst-cache-size,
-#     @x-cxl-shared-backing, and @x-cxl-fault-resolve-mode are
-#     experimental.
+#     @x-cxl-switch-remap-coverage, @x-cxl-brake-enable,
+#     @x-cxl-brake-remap-granule, @x-cxl-backing-rate,
+#     @x-cxl-clean-remap-enable, @x-cxl-clean-remap-copy-budget,
+#     @x-cxl-clean-remap-throttle-us,
+#     @x-cxl-clean-remap-prefault-mode,
+#     @x-cxl-prefetch-rate,
+#     @x-cxl-prefetch-heat-window-ms, @x-cxl-prefetch-batch-pages,
+#     @x-cxl-dst-cache-size,
+#     @x-cxl-shared-backing, @x-cxl-rdma-sidecar,
+#     @x-cxl-rdma-sidecar-address,
+#     @x-cxl-rdma-sidecar-max-inflight-regions,
+#     @x-cxl-rdma-sidecar-region-bytes,
+#     @x-cxl-rdma-sidecar-postcopy-dirty,
+#     @x-cxl-rdma-sidecar-postcopy-dirty-min-bytes,
+#     @x-cxl-rdma-cxl-priority-threshold-bytes, and
+#     @x-cxl-fault-resolve-mode are experimental.
 #
 # Since: 2.4
 ##
@@ -1859,10 +2576,23 @@
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-switch-gain-floor': {
                 'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-switch-remap-coverage': {
+                'type': 'uint8', 'features': [ 'unstable' ] },
             '*x-cxl-brake-enable': {
                 'type': 'bool', 'features': [ 'unstable' ] },
             '*x-cxl-brake-remap-granule': {
                 'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-backing-rate': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-clean-remap-enable': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-clean-remap-copy-budget': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-clean-remap-throttle-us': {
+                'type': 'uint64', 'features': [ 'unstable' ] },
+            '*x-cxl-clean-remap-prefault-mode': {
+                'type': 'CXLCleanRemapPrefaultMode',
+                'features': [ 'unstable' ] },
             '*x-cxl-prefetch-rate': {
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-prefetch-heat-window-ms': {
@@ -1873,6 +2603,20 @@
                 'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-shared-backing': {
                 'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-address': {
+                'type': 'MigrationAddress', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-max-inflight-regions': {
+                'type': 'uint32', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-region-bytes': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-postcopy-dirty': {
+                'type': 'bool', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-sidecar-postcopy-dirty-min-bytes': {
+                'type': 'size', 'features': [ 'unstable' ] },
+            '*x-cxl-rdma-cxl-priority-threshold-bytes': {
+                'type': 'size', 'features': [ 'unstable' ] },
             '*x-cxl-fault-resolve-mode': {
                 'type': 'CXLHybridFaultResolveMode',
                 'features': [ 'unstable' ] },

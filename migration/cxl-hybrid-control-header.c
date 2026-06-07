@@ -22,6 +22,20 @@ size_t cxl_hybrid_control_visible_bitmap_bytes(uint64_t pages)
            sizeof(unsigned long);
 }
 
+size_t cxl_hybrid_control_page_state_words(uint64_t pages)
+{
+    if (pages > UINT32_MAX) {
+        return SIZE_MAX;
+    }
+
+    return pages;
+}
+
+size_t cxl_hybrid_control_page_state_bytes(uint64_t pages)
+{
+    return pages * sizeof(uint64_t);
+}
+
 size_t cxl_hybrid_control_visible_region_bitmap_words(uint64_t regions)
 {
     return BITS_TO_LONGS(regions);
@@ -255,6 +269,168 @@ bool cxl_hybrid_control_page_visible(const CXLHybridControlHeader *hdr,
     return true;
 }
 
+bool cxl_hybrid_control_page_location(const CXLHybridControlHeader *hdr,
+                                      const unsigned long *visible_bitmap,
+                                      const uint64_t *page_state,
+                                      uint64_t page_index,
+                                      uint32_t generation,
+                                      CXLHybridPageLocation *locationp)
+{
+    uint64_t word;
+    CXLHybridPageLocation location;
+
+    if (!locationp ||
+        !cxl_hybrid_control_page_visible(hdr, visible_bitmap, page_index,
+                                         generation) ||
+        !page_state || page_index >= hdr->page_state_words) {
+        return false;
+    }
+
+    word = qatomic_load_acquire(&page_state[page_index]);
+    if (cxl_hybrid_page_state_kind(word) != CXL_HYBRID_PAGE_STATE_PUBLISHED ||
+        cxl_hybrid_page_state_generation(word) != (generation & 0xffff)) {
+        return false;
+    }
+
+    location = cxl_hybrid_page_state_location(word);
+    if (location == CXL_HYBRID_PAGE_LOCATION_NONE) {
+        return false;
+    }
+
+    *locationp = location;
+    return true;
+}
+
+bool cxl_hybrid_control_page_requires_destination_install(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    bool received,
+    CXLHybridPageLocation *locationp)
+{
+    CXLHybridPageLocation location = CXL_HYBRID_PAGE_LOCATION_NONE;
+
+    if (locationp) {
+        *locationp = CXL_HYBRID_PAGE_LOCATION_NONE;
+    }
+    if (received ||
+        !cxl_hybrid_control_page_location(hdr, visible_bitmap, page_state,
+                                          page_index, generation, &location)) {
+        return false;
+    }
+
+    if (location != CXL_HYBRID_PAGE_LOCATION_CXL &&
+        location != CXL_HYBRID_PAGE_LOCATION_DST_LOCAL) {
+        return false;
+    }
+
+    if (locationp) {
+        *locationp = location;
+    }
+    return true;
+}
+
+bool cxl_hybrid_control_page_requires_dst_local_wake(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    bool received)
+{
+    CXLHybridPageLocation location = CXL_HYBRID_PAGE_LOCATION_NONE;
+
+    return !received &&
+           cxl_hybrid_control_page_location(hdr, visible_bitmap, page_state,
+                                            page_index, generation,
+                                            &location) &&
+           location == CXL_HYBRID_PAGE_LOCATION_DST_LOCAL;
+}
+
+bool cxl_hybrid_control_page_requires_postcopy_discard(
+    const CXLHybridControlHeader *hdr,
+    const unsigned long *visible_bitmap,
+    const uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation)
+{
+    uint64_t word;
+    CXLHybridPageStateKind kind;
+
+    (void)visible_bitmap;
+
+    if (!hdr || !page_state ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_in_range(hdr, page_index) ||
+        page_index >= hdr->page_state_words) {
+        return false;
+    }
+
+    word = qatomic_load_acquire(&page_state[page_index]);
+    if (cxl_hybrid_page_state_generation(word) != (generation & 0xffff)) {
+        return false;
+    }
+
+    kind = cxl_hybrid_page_state_kind(word);
+    if (kind == CXL_HYBRID_PAGE_STATE_PUBLISHED) {
+        return cxl_hybrid_page_state_location(word) ==
+               CXL_HYBRID_PAGE_LOCATION_CXL;
+    }
+    if (kind == CXL_HYBRID_PAGE_STATE_IN_FLIGHT) {
+        return cxl_hybrid_page_state_owner(word) ==
+               CXL_HYBRID_PAGE_OWNER_CXL;
+    }
+
+    return false;
+}
+
+bool cxl_hybrid_control_cxl_remap_span(const CXLHybridControlHeader *hdr,
+                                       const uint64_t *page_state,
+                                       uint64_t fault_page,
+                                       uint32_t generation,
+                                       uint32_t max_pages,
+                                       CXLHybridRemapSpan *span)
+{
+    uint64_t total_pages;
+
+    if (!hdr || !page_state || !span ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_in_range(hdr, fault_page) ||
+        fault_page >= hdr->page_state_words) {
+        return false;
+    }
+
+    total_pages = MIN(hdr->total_pages, (uint64_t)hdr->page_state_words);
+    return cxl_hybrid_page_state_longest_cxl_span(
+        page_state, total_pages, fault_page, generation, max_pages, span);
+}
+
+bool cxl_hybrid_fault_place_result_satisfied(int ret, bool received)
+{
+    return ret == 0 || (ret == -EEXIST && received);
+}
+
+bool cxl_hybrid_cleanup_place_result_satisfied(int ret, bool received,
+                                               bool remapped)
+{
+    return cxl_hybrid_fault_place_result_satisfied(ret, received) ||
+           (ret == -ENOENT && (received || remapped));
+}
+
+CXLHybridCleanupInstallAction cxl_hybrid_cleanup_install_action(bool received,
+                                                                bool remapped)
+{
+    if (received) {
+        return CXL_HYBRID_CLEANUP_INSTALL_SKIP;
+    }
+    if (remapped) {
+        return CXL_HYBRID_CLEANUP_INSTALL_MARK_RECEIVED;
+    }
+    return CXL_HYBRID_CLEANUP_INSTALL_COPY;
+}
+
 bool cxl_hybrid_control_region_visible(const CXLHybridControlHeader *hdr,
                                        const unsigned long *visible_bitmap,
                                        const unsigned long *visible_region_bitmap,
@@ -370,22 +546,157 @@ void cxl_hybrid_control_mark_page_visible(const CXLHybridControlHeader *hdr,
 void cxl_hybrid_control_mark_page_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
+    uint64_t *page_state,
     uint64_t page_index,
-    uint32_t generation)
+    uint32_t generation,
+    CXLHybridPageLocation location)
 {
     if (!cxl_hybrid_control_generation_matches(hdr, generation)) {
         return;
     }
 
-    cxl_hybrid_control_mark_page_visible(hdr, visible_bitmap, page_index);
+    if (!visible_bitmap ||
+        !cxl_hybrid_control_page_in_range(hdr, page_index)) {
+        return;
+    }
+
+    if (page_state && page_index < hdr->page_state_words) {
+        smp_mb_release();
+        qatomic_set(&page_state[page_index],
+                    cxl_hybrid_page_state_make_published(generation,
+                                                         location, 0));
+    } else {
+        smp_mb_release();
+    }
+    set_bit_atomic(page_index, visible_bitmap);
+}
+
+bool cxl_hybrid_control_complete_cxl_page_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    const CXLHybridPageClaim *claim)
+{
+    if (!visible_bitmap || !page_state || !claim ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_in_range(hdr, page_index) ||
+        page_index >= hdr->page_state_words) {
+        return false;
+    }
+
+    if (!cxl_hybrid_page_state_complete_cxl(&page_state[page_index], claim)) {
+        return false;
+    }
+
+    /* The page-state CAS published CXL data; expose the visible bit after it. */
+    smp_mb_release();
+    set_bit_atomic(page_index, visible_bitmap);
+    return true;
+}
+
+bool cxl_hybrid_control_complete_rdma_page_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    const CXLHybridPageClaim *claim)
+{
+    if (!visible_bitmap || !page_state || !claim ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_in_range(hdr, page_index) ||
+        page_index >= hdr->page_state_words) {
+        return false;
+    }
+
+    if (!cxl_hybrid_page_state_complete_rdma(&page_state[page_index], claim)) {
+        return false;
+    }
+
+    smp_mb_release();
+    set_bit_atomic(page_index, visible_bitmap);
+    return true;
+}
+
+void cxl_hybrid_control_complete_rdma_pages_for_test(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t total_pages,
+    CXLHybridRDMAPageDescriptor *desc,
+    uint32_t *completedp,
+    uint32_t *stalep)
+{
+    uint32_t limit;
+
+    if (!hdr || !visible_bitmap || !page_state ||
+        !desc || desc->first_page >= total_pages) {
+        return;
+    }
+
+    limit = MIN(desc->nr_pages, total_pages - desc->first_page);
+    for (uint32_t i = 0; i < limit; i++) {
+        if (!cxl_hybrid_rdma_descriptor_page_claimed(desc, i)) {
+            continue;
+        }
+        if (cxl_hybrid_control_complete_rdma_page_visible_generation(
+                hdr, visible_bitmap, page_state,
+                desc->first_page + i, desc->generation, &desc->claims[i])) {
+            if (desc->completed_bmap) {
+                set_bit(i, desc->completed_bmap);
+            }
+            desc->completed_pages++;
+            if (completedp) {
+                (*completedp)++;
+            }
+        } else {
+            if (desc->stale_bmap) {
+                set_bit(i, desc->stale_bmap);
+            }
+            desc->stale_pages++;
+            if (stalep) {
+                (*stalep)++;
+            }
+        }
+        clear_bit(i, desc->claimed_bmap);
+    }
+}
+
+bool cxl_hybrid_control_complete_zero_page_visible_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    const CXLHybridPageClaim *claim)
+{
+    if (!visible_bitmap || !page_state || !claim ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_in_range(hdr, page_index) ||
+        page_index >= hdr->page_state_words) {
+        return false;
+    }
+
+    if (!cxl_hybrid_page_state_complete_zero(&page_state[page_index],
+                                             claim)) {
+        return false;
+    }
+
+    smp_mb_release();
+    set_bit_atomic(page_index, visible_bitmap);
+    return true;
 }
 
 void cxl_hybrid_control_mark_pages_visible_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
+    uint64_t *page_state,
     uint64_t first_page,
     uint64_t nr_pages,
-    uint32_t generation)
+    uint32_t generation,
+    CXLHybridPageLocation location)
 {
     if (!visible_bitmap || !nr_pages ||
         nr_pages > LONG_MAX ||
@@ -396,9 +707,10 @@ void cxl_hybrid_control_mark_pages_visible_generation(
         return;
     }
 
-    /* Publish page data before making the visibility range observable. */
-    smp_mb_release();
-    bitmap_set_atomic(visible_bitmap, first_page, nr_pages);
+    for (uint64_t page = first_page; page < first_page + nr_pages; page++) {
+        cxl_hybrid_control_mark_page_visible_generation(
+            hdr, visible_bitmap, page_state, page, generation, location);
+    }
 }
 
 void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
@@ -411,6 +723,67 @@ void cxl_hybrid_control_clear_page_visible(const CXLHybridControlHeader *hdr,
     }
 
     clear_bit_atomic(page_index, visible_bitmap);
+}
+
+void cxl_hybrid_control_mark_page_dirty_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    uint64_t page_index,
+    uint32_t generation,
+    uint32_t dirty_seq)
+{
+    if (!visible_bitmap || !page_state ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        !cxl_hybrid_control_page_in_range(hdr, page_index) ||
+        page_index >= hdr->page_state_words) {
+        return;
+    }
+
+    clear_bit_atomic(page_index, visible_bitmap);
+    cxl_hybrid_page_state_mark_dirty(&page_state[page_index], generation,
+                                     dirty_seq);
+}
+
+uint64_t cxl_hybrid_control_mark_dirty_pages_generation(
+    const CXLHybridControlHeader *hdr,
+    unsigned long *visible_bitmap,
+    uint64_t *page_state,
+    const unsigned long *dirty_bitmap,
+    uint64_t dirty_first_page,
+    uint64_t state_first_page,
+    uint64_t nr_pages,
+    uint32_t generation,
+    uint32_t dirty_seq)
+{
+    uint64_t marked = 0;
+
+    if (!visible_bitmap || !page_state || !dirty_bitmap || !nr_pages ||
+        dirty_first_page > LONG_MAX ||
+        state_first_page > LONG_MAX ||
+        nr_pages > LONG_MAX ||
+        dirty_first_page > (uint64_t)LONG_MAX - (nr_pages - 1) ||
+        state_first_page > (uint64_t)LONG_MAX - (nr_pages - 1) ||
+        dirty_first_page + nr_pages < dirty_first_page ||
+        state_first_page + nr_pages < state_first_page ||
+        !cxl_hybrid_control_generation_matches(hdr, generation) ||
+        state_first_page >= hdr->total_pages ||
+        nr_pages > hdr->total_pages - state_first_page ||
+        state_first_page + nr_pages > hdr->page_state_words) {
+        return 0;
+    }
+
+    for (uint64_t i = 0; i < nr_pages; i++) {
+        if (!test_bit(dirty_first_page + i, dirty_bitmap)) {
+            continue;
+        }
+        cxl_hybrid_control_mark_page_dirty_generation(
+            hdr, visible_bitmap, page_state, state_first_page + i,
+            generation, dirty_seq);
+        marked++;
+    }
+
+    return marked;
 }
 
 void cxl_hybrid_control_mark_region_visible(const CXLHybridControlHeader *hdr,
@@ -466,9 +839,11 @@ bool cxl_hybrid_control_mark_visible_region_span_generation(
     const CXLHybridControlHeader *hdr,
     unsigned long *visible_bitmap,
     unsigned long *visible_region_bitmap,
+    uint64_t *page_state,
     uint64_t first_page,
     uint32_t nr_pages,
-    uint32_t generation)
+    uint32_t generation,
+    CXLHybridPageLocation location)
 {
     uint64_t region_index = UINT64_MAX;
 
@@ -480,7 +855,8 @@ bool cxl_hybrid_control_mark_visible_region_span_generation(
     }
 
     cxl_hybrid_control_mark_pages_visible_generation(
-        hdr, visible_bitmap, first_page, nr_pages, generation);
+        hdr, visible_bitmap, page_state, first_page, nr_pages, generation,
+        location);
     cxl_hybrid_control_mark_region_visible(hdr, visible_region_bitmap,
                                            region_index);
     return true;
@@ -489,6 +865,8 @@ bool cxl_hybrid_control_mark_visible_region_span_generation(
 void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
                                         unsigned long *visible_bitmap,
                                         uint64_t visible_pages,
+                                        uint64_t *page_state,
+                                        uint64_t page_state_words,
                                         unsigned long *visible_region_bitmap,
                                         uint64_t visible_regions,
                                         unsigned long *owned_region_bitmap,
@@ -509,6 +887,8 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
     hdr->completed_generation = 0;
     hdr->completion_flags = 0;
     hdr->visible_page_words = BITS_TO_LONGS(visible_pages);
+    hdr->page_state_words = page_state_words;
+    hdr->page_state_word_size = sizeof(uint64_t);
     hdr->visible_region_words = BITS_TO_LONGS(visible_regions);
     hdr->owned_region_words = BITS_TO_LONGS(total_regions);
     hdr->region_granule_shift =
@@ -521,6 +901,12 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
     if (visible_bitmap && hdr->visible_page_words) {
         memset(visible_bitmap, 0,
                (size_t)hdr->visible_page_words * sizeof(*visible_bitmap));
+    }
+    if (page_state) {
+        for (uint64_t page = 0; page < page_state_words; page++) {
+            page_state[page] =
+                cxl_hybrid_page_state_make_not_sent(generation);
+        }
     }
     if (visible_region_bitmap && hdr->visible_region_words) {
         memset(visible_region_bitmap, 0,
@@ -537,8 +923,8 @@ void cxl_hybrid_control_reset_run_state(CXLHybridControlHeader *hdr,
 void cxl_hybrid_control_reset_header_for_run(CXLHybridControlHeader *hdr,
                                              uint32_t generation)
 {
-    cxl_hybrid_control_reset_run_state(hdr, NULL, 0, NULL, 0, NULL, 0, 0, 0,
-                                       generation);
+    cxl_hybrid_control_reset_run_state(hdr, NULL, 0, NULL, 0, NULL, 0, NULL,
+                                       0, 0, 0, generation);
 }
 
 bool cxl_hybrid_control_region_owned(const CXLHybridControlHeader *hdr,

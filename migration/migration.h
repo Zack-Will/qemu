@@ -83,6 +83,22 @@ typedef struct {
     bool all_zero;
 } PostcopyTmpPage;
 
+typedef enum CXLGuestTimelineEvent {
+    CXL_GUEST_TIMELINE_EVENT_MIGRATE_START = 1,
+    CXL_GUEST_TIMELINE_EVENT_POSTCOPY_START = 2,
+    CXL_GUEST_TIMELINE_EVENT_DOWNTIME_END = 3,
+    CXL_GUEST_TIMELINE_EVENT_DST_STARTED_ACK = 4,
+    CXL_GUEST_TIMELINE_EVENT_COMPLETED = 5,
+    CXL_GUEST_TIMELINE_EVENT_DST_STARTED = 6,
+    CXL_GUEST_TIMELINE_EVENT_ENTER_BRAKE = 7,
+    CXL_GUEST_TIMELINE_EVENT_REQUEST_POSTCOPY = 8,
+    CXL_GUEST_TIMELINE_EVENT_POSTCOPY_ACTIVE = 9,
+    CXL_GUEST_TIMELINE_EVENT_COMPLETION_ENTER = 10,
+} CXLGuestTimelineEvent;
+
+void cxl_guest_timeline_mark(const char *stage,
+                             CXLGuestTimelineEvent event);
+
 typedef enum {
     PREEMPT_THREAD_NONE = 0,
     PREEMPT_THREAD_CREATED,
@@ -130,6 +146,7 @@ struct MigrationIncomingState {
     /* To notify the fault_thread to wake, e.g., when need to quit */
     int       userfault_event_fd;
     QEMUFile *to_src_file;
+    bool           rp_shut_sent;
     QemuMutex rp_mutex;    /* We send replies from multiple threads */
     /* RAMBlock of last request sent to source */
     RAMBlock *last_rb;
@@ -258,6 +275,7 @@ struct MigrationIncomingState {
 };
 
 MigrationIncomingState *migration_incoming_get_current(void);
+void migration_incoming_send_rp_shut_once(MigrationIncomingState *mis);
 void migration_incoming_state_destroy(void);
 void migration_incoming_transport_cleanup(MigrationIncomingState *mis);
 void migration_incoming_qemu_exit(void);
@@ -390,6 +408,7 @@ struct MigrationState {
     bool start_postcopy;
     /* Flag set when start_postcopy was requested by hybrid policy */
     bool start_postcopy_auto;
+    bool cxl_hybrid_postcopy_device_pipeline_started;
     uint64_t cxl_hybrid_iteration;
     uint64_t cxl_hybrid_prev_remaining;
     int64_t cxl_hybrid_precopy_start_ms;
