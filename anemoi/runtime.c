@@ -192,6 +192,32 @@ static int anemoi_runtime_create_rdma_backend(AnemoiRuntime *runtime,
     return 0;
 }
 
+static int anemoi_runtime_create_cxl_backend(AnemoiRuntime *runtime,
+                                             const AnemoiCxlConfig *cfg,
+                                             Error **errp)
+{
+    AnemoiCxlConfig cxl_cfg = *cfg;
+
+    if (!cxl_cfg.vm_capacity) {
+        if (runtime->vmid == UINT32_MAX) {
+            error_setg(errp, "Anemoi vmid %u is too large for CXL backend",
+                       runtime->vmid);
+            return -1;
+        }
+        cxl_cfg.vm_capacity = runtime->vmid + 1;
+    }
+    if (!cxl_cfg.pages_per_vm) {
+        cxl_cfg.pages_per_vm = runtime->guest_pages;
+    }
+
+    runtime->backend = anemoi_pool_backend_new_cxl(&cxl_cfg, errp);
+    if (!runtime->backend) {
+        return -1;
+    }
+    runtime->backend_owned = true;
+    return 0;
+}
+
 static int anemoi_runtime_create_backend(AnemoiRuntime *runtime,
                                          const AnemoiRuntimeConfig *cfg,
                                          Error **errp)
@@ -205,6 +231,8 @@ static int anemoi_runtime_create_backend(AnemoiRuntime *runtime,
         return anemoi_runtime_create_default_backend(runtime, errp);
     case ANEMOI_RUNTIME_BACKEND_RDMA:
         return anemoi_runtime_create_rdma_backend(runtime, &cfg->rdma, errp);
+    case ANEMOI_RUNTIME_BACKEND_CXL:
+        return anemoi_runtime_create_cxl_backend(runtime, &cfg->cxl, errp);
     default:
         error_setg(errp, "unknown Anemoi backend kind %d",
                    cfg->backend_kind);

@@ -1,6 +1,8 @@
 system_ss.add(files(
   'backend.c',
   'cache.c',
+  'cxl.c',
+  'cxl-dax.c',
   'lm.c',
   'pool.c',
   'rmap.c',

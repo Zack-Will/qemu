@@ -37,6 +37,10 @@ static bool anemoi_parse_backend_kind(const char *backend,
         *kind = ANEMOI_RUNTIME_BACKEND_RDMA;
         return true;
     }
+    if (!g_strcmp0(backend, "cxl")) {
+        *kind = ANEMOI_RUNTIME_BACKEND_CXL;
+        return true;
+    }
 
     error_setg(errp, "unknown Anemoi backend '%s'", backend);
     return false;
@@ -286,6 +290,11 @@ static void anemoi_qmp_start_runtime(AnemoiRuntimeBootMode boot_mode,
                                      uint32_t rdma_vm_capacity,
                                      bool has_rdma_pages_per_vm,
                                      uint64_t rdma_pages_per_vm,
+                                     const char *cxl_dax_path,
+                                     bool has_cxl_map_sync,
+                                     bool cxl_map_sync,
+                                     bool has_cxl_numa_node,
+                                     int64_t cxl_numa_node,
                                      bool has_auto_pause, bool auto_pause,
                                      bool has_auto_resume, bool auto_resume,
                                      Error **errp)
@@ -311,9 +320,20 @@ static void anemoi_qmp_start_runtime(AnemoiRuntimeBootMode boot_mode,
         return;
     }
 
+    if (has_cxl_numa_node &&
+        (cxl_numa_node < INT_MIN || cxl_numa_node > INT_MAX)) {
+        error_setg(errp, "Anemoi CXL NUMA node is out of int range");
+        return;
+    }
+
     if (backend_kind == ANEMOI_RUNTIME_BACKEND_RDMA &&
         parsed_rdma_role == ANEMOI_RDMA_ROLE_CLIENT && !rdma_peer_host) {
         error_setg(errp, "Anemoi RDMA client backend requires rdma-peer-host");
+        return;
+    }
+
+    if (backend_kind == ANEMOI_RUNTIME_BACKEND_CXL && !cxl_dax_path) {
+        error_setg(errp, "Anemoi CXL backend requires cxl-dax-path");
         return;
     }
 
@@ -335,6 +355,11 @@ static void anemoi_qmp_start_runtime(AnemoiRuntimeBootMode boot_mode,
         .vm_capacity = has_rdma_vm_capacity ? rdma_vm_capacity : 0,
         .pages_per_vm = has_rdma_pages_per_vm ? rdma_pages_per_vm : 0,
     };
+    cfg.cxl = (AnemoiCxlConfig) {
+        .dax_path = cxl_dax_path,
+        .use_map_sync = has_cxl_map_sync ? cxl_map_sync : true,
+        .numa_node = has_cxl_numa_node ? (int)cxl_numa_node : -1,
+    };
 
     anemoi_global_runtime = anemoi_runtime_start(&cfg, errp);
 }
@@ -353,6 +378,9 @@ void qmp_x_anemoi_start(bool has_vmid, uint32_t vmid,
                         uint32_t rdma_vm_capacity,
                         bool has_rdma_pages_per_vm,
                         uint64_t rdma_pages_per_vm,
+                        const char *cxl_dax_path,
+                        bool has_cxl_map_sync, bool cxl_map_sync,
+                        bool has_cxl_numa_node, int64_t cxl_numa_node,
                         bool has_auto_pause, bool auto_pause,
                         bool has_auto_resume, bool auto_resume,
                         Error **errp)
@@ -366,6 +394,9 @@ void qmp_x_anemoi_start(bool has_vmid, uint32_t vmid,
                              has_rdma_gid_idx, rdma_gid_idx,
                              has_rdma_vm_capacity, rdma_vm_capacity,
                              has_rdma_pages_per_vm, rdma_pages_per_vm,
+                             cxl_dax_path,
+                             has_cxl_map_sync, cxl_map_sync,
+                             has_cxl_numa_node, cxl_numa_node,
                              has_auto_pause, auto_pause,
                              has_auto_resume, auto_resume, errp);
 }
@@ -386,6 +417,11 @@ void qmp_x_anemoi_prepare_incoming(bool has_vmid, uint32_t vmid,
                                    uint32_t rdma_vm_capacity,
                                    bool has_rdma_pages_per_vm,
                                    uint64_t rdma_pages_per_vm,
+                                   const char *cxl_dax_path,
+                                   bool has_cxl_map_sync,
+                                   bool cxl_map_sync,
+                                   bool has_cxl_numa_node,
+                                   int64_t cxl_numa_node,
                                    bool has_auto_pause, bool auto_pause,
                                    bool has_auto_resume, bool auto_resume,
                                    Error **errp)
@@ -399,6 +435,9 @@ void qmp_x_anemoi_prepare_incoming(bool has_vmid, uint32_t vmid,
                              has_rdma_gid_idx, rdma_gid_idx,
                              has_rdma_vm_capacity, rdma_vm_capacity,
                              has_rdma_pages_per_vm, rdma_pages_per_vm,
+                             cxl_dax_path,
+                             has_cxl_map_sync, cxl_map_sync,
+                             has_cxl_numa_node, cxl_numa_node,
                              has_auto_pause, auto_pause,
                              has_auto_resume, auto_resume, errp);
 }

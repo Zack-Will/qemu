@@ -7,6 +7,7 @@
 
 #include "anemoi/backend.h"
 #include "anemoi/cache.h"
+#include "anemoi/cxl.h"
 #include "anemoi/lm.h"
 #include "anemoi/rdma.h"
 #include "qapi/error.h"
@@ -16,6 +17,7 @@ typedef struct AnemoiRuntime AnemoiRuntime;
 typedef enum AnemoiRuntimeBackendKind {
     ANEMOI_RUNTIME_BACKEND_MEMORY = 0,
     ANEMOI_RUNTIME_BACKEND_RDMA,
+    ANEMOI_RUNTIME_BACKEND_CXL,
 } AnemoiRuntimeBackendKind;
 
 typedef enum AnemoiRuntimeBootMode {
@@ -28,6 +30,7 @@ typedef struct AnemoiRuntimeConfig {
     uint64_t local_cache_pages;
     AnemoiRuntimeBootMode boot_mode;
     AnemoiRuntimeBackendKind backend_kind;
+    AnemoiCxlConfig cxl;
     AnemoiRDMAConfig rdma;
     AnemoiBackend *backend;
     bool backend_owned;

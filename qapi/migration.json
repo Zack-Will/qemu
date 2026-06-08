@@ -617,7 +617,8 @@
 # @local-cache-pages: Local AnemoiCache capacity in 4 KiB pages.  0
 #     or absent means the whole guest RAM footprint.
 #
-# @backend: Fetch backend: 'memory' or 'rdma'.  Defaults to 'memory'.
+# @backend: Fetch backend: 'memory', 'rdma', or 'cxl'.  Defaults to
+#     'memory'.
 #
 # @rdma-role: Bootstrap role for the QEMU-side RDMA endpoint: 'client'
 #     or 'server'.  Defaults to 'client'.
@@ -638,6 +639,15 @@
 #
 # @rdma-pages-per-vm: Pages per VM slot in the remote pool.  Defaults
 #     to the discovered guest RAM page count.
+#
+# @cxl-dax-path: devdax device path for @backend='cxl', e.g.
+#     '/dev/dax0.1'.
+#
+# @cxl-map-sync: Map the devdax pool with MAP_SYNC when supported.
+#     Defaults to true.
+#
+# @cxl-numa-node: Expected devdax target NUMA node.  -1 or absent
+#     means auto/no check.
 #
 # @auto-pause: Pause the VM before seeding AnemoiM and registering
 #     userfaultfd.  Defaults to true.
@@ -663,6 +673,9 @@
             '*rdma-gid-idx': 'int',
             '*rdma-vm-capacity': 'uint32',
             '*rdma-pages-per-vm': 'uint64',
+            '*cxl-dax-path': 'str',
+            '*cxl-map-sync': 'bool',
+            '*cxl-numa-node': 'int',
             '*auto-pause': 'bool',
             '*auto-resume': 'bool' },
   'features': [ 'unstable' ] }
@@ -685,7 +698,7 @@
 # @local-cache-pages: Local AnemoiCache capacity in 4 KiB pages.
 #     0 or absent means the whole guest RAM footprint.
 #
-# @backend: Fetch backend: 'memory' or 'rdma'.  Defaults to
+# @backend: Fetch backend: 'memory', 'rdma', or 'cxl'.  Defaults to
 #     'memory'.
 #
 # @rdma-role: Bootstrap role for the QEMU-side RDMA endpoint:
@@ -708,6 +721,15 @@
 #
 # @rdma-pages-per-vm: Pages per VM slot in the remote pool.
 #     Defaults to the discovered guest RAM page count.
+#
+# @cxl-dax-path: devdax device path for @backend='cxl', e.g.
+#     '/dev/dax0.1'.
+#
+# @cxl-map-sync: Map the devdax pool with MAP_SYNC when supported.
+#     Defaults to true.
+#
+# @cxl-numa-node: Expected devdax target NUMA node.  -1 or absent
+#     means auto/no check.
 #
 # @auto-pause: Pause the VM before registering userfaultfd.
 #     Defaults to true.
@@ -733,6 +755,9 @@
             '*rdma-gid-idx': 'int',
             '*rdma-vm-capacity': 'uint32',
             '*rdma-pages-per-vm': 'uint64',
+            '*cxl-dax-path': 'str',
+            '*cxl-map-sync': 'bool',
+            '*cxl-numa-node': 'int',
             '*auto-pause': 'bool',
             '*auto-resume': 'bool' },
   'features': [ 'unstable' ] }
